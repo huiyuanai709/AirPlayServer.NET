@@ -789,11 +789,8 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
         }
 
         var header = new byte[8 + _sps!.Length + _pps!.Length];
-        header[3] = 1;
-        _sps.CopyTo(header.AsSpan(4));
-        header[8 + _sps.Length + 3] = 1;
-        _pps.CopyTo(header.AsSpan(8 + _sps.Length + 4));
-        if (Slots.SetBlob(type, SequenceHeader, header) < 0)
+        if (H264Sequence.WriteAnnexBParameterSets(_sps, _pps, header) < 0
+            || Slots.SetBlob(type, SequenceHeader, header) < 0)
         {
             Slots.Release(type);
             type = 0;

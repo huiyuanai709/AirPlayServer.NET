@@ -28,18 +28,27 @@ public sealed class H264AndMediaKeyTests
         Assert.True(H264Sequence.TryGetDimensions(BaselineAccessUnitSps, out width, out height));
         Assert.Equal(16, width);
         Assert.Equal(16, height);
+        Assert.True(H264Sequence.TryGetDimensions(MediaFoundationSps, out width, out height));
+        Assert.Equal(48, width);
+        Assert.Equal(48, height);
     }
 
-    // 16x16 baseline Annex-B: SPS, PPS, and one black IDR. The x264 user-data SEI is omitted.
+    // 16x16 baseline SPS/PPS. Useful for the parser; the Microsoft H.264 decoder rejects it (minimum 48x48).
     private static readonly byte[] BaselineAccessUnitSps = [0x67, 0x42, 0xC0, 0x0A, 0xDD, 0xEC, 0x04, 0x40, 0x00, 0x00, 0x03, 0x00, 0x40, 0x00, 0x00, 0x0F, 0x03, 0xC4, 0x89, 0xE0];
 
     private static readonly byte[] BaselineAccessUnitPps = [0x68, 0xCE, 0x0F, 0x2C, 0x80];
 
-    private static readonly byte[] BaselineAccessUnit =
+    // 48x48 constrained-baseline Annex-B: SPS, PPS, and one black IDR. The x264 user-data SEI is omitted.
+    // 48x48 is the smallest frame the Media Foundation H.264 decoder accepts.
+    private static readonly byte[] MediaFoundationSps = [0x67, 0x42, 0xC0, 0x0A, 0xD9, 0x0D, 0xEC, 0x04, 0x40, 0x00, 0x00, 0x03, 0x00, 0x40, 0x00, 0x00, 0x0F, 0x03, 0xC4, 0x89, 0x92];
+
+    private static readonly byte[] MediaFoundationPps = [0x68, 0xCB, 0x83, 0xCB, 0x20];
+
+    private static readonly byte[] MediaFoundationAccessUnit =
     [
-        0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xC0, 0x0A, 0xDD, 0xEC, 0x04, 0x40, 0x00, 0x00, 0x03, 0x00, 0x40, 0x00, 0x00, 0x0F, 0x03, 0xC4, 0x89, 0xE0,
-        0x00, 0x00, 0x00, 0x01, 0x68, 0xCE, 0x0F, 0x2C, 0x80,
-        0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x04, 0xBC, 0x98, 0xA0, 0x00, 0x38, 0xA3, 0x80,
+        0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xC0, 0x0A, 0xD9, 0x0D, 0xEC, 0x04, 0x40, 0x00, 0x00, 0x03, 0x00, 0x40, 0x00, 0x00, 0x0F, 0x03, 0xC4, 0x89, 0x92,
+        0x00, 0x00, 0x00, 0x01, 0x68, 0xCB, 0x83, 0xCB, 0x20,
+        0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x09, 0xF2, 0x62, 0x80, 0x00, 0xA1, 0x6C, 0x9C, 0x9D, 0x75, 0xD7, 0x5D, 0x75, 0xE0,
     ];
 
     [Fact]
@@ -50,6 +59,20 @@ public sealed class H264AndMediaKeyTests
         Assert.Equal(6, written);
         Assert.Equal(new byte[] { 0x67, 0x00, 0x00, 0x01, 0x00, 0x00 }, destination[..written]);
         Assert.Equal(-1, H264Sequence.RemoveEmulationPrevention([1, 2, 3], new byte[2]));
+    }
+
+    [Fact]
+    public void Annex_b_parameter_sets_prefix_both_nals_with_start_codes()
+    {
+        var needed = 8 + BaselineAccessUnitSps.Length + BaselineAccessUnitPps.Length;
+        var header = new byte[needed];
+        Assert.Equal(needed, H264Sequence.WriteAnnexBParameterSets(BaselineAccessUnitSps, BaselineAccessUnitPps, header));
+        Assert.Equal(new byte[] { 0, 0, 0, 1 }, header[..4]);
+        Assert.Equal(BaselineAccessUnitSps, header.AsSpan(4, BaselineAccessUnitSps.Length).ToArray());
+        var picture = 8 + BaselineAccessUnitSps.Length;
+        Assert.Equal(new byte[] { 0, 0, 0, 1 }, header.AsSpan(picture - 4, 4).ToArray());
+        Assert.Equal(BaselineAccessUnitPps, header.AsSpan(picture).ToArray());
+        Assert.Equal(-1, H264Sequence.WriteAnnexBParameterSets(BaselineAccessUnitSps, BaselineAccessUnitPps, new byte[needed - 1]));
     }
 
     [Fact]
@@ -66,15 +89,15 @@ public sealed class H264AndMediaKeyTests
 
         Assert.StartsWith("media-foundation", decoder.Name, StringComparison.Ordinal);
         Assert.True(decoder.IsAvailable);
-        Assert.True(H264Sequence.TryGetDimensions(BaselineAccessUnitSps, out var parsedWidth, out var parsedHeight));
-        Assert.Equal(16, parsedWidth);
-        Assert.Equal(16, parsedHeight);
-        decoder.Configure(BaselineAccessUnitSps, BaselineAccessUnitPps);
-        Assert.True(decoder.TryDecode(BaselineAccessUnit, true, out var frame));
+        Assert.True(H264Sequence.TryGetDimensions(MediaFoundationSps, out var parsedWidth, out var parsedHeight));
+        Assert.Equal(48, parsedWidth);
+        Assert.Equal(48, parsedHeight);
+        decoder.Configure(MediaFoundationSps, MediaFoundationPps);
+        Assert.True(decoder.TryDecode(MediaFoundationAccessUnit, true, out var frame));
         Assert.True(H264Decoders.NegotiatedOutput(decoder));
-        Assert.Equal(16, frame.Width);
-        Assert.Equal(16, frame.Height);
-        Assert.Equal(16 * 16 * 4, frame.Bgra.Length);
+        Assert.Equal(48, frame.Width);
+        Assert.Equal(48, frame.Height);
+        Assert.Equal(48 * 48 * 4, frame.Bgra.Length);
         Assert.Equal(255, frame.Bgra.Span[3]);
     }
 
@@ -356,7 +379,12 @@ public sealed class H264AndMediaKeyTests
         var output = Path.Combine(directory, OperatingSystem.IsWindows() ? "airplay_plugin.dll" : "airplay_plugin.so");
         File.WriteAllText(source, """
             #include <stdint.h>
-            __attribute__((visibility("default")))
+            #if defined(_WIN32)
+            #define AIRPLAY_EXPORT __declspec(dllexport)
+            #else
+            #define AIRPLAY_EXPORT __attribute__((visibility("default")))
+            #endif
+            AIRPLAY_EXPORT
             int AirPlay_TryUnwrapContentKey(const uint8_t* wrapped, int wrappedLength, uint8_t* contentKey)
             {
                 if (!wrapped || !contentKey || wrappedLength < 16) return 0;
@@ -364,7 +392,7 @@ public sealed class H264AndMediaKeyTests
                 for (int i = 0; i < 16; i++) contentKey[i] = src[i];
                 return 1;
             }
-            __attribute__((visibility("default")))
+            AIRPLAY_EXPORT
             int AirPlay_FairPlaySetup(const uint8_t* request, int requestLength, uint8_t* response, int responseCapacity, int* written)
             {
                 (void)request;
@@ -382,7 +410,11 @@ public sealed class H264AndMediaKeyTests
             UseShellExecute = false,
         };
         start.ArgumentList.Add("-shared");
-        start.ArgumentList.Add("-fPIC");
+        // clang's x86_64-pc-windows-msvc target rejects -fPIC. PE DLLs do not use it.
+        if (!OperatingSystem.IsWindows())
+        {
+            start.ArgumentList.Add("-fPIC");
+        }
         start.ArgumentList.Add("-o");
         start.ArgumentList.Add(output);
         start.ArgumentList.Add(source);

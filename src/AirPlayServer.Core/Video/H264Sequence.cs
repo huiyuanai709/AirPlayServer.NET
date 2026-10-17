@@ -214,6 +214,34 @@ internal static class H264Sequence
         return written;
     }
 
+    /// <summary>
+    /// Writes SPS and PPS as Annex-B (each NAL prefixed by a 4-byte start code).
+    /// Returns the byte count, or -1 when <paramref name="destination"/> is shorter than that.
+    /// </summary>
+    internal static int WriteAnnexBParameterSets(ReadOnlySpan<byte> sequenceParameterSet, ReadOnlySpan<byte> pictureParameterSet, Span<byte> destination)
+    {
+        var needed = checked(8 + sequenceParameterSet.Length + pictureParameterSet.Length);
+        if (destination.Length < needed)
+        {
+            return -1;
+        }
+
+        WriteStartCode(destination);
+        sequenceParameterSet.CopyTo(destination[4..]);
+        var picture = 4 + sequenceParameterSet.Length;
+        WriteStartCode(destination[picture..]);
+        pictureParameterSet.CopyTo(destination[(picture + 4)..]);
+        return needed;
+    }
+
+    private static void WriteStartCode(Span<byte> destination)
+    {
+        destination[0] = 0;
+        destination[1] = 0;
+        destination[2] = 0;
+        destination[3] = 1;
+    }
+
     private static bool SkipScalingList(ref BitReader reader, int size)
     {
         var lastScale = 8;

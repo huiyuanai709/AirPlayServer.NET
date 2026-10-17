@@ -13,14 +13,16 @@ internal sealed class ControlRouter
     private readonly bool _discoveryEnabled;
     private readonly IAirPlayLog _log;
     private readonly MirrorRuntime _mirror;
+    private readonly IFairPlaySetup? _fairPlay;
 
-    public ControlRouter(ReceiverAdvertisement advertisement, ReadOnlySpan<byte> publicKey, bool discoveryEnabled, IAirPlayLog log, MirrorRuntime mirror)
+    public ControlRouter(ReceiverAdvertisement advertisement, ReadOnlySpan<byte> publicKey, bool discoveryEnabled, IAirPlayLog log, MirrorRuntime mirror, IFairPlaySetup? fairPlay = null)
     {
         _advertisement = advertisement;
         _publicKey = publicKey.ToArray();
         _discoveryEnabled = discoveryEnabled;
         _log = log;
         _mirror = mirror;
+        _fairPlay = fairPlay;
     }
 
     public Http1Response Dispatch(Http1Request request, PairingSession session, EndPoint? remote = null)
@@ -110,6 +112,15 @@ internal sealed class ControlRouter
 
         if (Is(request, "POST", "/fp-setup"))
         {
+            if (_fairPlay is not null)
+            {
+                var buffer = new byte[4096];
+                if (_fairPlay.TryRespond(request.Body, buffer, out var written) && written is > 0 and <= 4096)
+                {
+                    return Http1Response.Bytes(200, "application/octet-stream", buffer[..written]);
+                }
+            }
+
             return NotImplemented("FairPlay setup is not implemented.");
         }
 

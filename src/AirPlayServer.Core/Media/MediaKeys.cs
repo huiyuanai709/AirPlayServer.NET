@@ -12,7 +12,20 @@ namespace AirPlayServer.Core.Media;
 /// </summary>
 public interface IMediaKeyUnwrapper
 {
+    /// <summary>
+    /// Unwrap a 72-byte FairPlay ekey into 16 content-key bytes.
+    /// Return false to keep encrypted frames dropped. Do not call PlayFair from here.
+    /// </summary>
     bool TryUnwrap(ReadOnlySpan<byte> wrappedKey, Span<byte> contentKey);
+}
+
+/// <summary>
+/// Optional answer for <c>POST /fp-setup</c>. Return false, or write nothing, and the
+/// control server stays on HTTP 501. This process does not implement FairPlay.
+/// </summary>
+public interface IFairPlaySetup
+{
+    bool TryRespond(ReadOnlySpan<byte> request, Span<byte> response, out int written);
 }
 
 internal sealed class UnavailableMediaKeyUnwrapper : IMediaKeyUnwrapper

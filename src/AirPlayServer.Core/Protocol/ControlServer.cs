@@ -49,12 +49,13 @@ internal sealed class ControlServer : IAsyncDisposable
         bool discoveryEnabled,
         IAirPlayLog log,
         MirrorRuntime mirror,
-        int maxConnections)
+        int maxConnections,
+        IFairPlaySetup? fairPlay = null)
     {
         var server = new ControlServer(
             airPlay,
             raop,
-            new ControlRouter(advertisement, identity.PublicKey.Span, discoveryEnabled, log, mirror),
+            new ControlRouter(advertisement, identity.PublicKey.Span, discoveryEnabled, log, mirror, fairPlay),
             identity,
             log,
             maxConnections);

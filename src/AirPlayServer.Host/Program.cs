@@ -77,7 +77,12 @@ await using (receiver)
         Console.WriteLine("TapClock: 未启用。需要 --tapclock host:42125 或 --tapclock-dir。");
     }
 
-    Console.WriteLine("FairPlay 未实现。没有 16 字节内容密钥时，加密画面会被丢弃，不会当成手机屏幕。");
+    var keyed = arguments.Options.LabContentKey is not null
+        || arguments.Options.MediaKeyUnwrapper is not null
+        || !string.IsNullOrWhiteSpace(arguments.Options.MediaKeyPluginPath);
+    Console.WriteLine(keyed
+        ? "内容密钥：已配置实验密钥或媒体密钥插件。仓库里仍然没有 FairPlay，72 字节 ekey 没有插件时会丢掉。"
+        : "FairPlay 未实现。没有 16 字节内容密钥或媒体密钥插件时，加密画面会被丢弃，不会当成手机屏幕。");
     Console.WriteLine("H.264 解码器: " + receiver.Mirror.DecoderName + "。点击仍由 TapClock 走 TCP 42123，坐标是板上的 HID 计数。");
     Console.WriteLine("按 Ctrl+C 停止。");
     try
@@ -107,7 +112,7 @@ internal sealed class Args
           AirPlayServer.Host [--name 名称] [--listen 0.0.0.0] [--airplay-port 7001] [--raop-port 5001]
                              [--screen 480x1040] [--no-discovery] [--no-window] [--demo-frame]
                              [--tapclock 主机:42125] [--tapclock-dir 目录] [--tapclock-fps 2]
-                             [--lab-key 32位十六进制] [--seed 64位十六进制]
+                             [--lab-key 32位十六进制] [--media-key-plugin 路径] [--seed 64位十六进制]
           AirPlayServer.Host --self-check
           AirPlayServer.Host --help
 
@@ -117,7 +122,10 @@ internal sealed class Args
                          用来对齐 AssistiveTouch 的 HID 校准。这不是 Windows 窗口里的点击坐标。
         --tapclock       把最新解码帧按 ATBF type 3 JPEG 推到 host:42125。不发送 H.264。
         --tapclock-dir   备用：把 mirror.jpg.part 写完后改名为 mirror.jpg。
-        --lab-key        实验用 16 字节内容密钥。不是 FairPlay 解包，也不会实现 /fp-setup。
+        --lab-key        实验用 16 字节内容密钥。不是 FairPlay。有它，并且 pair-verify 已完成时，加密的 type 0 会解密。
+        --media-key-plugin
+                         本地 DLL 或 .so。导出 AirPlay_TryUnwrapContentKey，可选 AirPlay_FairPlaySetup。
+                         没有 FairPlay 导出时 /fp-setup 仍是 501。不要把 GPL PlayFair 放进这个仓库。
         --demo-frame     推送一张合成画面，用来检查窗口和 TapClock。那不是手机屏幕。
         点击不在本进程发送。TapClock 的点击仍走 TCP 42123（ATB/1）。
         """;
@@ -185,6 +193,9 @@ internal sealed class Args
                     break;
                 case "--lab-key":
                     options.LabContentKey = Convert.FromHexString(Next(args, ref i, token));
+                    break;
+                case "--media-key-plugin":
+                    options.MediaKeyPluginPath = Next(args, ref i, token);
                     break;
                 default:
                     throw new ArgumentException("Unknown argument: " + token);

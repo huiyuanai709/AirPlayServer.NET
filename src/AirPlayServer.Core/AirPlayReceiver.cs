@@ -17,6 +17,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
     private readonly MirrorRuntime _mirror;
     private readonly TapClockExporter? _tapClock;
     private readonly IAsyncDisposable? _window;
+    private readonly NativeMediaKeyModule? _plugin;
     private readonly int _displayWidth;
     private readonly int _displayHeight;
     private int _disposed;
@@ -28,6 +29,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         MirrorRuntime mirror,
         TapClockExporter? tapClock,
         IAsyncDisposable? window,
+        NativeMediaKeyModule? plugin,
         FrameSlot frames,
         string deviceId,
         string name,
@@ -41,6 +43,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         _mirror = mirror;
         _tapClock = tapClock;
         _window = window;
+        _plugin = plugin;
         Frames = frames;
         DeviceId = deviceId;
         Name = name;
@@ -84,6 +87,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         MirrorRuntime? mirror = null;
         TapClockExporter? tapClock = null;
         IAsyncDisposable? window = null;
+        NativeMediaKeyModule? plugin = null;
         try
         {
             airPlay = ControlServer.Bind(options.ListenAddress, options.AirPlayPort);
@@ -109,14 +113,24 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 MaxFramesPerSecond = options.MaxFramesPerSecond,
             };
             var frames = new FrameSlot();
-            var decoder = options.Decoder ?? new UnavailableH264Decoder();
+            var decoder = options.Decoder ?? H264Decoders.CreatePlatformDefault(log);
+            if (!string.IsNullOrWhiteSpace(options.MediaKeyPluginPath))
+            {
+                if (!NativeMediaKeyModule.TryLoad(options.MediaKeyPluginPath, out plugin, out var pluginError))
+                {
+                    throw new IOException(pluginError);
+                }
+            }
+
+            var unwrapper = options.MediaKeyUnwrapper ?? (plugin is { HasUnwrap: true } ? plugin : null);
+            var fairPlay = options.FairPlaySetup ?? (plugin is { HasFairPlay: true } ? plugin : null);
             ReadOnlySpan<byte> labKey = options.LabContentKey is null ? [] : options.LabContentKey;
             mirror = MirrorRuntime.Start(
                 options.ListenAddress,
                 raopPort,
                 frames,
                 decoder,
-                options.MediaKeyUnwrapper,
+                unwrapper,
                 labKey,
                 log);
             if (options.PublishDemoFrame)
@@ -147,7 +161,8 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 options.EnableDiscovery,
                 log,
                 mirror,
-                options.MaxConnections);
+                options.MaxConnections,
+                fairPlay);
             airPlay = null;
             raop = null;
             MdnsAnnouncer? announcer = null;
@@ -165,6 +180,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 mirror,
                 tapClock,
                 window,
+                plugin,
                 frames,
                 advertisement.DeviceId,
                 instance,
@@ -174,6 +190,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
             mirror = null;
             tapClock = null;
             window = null;
+            plugin = null;
             return receiver;
         }
         catch
@@ -203,6 +220,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 await mirror.DisposeAsync().ConfigureAwait(false);
             }
 
+            plugin?.Dispose();
             identity.Dispose();
             throw;
         }
@@ -230,6 +248,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
 
         await _mirror.DisposeAsync().ConfigureAwait(false);
         await _control.DisposeAsync().ConfigureAwait(false);
+        _plugin?.Dispose();
         if (_announcer is not null)
         {
             await _announcer.DisposeAsync().ConfigureAwait(false);

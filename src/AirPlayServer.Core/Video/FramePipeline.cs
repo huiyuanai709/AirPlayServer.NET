@@ -118,9 +118,8 @@ public sealed class FrameSlot
 /// <summary>
 /// H.264 access-unit decoder. The mirror pipeline converts AVCC length prefixes to
 /// Annex-B before calling <see cref="TryDecode"/>. A key frame may be prefixed with
-/// the cached SPS and PPS. This repository does not link a software or Media
-/// Foundation decoder; the host uses <see cref="UnavailableH264Decoder"/> unless
-/// the process supplies its own implementation.
+/// the cached SPS and PPS. Windows uses Media Foundation. Other platforms keep
+/// <see cref="UnavailableH264Decoder"/> unless the process supplies its own decoder.
 /// </summary>
 public interface IH264Decoder
 {

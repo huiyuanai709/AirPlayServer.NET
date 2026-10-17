@@ -122,6 +122,11 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         }
 
         _decryptor.Dispose();
+        if (_decoder is IDisposable disposable)
+        {
+            disposable.Dispose();
+        }
+
         _cancellation.Dispose();
     }
 
@@ -283,7 +288,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             }
             else
             {
-                _log.Log(AirPlayLogLevel.Warning, "FairPlay ekey (72 bytes) was not unwrapped. Encrypted mirror frames will be dropped. POST /fp-setup stays unimplemented. Supply a 16-byte lab content key or an IMediaKeyUnwrapper; PlayFair is not included.");
+                _log.Log(AirPlayLogLevel.Warning, "FairPlay ekey (72 bytes) was not unwrapped. Encrypted mirror frames will be dropped. POST /fp-setup stays 501 unless an IFairPlaySetup or media-key plugin answers it. Supply a 16-byte lab content key or an IMediaKeyUnwrapper; PlayFair is not included.");
             }
         }
         else if (ekey.Length > 0)

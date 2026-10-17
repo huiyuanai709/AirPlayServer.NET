@@ -1,6 +1,6 @@
 # AirPlayServer.NET
 
-把 [xenos1337/AirPlayServer](https://github.com/xenos1337/AirPlayServer)（MIT，Windows C/C++ AirPlay 接收端）的接收路径，用 .NET 11 Native AOT 重新实现。当前切片包含发现、瞬时配对、屏幕镜像的 RTSP/TCP 骨架、Windows 最新帧窗口，以及给 [TapClock](https://github.com/huiyuanai709/TapClock/blob/main/docs/airplay.md) 的 JPEG 画面输出。FairPlay 媒体密钥和 H.264 解码器仍然没有接上：没有内容密钥时，加密画面会被丢掉，不会当成手机屏幕显示。
+把 [xenos1337/AirPlayServer](https://github.com/xenos1337/AirPlayServer)（MIT，Windows C/C++ AirPlay 接收端）的接收路径，用 .NET 11 Native AOT 重新实现。当前切片包含发现、瞬时配对、屏幕镜像的 RTSP/TCP 路径、Windows Media Foundation H.264 解码、最新帧窗口，以及给 [TapClock](https://github.com/huiyuanai709/TapClock/blob/main/docs/airplay.md) 的 JPEG 画面输出。FairPlay 仍然故意不实现：没有 16 字节内容密钥时，加密画面会被丢掉，不会当成手机屏幕显示。
 
 This is an independent .NET port of the receive path, not a copy of the upstream C/C++ tree. Upstream binaries, FFmpeg, PlayFair, libplist, SDL, and the vendored Bonjour sources are not included. See [NOTICE.md](NOTICE.md).
 
@@ -15,8 +15,8 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 - `POST /reverse` 回答 `101 Switching Protocols`（`PTTH/1.0`），连接先挂住，事件还不解析。
 - `ANNOUNCE`、镜像 `SETUP`（会话 + type 110）、`RECORD`、`GET_PARAMETER`（volume）、`SET_PARAMETER`、`PAUSE`、`FLUSH`、`TEARDOWN` 已接通。音频 type 96 仍返回 501。
 - 镜像画面走 TCP，不是 UDP RTP。每个包是 128 字节小端头加负载。Type 0 是 AES-128-CTR 的 AVCC；type 1 是明文 SPS/PPS 和几何信息。
-- `POST /fp-setup`、`/pair-setup-pin`、`/play` 仍返回 501。72 字节 FairPlay `ekey` 解不开时，SETUP 仍然 200，随后的加密包只计数、不解码。
-- Windows 上可以用 GDI 窗口显示最新一帧 BGRA。Linux 上这个窗口不创建，代码也不进 linux-x64 的 AOT 二进制。
+- `POST /fp-setup` 在没有 `IFairPlaySetup` 或插件导出时仍返回 501。`/pair-setup-pin`、`/play` 仍返回 501。72 字节 FairPlay `ekey` 解不开时，SETUP 仍然 200，随后的加密包只计数、不解码。
+- Windows 上用 Media Foundation 把 H.264 解成 BGRA，GDI 窗口显示最新一帧。Linux 上不创建窗口，也不把 `mfplat` / `user32` 编进 linux-x64 的 AOT 二进制。没有解码器时可以用 `--demo-frame`。
 - 可选地把最新帧编码成 JPEG，按 TapClock ATBF type 3 推到 `host:42125`，或原子写入监视目录。默认关闭。
 
 ## 架构
@@ -38,7 +38,8 @@ mDNS announcer                         control listeners :7001 and :5001
                     |                         +-- Windows GDI window
                     |                         +-- ATBF type 3 JPEG -> TapClock :42125
                     |                         +-- mirror.jpg.part -> mirror.jpg
-                    +-- unavailable until a decoder is supplied
+                    +-- Windows: Media Foundation H.264 -> BGRA
+                    +-- other OS: unavailable unless a decoder is supplied
 ```
 
 | 项目 | 职责 |
@@ -88,10 +89,10 @@ Windows（需要 Visual Studio 的 C++ 生成工具，AOT 用它做链接）：
 | `dnssd` 注册 `_airplay._tcp` / `_raop._tcp` | 已实现：自带 IPv4 mDNS 通告和查询应答。没有探测冲突，也没有 IPv6。 |
 | `pairing.c` 瞬时 pair-setup / pair-verify | 已实现。Ed25519 标量乘法还不是常数时间。 |
 | `pinpair.c` 的 SRP PIN | 未实现。`/pair-setup-pin` 返回 501。 |
-| `fairplay_playfair.c` / `POST /fp-setup` | **故意不做。** PlayFair 是 GPL-3.0，不放进这个进程。见下面的媒体密钥。 |
+| `fairplay_playfair.c` / `POST /fp-setup` | **故意不做。** PlayFair 是 GPL-3.0，不放进这个进程。没有插件时 `/fp-setup` 仍是 501。见下面的媒体密钥。 |
 | `raop_rtp_mirror.c` 的镜像数据 | 已实现骨架：TCP 128 字节头、type 0/1、UDP 计时探测。不是经典 UDP 视频 RTP。 |
 | `raop_rtp.c` 音频 | 未实现。type 96 的 SETUP 返回 501。 |
-| FFmpeg H.264 / AAC-ELD、YUV、SDL、ImGui | 解码器是 `IH264Decoder`。默认实现不产出画面。Windows 只显示已经解码的 BGRA，或 `--demo-frame` 的合成图。不链接 FFmpeg。 |
+| FFmpeg H.264 / AAC-ELD、YUV、SDL、ImGui | Windows 的 `IH264Decoder` 是 Media Foundation（能锁住输出缓冲的同步硬件变换优先，否则用系统自带的 H.264 软件解码器），输出 BGRA。其它平台默认不产出画面。不链接 FFmpeg。 |
 | `MirrorSimAdapter` JSONL | 未实现。TapClock 走 ATBF，不走这条。 |
 | URL / HLS `/play` | 与上游一样不提供。这里直接 501。 |
 
@@ -99,19 +100,28 @@ Windows（需要 Visual Studio 的 C++ 生成工具，AOT 用它做链接）：
 
 ## 媒体密钥
 
-真实的 iOS 镜像把 72 字节 `ekey` 用 FairPlay 包成 16 字节 AES 内容密钥。本仓库不实现这个解包，也不响应 `/fp-setup`。
+真实的 iOS 镜像把 72 字节 `ekey` 用 FairPlay 包成 16 字节 AES 内容密钥，并且先走 `POST /fp-setup`。本仓库不实现这个解包，也不附带 PlayFair。生产环境的 iPhone 镜像在补上真正的 72 字节解包之前，仍然解不开。
 
 可以用的做法：
 
-- `--lab-key`：32 个十六进制字符，16 字节实验内容密钥。发送端如果直接给出 16 字节 `ekey`，也会当成原始密钥。这不是 FairPlay。
-- 进程外实现 `IMediaKeyUnwrapper`，在 `AirPlayReceiverOptions.MediaKeyUnwrapper` 上接入。返回 false 就保持失败关闭。
-- 不要把 GPL-3.0 的 PlayFair 编进这个二进制。
+- `--lab-key`：32 个十六进制字符，16 字节实验内容密钥。发送端如果直接给出 16 字节 `ekey`，也会当成原始密钥。这不是 FairPlay。pair-verify 完成之后，加密的 type 0 会解密并送进解码器。
+- 进程内实现 `IMediaKeyUnwrapper`，挂到 `AirPlayReceiverOptions.MediaKeyUnwrapper`。返回 false 就保持失败关闭。
+- `--media-key-plugin 路径`：Native AOT 不能加载托管插件，所以钩子是一个本地 DLL / `.so`。导出可以只有其中一个：
+
+```c
+int AirPlay_TryUnwrapContentKey(const uint8_t* wrapped, int wrappedLength, uint8_t* contentKey16);
+int AirPlay_FairPlaySetup(const uint8_t* request, int requestLength,
+                          uint8_t* response, int responseCapacity, int* written);
+```
+
+返回 1 表示成功。没有 `AirPlay_FairPlaySetup`，或者它返回 0 时，`/fp-setup` 仍是 501。也可以直接提供 `IFairPlaySetup`，不经过 DLL。
+- 不要把 GPL-3.0 的 PlayFair 编进这个二进制，也不要把它链进插件后再当成仓库的一部分发布。
 
 没有内容密钥，或者还没有 pair-verify 的 32 字节共享秘密时，type 0 负载会被丢弃并计数（`Mirror.DroppedEncryptedPayloads`）。type 1 的 SPS/PPS 是明文，仍然会解析。
 
 ## 画面与 TapClock
 
-解码器把 Annex-B 访问单元变成 BGRA 后写入 `FrameSlot`（只保留最新一帧）。没有解码器时，访问单元仍然计数，但不会冒充成手机画面。
+Windows 上 Media Foundation 把 Annex-B 访问单元变成 BGRA，写入 `FrameSlot`（只保留最新一帧）。同步硬件变换如果还能锁定 NV12 或 RGB32 缓冲就优先用它；输出是 DXGI 表面、或者只有异步硬件变换时，退回系统自带的软件解码器。其它操作系统默认不解码。没有画面时，访问单元仍然计数，但不会冒充成手机屏幕。Linux 上继续可以用 `--demo-frame` 检查窗口标志和 TapClock。
 
 Windows 宿主默认打开 GDI 窗口，把最新一帧拉伸进去。`--no-window` 关掉它。窗口里的鼠标点击不会发给手机。
 
@@ -130,7 +140,7 @@ TapClock 的点击留在它自己的主机 TCP `42123`（ATB/1）。坐标是板
   --tapclock 127.0.0.1:42125 --tapclock-dir /tmp/tapclock-frames
 ```
 
-`--demo-frame` 只推一张合成图，用来检查窗口和导出。H.264 硬件解码（Windows Media Foundation）是以后接在 `IH264Decoder` 上的位置；这个切片没有把 COM MFT 编进来，因为在 Native AOT 里还没有验证过。若要使用 FFmpeg，请放在接口后面，并单独遵守 LGPL，不要链进这个仓库。
+`--demo-frame` 只推一张合成图，用来检查窗口和导出。真正的手机画面来自 H.264 解码。若必须换用 FFmpeg，请放在 `IH264Decoder` 后面并单独遵守 LGPL，不要链进这个仓库。
 
 ## 许可与致谢
 

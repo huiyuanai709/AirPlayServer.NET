@@ -47,6 +47,17 @@ public sealed class AirPlayReceiverOptions
 
     public IMediaKeyUnwrapper? MediaKeyUnwrapper { get; set; }
 
+    /// <summary>
+    /// Optional native DLL or shared library. See <c>NativeMediaKeyModule</c> for the C ABI.
+    /// A missing export keeps FairPlay fail-closed.
+    /// </summary>
+    public string? MediaKeyPluginPath { get; set; }
+
+    /// <summary>
+    /// Optional in-process <c>POST /fp-setup</c> answer. Null, or a false return, is HTTP 501.
+    /// </summary>
+    public IFairPlaySetup? FairPlaySetup { get; set; }
+
     public IH264Decoder? Decoder { get; set; }
 
     /// <summary>TapClock JPEG export. Null or without an endpoint and directory disables it.</summary>

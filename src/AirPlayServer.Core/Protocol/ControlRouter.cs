@@ -1,5 +1,7 @@
+using System.Net;
 using System.Text;
 using AirPlayServer.Core.Discovery;
+using AirPlayServer.Core.Media;
 using AirPlayServer.Core.Pairing;
 
 namespace AirPlayServer.Core.Protocol;
@@ -10,20 +12,22 @@ internal sealed class ControlRouter
     private readonly byte[] _publicKey;
     private readonly bool _discoveryEnabled;
     private readonly IAirPlayLog _log;
+    private readonly MirrorRuntime _mirror;
 
-    public ControlRouter(ReceiverAdvertisement advertisement, ReadOnlySpan<byte> publicKey, bool discoveryEnabled, IAirPlayLog log)
+    public ControlRouter(ReceiverAdvertisement advertisement, ReadOnlySpan<byte> publicKey, bool discoveryEnabled, IAirPlayLog log, MirrorRuntime mirror)
     {
         _advertisement = advertisement;
         _publicKey = publicKey.ToArray();
         _discoveryEnabled = discoveryEnabled;
         _log = log;
+        _mirror = mirror;
     }
 
-    public Http1Response Dispatch(Http1Request request, PairingSession session)
+    public Http1Response Dispatch(Http1Request request, PairingSession session, EndPoint? remote = null)
     {
         try
         {
-            var response = DispatchCore(request, session);
+            var response = DispatchCore(request, session, remote);
             _log.Log(AirPlayLogLevel.Information, $"{request.Method} {request.Target} -> {response.Status}");
             return response;
         }
@@ -34,7 +38,7 @@ internal sealed class ControlRouter
         }
     }
 
-    private Http1Response DispatchCore(Http1Request request, PairingSession session)
+    private Http1Response DispatchCore(Http1Request request, PairingSession session, EndPoint? remote)
     {
         if (request.Method.Equals("OPTIONS", StringComparison.OrdinalIgnoreCase))
         {
@@ -44,9 +48,16 @@ internal sealed class ControlRouter
             ]);
         }
 
-        if (request.Method is "ANNOUNCE" or "SETUP" or "RECORD" or "PAUSE" or "FLUSH" or "TEARDOWN" or "SET_PARAMETER" or "GET_PARAMETER")
+        if (request.Method.Equals("ANNOUNCE", StringComparison.OrdinalIgnoreCase)
+            || request.Method.Equals("SETUP", StringComparison.OrdinalIgnoreCase)
+            || request.Method.Equals("RECORD", StringComparison.OrdinalIgnoreCase)
+            || request.Method.Equals("PAUSE", StringComparison.OrdinalIgnoreCase)
+            || request.Method.Equals("FLUSH", StringComparison.OrdinalIgnoreCase)
+            || request.Method.Equals("TEARDOWN", StringComparison.OrdinalIgnoreCase)
+            || request.Method.Equals("SET_PARAMETER", StringComparison.OrdinalIgnoreCase)
+            || request.Method.Equals("GET_PARAMETER", StringComparison.OrdinalIgnoreCase))
         {
-            return NotImplemented("Media transport is not implemented in this slice.");
+            return _mirror.HandleMedia(request, session, remote);
         }
 
         if (Is(request, "POST", "/pair-setup"))

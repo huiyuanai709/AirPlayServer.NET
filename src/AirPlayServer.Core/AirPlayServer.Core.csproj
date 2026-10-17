@@ -4,7 +4,12 @@
     <RootNamespace>AirPlayServer.Core</RootNamespace>
     <AssemblyName>AirPlayServer.Core</AssemblyName>
     <IsAotCompatible>true</IsAotCompatible>
-    <Description>AirPlay receive core: IPv4 mDNS advertisement, transient pairing, and the control connection.</Description>
+    <Description>AirPlay receive core: IPv4 mDNS advertisement, transient pairing, mirror receive, and TapClock frame export.</Description>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <DefineConstants Condition="$([MSBuild]::IsOSPlatform('Windows')) Or '$(ForceWindowsHost)' == 'true'">$(DefineConstants);WINDOWS_HOST</DefineConstants>
+    <AllowUnsafeBlocks Condition="$([MSBuild]::IsOSPlatform('Windows')) Or '$(ForceWindowsHost)' == 'true'">true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>

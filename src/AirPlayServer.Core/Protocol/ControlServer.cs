@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using AirPlayServer.Core.Discovery;
+using AirPlayServer.Core.Media;
 using AirPlayServer.Core.Pairing;
 
 namespace AirPlayServer.Core.Protocol;
@@ -47,12 +48,13 @@ internal sealed class ControlServer : IAsyncDisposable
         PairingIdentity identity,
         bool discoveryEnabled,
         IAirPlayLog log,
+        MirrorRuntime mirror,
         int maxConnections)
     {
         var server = new ControlServer(
             airPlay,
             raop,
-            new ControlRouter(advertisement, identity.PublicKey.Span, discoveryEnabled, log),
+            new ControlRouter(advertisement, identity.PublicKey.Span, discoveryEnabled, log, mirror),
             identity,
             log,
             maxConnections);
@@ -170,7 +172,7 @@ internal sealed class ControlServer : IAsyncDisposable
                         }
 
                         var before = session.Phase;
-                        var response = _router.Dispatch(request, session);
+                        var response = _router.Dispatch(request, session, client.RemoteEndPoint);
                         reader.AdvanceTo(buffer.GetPosition(consumed));
                         if (before != PairingPhase.Finished && session.Phase == PairingPhase.Finished)
                         {

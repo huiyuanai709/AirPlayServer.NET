@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using AirPlayServer.Core;
+using AirPlayServer.Core.Export;
 using AirPlayServer.Core.Protocol;
 
 Args arguments;
@@ -24,6 +25,7 @@ if (arguments.Help)
 if (arguments.SelfCheck)
 {
     ProtocolSelfCheck.Run();
+    ExportSelfCheck.Run();
     Console.WriteLine("self-check ok");
     return 0;
 }
@@ -58,7 +60,25 @@ await using (receiver)
         : arguments.Options.EnableDiscovery
             ? "mDNS: 查询端口不可用，仅尝试发送通告"
             : "mDNS: 已关闭");
-    Console.WriteLine("本切片尚未实现：视频解码与渲染、音频、FairPlay、Windows 显示路径。");
+    Console.WriteLine("宣告画面: " + arguments.Options.DisplayWidth + "x" + arguments.Options.DisplayHeight);
+    Console.WriteLine("镜像数据端口: " + receiver.Mirror.DataPort + "，计时端口: " + receiver.Mirror.TimingPort);
+    Console.WriteLine(arguments.Options.ShowWindow && OperatingSystem.IsWindows()
+        ? "显示: Windows 窗口只画最新一帧。窗口里的点击不会发给手机。"
+        : "显示: 当前进程没有打开窗口。");
+    if (arguments.Options.TapClock is { Enabled: true } tapClock)
+    {
+        Console.WriteLine("TapClock: "
+            + (string.IsNullOrWhiteSpace(tapClock.Endpoint) ? "不推 TCP" : "ATBF JPEG -> " + tapClock.Endpoint)
+            + (string.IsNullOrWhiteSpace(tapClock.WatchDirectory) ? "" : "，目录 " + tapClock.WatchDirectory)
+            + "，约 " + tapClock.FramesPerSecond.ToString(CultureInfo.InvariantCulture) + " fps");
+    }
+    else
+    {
+        Console.WriteLine("TapClock: 未启用。需要 --tapclock host:42125 或 --tapclock-dir。");
+    }
+
+    Console.WriteLine("FairPlay 未实现。没有 16 字节内容密钥时，加密画面会被丢弃，不会当成手机屏幕。");
+    Console.WriteLine("H.264 解码器: " + receiver.Mirror.DecoderName + "。点击仍由 TapClock 走 TCP 42123，坐标是板上的 HID 计数。");
     Console.WriteLine("按 Ctrl+C 停止。");
     try
     {
@@ -85,19 +105,33 @@ internal sealed class Args
 
         用法:
           AirPlayServer.Host [--name 名称] [--listen 0.0.0.0] [--airplay-port 7001] [--raop-port 5001]
-                             [--no-discovery] [--seed 64位十六进制]
+                             [--screen 480x1040] [--no-discovery] [--no-window] [--demo-frame]
+                             [--tapclock 主机:42125] [--tapclock-dir 目录] [--tapclock-fps 2]
+                             [--lab-key 32位十六进制] [--seed 64位十六进制]
           AirPlayServer.Host --self-check
           AirPlayServer.Host --help
 
-        --self-check  在当前进程里核对 X25519、Ed25519 和一次 pair-verify。
-        --seed        仅存在于内存的 32 字节身份种子，不会写入磁盘。
-        媒体解密、音频、视频渲染和 Windows 显示路径不在本切片内。
+        --self-check     核对 X25519、Ed25519、一次 pair-verify，以及一张 JPEG/ATBF。
+        --seed           仅存在于内存的 32 字节身份种子，不会写入磁盘。
+        --screen         向手机宣告的逻辑分辨率。和 TapClock 配合时常用 480x1040，
+                         用来对齐 AssistiveTouch 的 HID 校准。这不是 Windows 窗口里的点击坐标。
+        --tapclock       把最新解码帧按 ATBF type 3 JPEG 推到 host:42125。不发送 H.264。
+        --tapclock-dir   备用：把 mirror.jpg.part 写完后改名为 mirror.jpg。
+        --lab-key        实验用 16 字节内容密钥。不是 FairPlay 解包，也不会实现 /fp-setup。
+        --demo-frame     推送一张合成画面，用来检查窗口和 TapClock。那不是手机屏幕。
+        点击不在本进程发送。TapClock 的点击仍走 TCP 42123（ATB/1）。
         """;
 
     public static Args Parse(string[] args)
     {
         var parsed = new Args();
-        var options = new AirPlayReceiverOptions();
+        var options = new AirPlayReceiverOptions
+        {
+            DisplayWidth = 480,
+            DisplayHeight = 1040,
+            ShowWindow = true,
+        };
+        TapClockExportOptions? tapClock = null;
         for (var i = 0; i < args.Length; i++)
         {
             var token = args[i];
@@ -128,13 +162,57 @@ internal sealed class Args
                 case "--seed":
                     options.PairingSeed = Convert.FromHexString(Next(args, ref i, token));
                     break;
+                case "--screen":
+                    ParseScreen(Next(args, ref i, token), options);
+                    break;
+                case "--no-window":
+                    options.ShowWindow = false;
+                    break;
+                case "--demo-frame":
+                    options.PublishDemoFrame = true;
+                    break;
+                case "--tapclock":
+                    tapClock ??= new TapClockExportOptions();
+                    tapClock.Endpoint = Next(args, ref i, token);
+                    break;
+                case "--tapclock-dir":
+                    tapClock ??= new TapClockExportOptions();
+                    tapClock.WatchDirectory = Next(args, ref i, token);
+                    break;
+                case "--tapclock-fps":
+                    tapClock ??= new TapClockExportOptions();
+                    tapClock.FramesPerSecond = double.Parse(Next(args, ref i, token), CultureInfo.InvariantCulture);
+                    break;
+                case "--lab-key":
+                    options.LabContentKey = Convert.FromHexString(Next(args, ref i, token));
+                    break;
                 default:
                     throw new ArgumentException("Unknown argument: " + token);
             }
         }
 
+        if (tapClock is not null && string.IsNullOrWhiteSpace(tapClock.Endpoint) && string.IsNullOrWhiteSpace(tapClock.WatchDirectory))
+        {
+            throw new ArgumentException("--tapclock-fps requires --tapclock or --tapclock-dir.");
+        }
+
+        options.TapClock = tapClock;
         parsed.Options = options;
         return parsed;
+    }
+
+    private static void ParseScreen(string text, AirPlayReceiverOptions options)
+    {
+        var parts = text.Split('x', 'X');
+        if (parts.Length != 2
+            || !int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var width)
+            || !int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var height))
+        {
+            throw new ArgumentException("--screen must look like 480x1040.");
+        }
+
+        options.DisplayWidth = width;
+        options.DisplayHeight = height;
     }
 
     private static string Next(string[] args, ref int index, string name)

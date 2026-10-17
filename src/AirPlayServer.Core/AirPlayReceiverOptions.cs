@@ -1,4 +1,7 @@
 using System.Net;
+using AirPlayServer.Core.Export;
+using AirPlayServer.Core.Media;
+using AirPlayServer.Core.Video;
 
 namespace AirPlayServer.Core;
 
@@ -27,6 +30,27 @@ public sealed class AirPlayReceiverOptions
     public int MaxConnections { get; set; } = 8;
 
     public IAirPlayLog? Log { get; set; }
+
+    /// <summary>
+    /// Open the latest-frame window. The window is created only on Windows.
+    /// Clicks in that window are not forwarded to the phone.
+    /// </summary>
+    public bool ShowWindow { get; set; }
+
+    /// <summary>Publish one synthetic BGRA frame after start. It is not a mirrored screen.</summary>
+    public bool PublishDemoFrame { get; set; }
+
+    /// <summary>
+    /// Optional 16-byte mirror content key for a lab sender. This is not a FairPlay unwrap.
+    /// </summary>
+    public byte[]? LabContentKey { get; set; }
+
+    public IMediaKeyUnwrapper? MediaKeyUnwrapper { get; set; }
+
+    public IH264Decoder? Decoder { get; set; }
+
+    /// <summary>TapClock JPEG export. Null or without an endpoint and directory disables it.</summary>
+    public TapClockExportOptions? TapClock { get; set; }
 
     public void Validate()
     {
@@ -69,5 +93,12 @@ public sealed class AirPlayReceiverOptions
         {
             throw new ArgumentException("Max connections is outside the supported range.", nameof(MaxConnections));
         }
+
+        if (LabContentKey is not null && LabContentKey.Length != 16)
+        {
+            throw new ArgumentException("Lab content key must be 16 bytes.", nameof(LabContentKey));
+        }
+
+        TapClock?.Validate();
     }
 }

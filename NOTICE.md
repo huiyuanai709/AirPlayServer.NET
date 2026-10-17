@@ -14,7 +14,8 @@ publicly described receiver in:
 
 The upstream `how-it-works.md`, README, and CLAUDE.md describe the pipeline this
 port is structured around: mDNS advertisement, HTTP pair-setup / pair-verify,
-then a media path this repository has not implemented.
+then a media path. This repository now accepts the mirror control and TCP
+data skeleton, but it does not include FairPlay unwrap or an H.264 decoder.
 
 ## Not included
 
@@ -27,8 +28,10 @@ This repository does not contain, link, or translate:
 
 mDNS advertisement is a small RFC 6762/6763 sender written for this project.
 Pairing uses the runtime's X25519 and AES plus an RFC 8032 Ed25519
-implementation written for this project. Those algorithms are the transient
-session handshake, not media decryption.
+implementation written for this project. The same AES-CTR primitive derives
+the mirror stream key once a 16-byte content key exists. That derivation is
+not FairPlay, and PlayFair is not included. JPEG stills for TapClock are
+encoded in-process; FFmpeg and ImageSharp are not linked.
 
 ## Trademarks
 

@@ -496,8 +496,10 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             _picture = picture;
         }
 
-        _decoder.Configure(sequence, picture);
+        // Record the configuration before the decoder callback. A waiter resumed
+        // from Configure must already observe CodecConfigurations.
         Activity.ConfigureCodec();
+        _decoder.Configure(sequence, picture);
     }
 
     private async Task TimingLoop()

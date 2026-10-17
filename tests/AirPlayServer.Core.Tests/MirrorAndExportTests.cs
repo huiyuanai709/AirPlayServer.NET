@@ -152,37 +152,40 @@ public sealed class MirrorAndExportTests
             ctr.Transform(access, encrypted);
         }
 
-        using var client = new TcpClient();
-        await client.ConnectAsync(IPAddress.Loopback, mirror.Activity.DataPort);
-        await using var stream = client.GetStream();
-        var configured = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        decoder.OnConfigure = () => configured.TrySetResult();
-        await stream.WriteAsync(Packet(0, 0x10, encrypted));
         var codec = CodecPayload();
-        var header = new byte[128];
-        BitConverter.GetBytes(codec.Length).CopyTo(header, 0);
-        header[4] = 1;
-        BitConverter.GetBytes(480f).CopyTo(header, 56);
-        BitConverter.GetBytes(1040f).CopyTo(header, 60);
-        await stream.WriteAsync(header);
-        await stream.WriteAsync(codec);
-        Assert.True(await Task.WhenAny(decoder.Decoded.Task, Task.Delay(TimeSpan.FromSeconds(2))) == decoder.Decoded.Task);
-        Assert.Equal(new byte[] { 0, 0, 0, 1, 0x65 }, decoder.LastAnnexB);
-        Assert.True(decoder.LastWasKeyframe);
-        Assert.True(await Task.WhenAny(configured.Task, Task.Delay(TimeSpan.FromSeconds(2))) == configured.Task);
-        Assert.Equal(1, mirror.Activity.AcceptedAccessUnits);
-        Assert.Equal(1, mirror.Activity.CodecConfigurations);
+        var codecHeader = new byte[128];
+        BitConverter.GetBytes(codec.Length).CopyTo(codecHeader, 0);
+        codecHeader[4] = 1;
+        BitConverter.GetBytes(480f).CopyTo(codecHeader, 56);
+        BitConverter.GetBytes(1040f).CopyTo(codecHeader, 60);
+        var encryptedPacket = Packet(0, 0x10, encrypted);
+        var streamBytes = new byte[encryptedPacket.Length + codecHeader.Length + codec.Length];
+        encryptedPacket.CopyTo(streamBytes, 0);
+        codecHeader.CopyTo(streamBytes, encryptedPacket.Length);
+        codec.CopyTo(streamBytes, encryptedPacket.Length + codecHeader.Length);
 
-        client.Close();
-        await using var unkeyed = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), new RecordingDecoder(), null, ReadOnlySpan<byte>.Empty, NullAirPlayLog.Instance);
-        using var other = new TcpClient();
-        await other.ConnectAsync(IPAddress.Loopback, unkeyed.Activity.DataPort);
-        await using var otherStream = other.GetStream();
-        await otherStream.WriteAsync(Packet(0, 0, encrypted));
-        var dropped = DateTime.UtcNow;
-        while (unkeyed.Activity.DroppedEncryptedPayloads == 0 && DateTime.UtcNow - dropped < TimeSpan.FromSeconds(2))
+        using (var client = new TcpClient { NoDelay = true })
         {
-            await Task.Delay(20);
+            await client.ConnectAsync(IPAddress.Loopback, mirror.Activity.DataPort);
+            await using var stream = client.GetStream();
+            await stream.WriteAsync(streamBytes);
+            await stream.FlushAsync();
+            await WaitUntilAsync(() =>
+                decoder.Decoded.Task.IsCompleted
+                && mirror.Activity.AcceptedAccessUnits == 1
+                && mirror.Activity.CodecConfigurations == 1);
+            Assert.Equal(new byte[] { 0, 0, 0, 1, 0x65 }, decoder.LastAnnexB);
+            Assert.True(decoder.LastWasKeyframe);
+        }
+
+        await using var unkeyed = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), new RecordingDecoder(), null, ReadOnlySpan<byte>.Empty, NullAirPlayLog.Instance);
+        using (var other = new TcpClient { NoDelay = true })
+        {
+            await other.ConnectAsync(IPAddress.Loopback, unkeyed.Activity.DataPort);
+            await using var otherStream = other.GetStream();
+            await otherStream.WriteAsync(Packet(0, 0, encrypted));
+            await otherStream.FlushAsync();
+            await WaitUntilAsync(() => unkeyed.Activity.DroppedEncryptedPayloads == 1);
         }
 
         Assert.Equal(1, unkeyed.Activity.DroppedEncryptedPayloads);
@@ -277,6 +280,20 @@ public sealed class MirrorAndExportTests
         Assert.Equal(501, fairPlay.Status);
     }
 
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = Environment.TickCount64 + 2000;
+        while (!condition())
+        {
+            if (Environment.TickCount64 > deadline)
+            {
+                throw new TimeoutException("Mirror stream did not reach the expected state.");
+            }
+
+            await Task.Delay(1);
+        }
+    }
+
     private static byte[] Packet(byte type, byte flags, byte[] payload)
     {
         var packet = new byte[128 + payload.Length];
@@ -308,8 +325,6 @@ public sealed class MirrorAndExportTests
     {
         public TaskCompletionSource Decoded { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public Action? OnConfigure { get; set; }
-
         public byte[] LastAnnexB { get; private set; } = [];
 
         public bool LastWasKeyframe { get; private set; }
@@ -319,7 +334,8 @@ public sealed class MirrorAndExportTests
         public string Name => "recording";
 
         public void Configure(ReadOnlySpan<byte> sequenceParameterSet, ReadOnlySpan<byte> pictureParameterSet)
-            => OnConfigure?.Invoke();
+        {
+        }
 
         public bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
         {

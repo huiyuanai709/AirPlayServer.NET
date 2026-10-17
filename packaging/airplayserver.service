@@ -1,0 +1,14 @@
+[Unit]
+Description=AirPlayServer.NET receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/AirPlayServer.Host --name AirPlayServer.NET
+Restart=on-failure
+# Optional pairing seed stays in the process command line if an operator adds
+# --seed. Do not commit a seed. This unit ships with no secrets.
+
+[Install]
+WantedBy=multi-user.target

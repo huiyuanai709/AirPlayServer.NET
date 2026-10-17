@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.x
+          dotnet-quality: preview
+
+      - name: Install Native AOT build tools
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Restore
+        run: dotnet restore AirPlayServer.slnx
+
+      - name: Build
+        run: dotnet build AirPlayServer.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test AirPlayServer.slnx --configuration Release --no-build --verbosity normal
+
+      - name: Native AOT publish (linux-x64)
+        run: dotnet publish src/AirPlayServer.Host/AirPlayServer.Host.csproj --configuration Release --runtime linux-x64 --self-contained true --output artifacts/linux-x64
+
+      - name: Smoke the published binary
+        run: |
+          artifacts/linux-x64/AirPlayServer.Host --help
+          artifacts/linux-x64/AirPlayServer.Host --self-check
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.x
+          dotnet-quality: preview
+
+      - name: Test
+        run: dotnet test AirPlayServer.slnx --configuration Release --verbosity normal
+
+      - name: Native AOT publish (win-x64)
+        run: dotnet publish src/AirPlayServer.Host/AirPlayServer.Host.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/win-x64
+
+      - name: Smoke the published binary
+        shell: pwsh
+        run: |
+          ./artifacts/win-x64/AirPlayServer.Host.exe --help
+          ./artifacts/win-x64/AirPlayServer.Host.exe --self-check

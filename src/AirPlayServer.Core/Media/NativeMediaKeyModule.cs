@@ -4,14 +4,15 @@ using System.Security.Cryptography;
 namespace AirPlayServer.Core.Media;
 
 /// <summary>
-/// Loads a native media-key plugin. Native AOT cannot load a managed assembly, so the
-/// hook is a C ABI in a DLL or shared library supplied by the operator:
+/// Loads an optional native media-key plugin. Native AOT cannot load a managed assembly
+/// at runtime, so this override is a C ABI in a DLL or shared library:
 /// <code>
 /// int AirPlay_TryUnwrapContentKey(const uint8_t* wrapped, int wrappedLength, uint8_t* contentKey16);
 /// int AirPlay_FairPlaySetup(const uint8_t* request, int requestLength, uint8_t* response, int responseCapacity, int* written);
 /// </code>
 /// Either export may be absent. A missing export, a missing file, or a 0 return stays
-/// fail-closed. PlayFair (GPL-3.0) is not included and must not be linked into this binary.
+/// fail-closed for that call. The host uses in-process <see cref="FairPlayKeys"/> unless
+/// this path is set.
 /// </summary>
 internal sealed class NativeMediaKeyModule : IMediaKeyUnwrapper, IFairPlaySetup, IDisposable
 {

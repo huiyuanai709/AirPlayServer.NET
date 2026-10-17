@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/deps/">
+    <Project Path="deps/AirPlayFairPlay/AirPlayFairPlay.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/AirPlayServer.Core/AirPlayServer.Core.csproj" />
     <Project Path="src/AirPlayServer.Host/AirPlayServer.Host.csproj" />

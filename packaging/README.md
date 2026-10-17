@@ -1,6 +1,6 @@
 # Packaging
 
-`publish.sh` and `publish.ps1` produce a self-contained Native AOT binary of `AirPlayServer.Host`.
+`publish.sh` and `publish.ps1` produce a self-contained Native AOT binary of `AirPlayServer.Host`. That binary is GPL-3.0-only because it compiles AirPlayFairPlay in-process. FairPlay adds no native dependency.
 
 ```bash
 ./packaging/publish.sh linux-x64

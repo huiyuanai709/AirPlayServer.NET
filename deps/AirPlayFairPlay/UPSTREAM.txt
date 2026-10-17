@@ -1,0 +1,8 @@
+source: https://github.com/huiyuanai709/AirPlayFairPlayPlugin
+commit: 8a6a9c46fc48e00ff69c760da7c04658f0b37e2f
+path: src/AirPlayFairPlay
+license: GPL-3.0-only
+
+The C# sources in this directory are a verbatim copy of that commit, except
+Directory.Build.props, which is local and only marks the project AOT-compatible.
+PlayFair provenance is in NOTICE.md.

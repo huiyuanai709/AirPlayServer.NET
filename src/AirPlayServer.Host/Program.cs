@@ -77,12 +77,19 @@ await using (receiver)
         Console.WriteLine("TapClock: 未启用。需要 --tapclock host:42125 或 --tapclock-dir。");
     }
 
-    var keyed = arguments.Options.LabContentKey is not null
-        || arguments.Options.MediaKeyUnwrapper is not null
-        || !string.IsNullOrWhiteSpace(arguments.Options.MediaKeyPluginPath);
-    Console.WriteLine(keyed
-        ? "内容密钥：已配置实验密钥或媒体密钥插件。仓库里仍然没有 FairPlay，72 字节 ekey 没有插件时会丢掉。"
-        : "FairPlay 未实现。没有 16 字节内容密钥或媒体密钥插件时，加密画面会被丢弃，不会当成手机屏幕。");
+    if (!string.IsNullOrWhiteSpace(arguments.Options.MediaKeyPluginPath))
+    {
+        Console.WriteLine("FairPlay：--media-key-plugin 已接上。解包和 /fp-setup 走这个原生库；没有对应导出时那一项失败关闭。");
+    }
+    else
+    {
+        Console.WriteLine("FairPlay：进程内 AirPlayFairPlay 已启用。/fp-setup 和 72 字节 ekey 共用同一次握手。");
+    }
+
+    if (arguments.Options.LabContentKey is not null)
+    {
+        Console.WriteLine("内容密钥：SETUP 使用 --lab-key 的 16 字节实验密钥。");
+    }
     Console.WriteLine("H.264 解码器: " + receiver.Mirror.DecoderName + "。点击仍由 TapClock 走 TCP 42123，坐标是板上的 HID 计数。");
     Console.WriteLine("按 Ctrl+C 停止。");
     try
@@ -116,16 +123,21 @@ internal sealed class Args
           AirPlayServer.Host --self-check
           AirPlayServer.Host --help
 
+        FairPlay 默认开启。POST /fp-setup 和 72 字节 ekey 共用同一次进程内握手。
+        TapClock 仍然用 --tapclock、--tapclock-dir、--tapclock-fps。
         --self-check     核对 X25519、Ed25519、一次 pair-verify，以及一张 JPEG/ATBF。
         --seed           仅存在于内存的 32 字节身份种子，不会写入磁盘。
         --screen         向手机宣告的逻辑分辨率。和 TapClock 配合时常用 480x1040，
                          用来对齐 AssistiveTouch 的 HID 校准。这不是 Windows 窗口里的点击坐标。
         --tapclock       把最新解码帧按 ATBF type 3 JPEG 推到 host:42125。不发送 H.264。
         --tapclock-dir   备用：把 mirror.jpg.part 写完后改名为 mirror.jpg。
-        --lab-key        实验用 16 字节内容密钥。不是 FairPlay。有它，并且 pair-verify 已完成时，加密的 type 0 会解密。
+        --tapclock-fps   导出节拍，默认约 2，上限 30。
+        --lab-key        实验用 16 字节内容密钥。SETUP 用这把密钥。/fp-setup 仍由进程内 FairPlay 回答。
+                         pair-verify 完成后，加密的 type 0 会解密。
         --media-key-plugin
-                         本地 DLL 或 .so。导出 AirPlay_TryUnwrapContentKey，可选 AirPlay_FairPlaySetup。
-                         没有 FairPlay 导出时 /fp-setup 仍是 501。不要把 GPL PlayFair 放进这个仓库。
+                         可选的原生 DLL 或 .so，用来代替进程内 FairPlay。FairPlay 不再依赖它。
+                         导出 AirPlay_TryUnwrapContentKey，可选 AirPlay_FairPlaySetup。
+                         Native AOT 不能在运行时加载托管程序集，所以这里只接受原生库。
         --demo-frame     推送一张合成画面，用来检查窗口和 TapClock。那不是手机屏幕。
         点击不在本进程发送。TapClock 的点击仍走 TCP 42123（ATB/1）。
         """;
@@ -208,6 +220,7 @@ internal sealed class Args
         }
 
         options.TapClock = tapClock;
+        options.EnableInProcessFairPlay();
         parsed.Options = options;
         return parsed;
     }

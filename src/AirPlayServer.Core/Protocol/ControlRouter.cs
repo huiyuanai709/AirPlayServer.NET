@@ -141,7 +141,7 @@ internal sealed class ControlRouter
 
         if (Is(request, "GET", "/"))
         {
-            return Http1Response.Text(200, ServerInfo.PlainStatus(_advertisement, _discoveryEnabled));
+            return Http1Response.Text(200, ServerInfo.PlainStatus(_advertisement, _discoveryEnabled, _fairPlay is not null));
         }
 
         return Http1Response.Text(404, "No route for " + request.Method + " " + request.Path);

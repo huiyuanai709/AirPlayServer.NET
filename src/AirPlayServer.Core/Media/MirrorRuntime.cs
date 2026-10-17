@@ -12,7 +12,7 @@ namespace AirPlayServer.Core.Media;
 /// <summary>
 /// Screen-mirror control and the TCP data connection. Video is not UDP RTP:
 /// each packet is a 128-byte header plus a length-prefixed payload. Audio SETUP
-/// (type 96) stays unimplemented. FairPlay unwrap stays outside this process.
+/// (type 96) stays unimplemented. A 72-byte ekey unwraps when <see cref="IMediaKeyUnwrapper"/> succeeds.
 /// </summary>
 internal sealed class MirrorRuntime : IAsyncDisposable
 {
@@ -288,7 +288,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             }
             else
             {
-                _log.Log(AirPlayLogLevel.Warning, "FairPlay ekey (72 bytes) was not unwrapped. Encrypted mirror frames will be dropped. POST /fp-setup stays 501 unless an IFairPlaySetup or media-key plugin answers it. Supply a 16-byte lab content key or an IMediaKeyUnwrapper; PlayFair is not included.");
+                _log.Log(AirPlayLogLevel.Warning, "FairPlay ekey (72 bytes) was not unwrapped. Encrypted mirror frames will be dropped. Finish POST /fp-setup on the same FairPlay session before SETUP, or supply a 16-byte lab content key.");
             }
         }
         else if (ekey.Length > 0)

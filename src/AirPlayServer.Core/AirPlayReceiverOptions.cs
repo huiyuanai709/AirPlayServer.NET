@@ -49,14 +49,37 @@ public sealed class AirPlayReceiverOptions
 
     /// <summary>
     /// Optional native DLL or shared library. See <c>NativeMediaKeyModule</c> for the C ABI.
-    /// A missing export keeps FairPlay fail-closed.
+    /// When this path is set, <see cref="EnableInProcessFairPlay"/> leaves the managed session detached.
+    /// A missing export keeps that call fail-closed.
     /// </summary>
     public string? MediaKeyPluginPath { get; set; }
 
     /// <summary>
-    /// Optional in-process <c>POST /fp-setup</c> answer. Null, or a false return, is HTTP 501.
+    /// In-process <c>POST /fp-setup</c> answer. The host assigns the same
+    /// <see cref="FairPlayKeys"/> instance as <see cref="MediaKeyUnwrapper"/>.
+    /// Null, or a false return, is HTTP 501.
     /// </summary>
     public IFairPlaySetup? FairPlaySetup { get; set; }
+
+    /// <summary>
+    /// Attach one <see cref="FairPlayKeys"/> to both the ekey unwrapper and
+    /// <c>POST /fp-setup</c>. A native plugin path, or a hook that is already set,
+    /// leaves the options unchanged.
+    /// </summary>
+    public FairPlayKeys? EnableInProcessFairPlay()
+    {
+        if (!string.IsNullOrWhiteSpace(MediaKeyPluginPath)
+            || MediaKeyUnwrapper is not null
+            || FairPlaySetup is not null)
+        {
+            return null;
+        }
+
+        var keys = new FairPlayKeys();
+        MediaKeyUnwrapper = keys;
+        FairPlaySetup = keys;
+        return keys;
+    }
 
     public IH264Decoder? Decoder { get; set; }
 

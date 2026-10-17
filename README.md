@@ -1,8 +1,8 @@
 # AirPlayServer.NET
 
-把 [xenos1337/AirPlayServer](https://github.com/xenos1337/AirPlayServer)（MIT，Windows C/C++ AirPlay 接收端）的接收路径，用 .NET 11 Native AOT 重新实现。当前切片包含发现、瞬时配对、屏幕镜像的 RTSP/TCP 路径、Windows Media Foundation H.264 解码、最新帧窗口，以及给 [TapClock](https://github.com/huiyuanai709/TapClock/blob/main/docs/airplay.md) 的 JPEG 画面输出。FairPlay 仍然故意不实现：没有 16 字节内容密钥时，加密画面会被丢掉，不会当成手机屏幕显示。
+把 [xenos1337/AirPlayServer](https://github.com/xenos1337/AirPlayServer)（MIT，Windows C/C++ AirPlay 接收端）的接收路径，用 .NET 11 Native AOT 重新实现。当前切片包含发现、瞬时配对、屏幕镜像的 RTSP/TCP 路径、Windows Media Foundation H.264 解码、最新帧窗口、给 [TapClock](https://github.com/huiyuanai709/TapClock/blob/main/docs/airplay.md) 的 JPEG 画面输出，以及进程内 FairPlay（`POST /fp-setup` 与 72 字节 `ekey` 解包）。发布出来的 Native AOT 宿主是 **GPL-3.0-only**，因为里面编进了 [AirPlayFairPlay](https://github.com/huiyuanai709/AirPlayFairPlayPlugin)。
 
-This is an independent .NET port of the receive path, not a copy of the upstream C/C++ tree. Upstream binaries, FFmpeg, PlayFair, libplist, SDL, and the vendored Bonjour sources are not included. See [NOTICE.md](NOTICE.md).
+This is an independent .NET port of the receive path, not a copy of the upstream C/C++ tree. Upstream binaries, FFmpeg, libplist, SDL, and the vendored Bonjour sources are not included. FairPlay is compiled in-process from the pure .NET AirPlayFairPlay library, a port of PlayFair. See [NOTICE.md](NOTICE.md). The published AOT host is GPL-3.0-only because that library is part of the binary.
 
 Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 和 `845.5.1` 只是发送端认得出的兼容字符串。
 
@@ -15,7 +15,7 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 - `POST /reverse` 回答 `101 Switching Protocols`（`PTTH/1.0`），连接先挂住，事件还不解析。
 - `ANNOUNCE`、镜像 `SETUP`（会话 + type 110）、`RECORD`、`GET_PARAMETER`（volume）、`SET_PARAMETER`、`PAUSE`、`FLUSH`、`TEARDOWN` 已接通。音频 type 96 仍返回 501。
 - 镜像画面走 TCP，不是 UDP RTP。每个包是 128 字节小端头加负载。Type 0 是 AES-128-CTR 的 AVCC；type 1 是明文 SPS/PPS 和几何信息。
-- `POST /fp-setup` 在没有 `IFairPlaySetup` 或插件导出时仍返回 501。`/pair-setup-pin`、`/play` 仍返回 501。72 字节 FairPlay `ekey` 解不开时，SETUP 仍然 200，随后的加密包只计数、不解码。
+- 宿主默认用进程内 `FairPlayKeys` 回答 `POST /fp-setup`，并在握手之后解开 72 字节 `ekey`。同一次 `FairPlaySession` 同时服务这两步。没有完成握手时，SETUP 仍然 200，随后的加密包只计数、不解码。`/pair-setup-pin`、`/play` 仍返回 501。`--media-key-plugin` 是可选的原生覆盖，FairPlay 不再依赖它。
 - Windows 上用 Media Foundation 把 H.264 解成 BGRA，GDI 窗口显示最新一帧。Linux 上不创建窗口，也不把 `mfplat` / `user32` 编进 linux-x64 的 AOT 二进制。没有解码器时可以用 `--demo-frame`。
 - 可选地把最新帧编码成 JPEG，按 TapClock ATBF type 3 推到 `host:42125`，或原子写入监视目录。默认关闭。
 
@@ -32,7 +32,7 @@ mDNS announcer                         control listeners :7001 and :5001
                           |
                           |  TCP mirror data + UDP timing
                           v
-                 AES-CTR (only with a 16-byte content key)
+                 FairPlayKeys (fp-setup + 72-byte ekey) -> AES-CTR
                  IH264Decoder  ->  FrameSlot (latest BGRA)
                     |                         |
                     |                         +-- Windows GDI window
@@ -44,7 +44,8 @@ mDNS announcer                         control listeners :7001 and :5001
 
 | 项目 | 职责 |
 | --- | --- |
-| `src/AirPlayServer.Core` | 协议库。`IsAotCompatible`。发现、配对、镜像、JPEG/ATBF。 |
+| `deps/AirPlayFairPlay` | 进程内 FairPlay。`FairPlaySession` 来自 AirPlayFairPlayPlugin `8a6a9c46`。GPL-3.0-only。 |
+| `src/AirPlayServer.Core` | 协议库。`IsAotCompatible`。发现、配对、`FairPlayKeys`、镜像、JPEG/ATBF。 |
 | `src/AirPlayServer.Host` | 控制台宿主。`PublishAot`。 |
 | `tests/AirPlayServer.Core.Tests` | 握手、镜像包、解密、SETUP plist、ATBF 与目录改名。 |
 | `packaging/` | AOT 发布脚本和 systemd 单元草稿。不包含密钥，也不做发布。 |
@@ -57,6 +58,8 @@ mDNS announcer                         control listeners :7001 and :5001
 ## 构建、测试、AOT 发布
 
 需要 .NET 11 SDK（当前验证过 `11.0.100-rc.2`）。`global.json` 允许在 11.x 上向前滚动，包括预览版。
+
+FairPlay 源码在 `deps/AirPlayFairPlay`（AirPlayFairPlayPlugin `8a6a9c46` 的 `src/AirPlayFairPlay`）。这个副本随仓库一起检出，构建时不需要再拉子模块。
 
 ```bash
 dotnet build
@@ -89,7 +92,7 @@ Windows（需要 Visual Studio 的 C++ 生成工具，AOT 用它做链接）：
 | `dnssd` 注册 `_airplay._tcp` / `_raop._tcp` | 已实现：自带 IPv4 mDNS 通告和查询应答。没有探测冲突，也没有 IPv6。 |
 | `pairing.c` 瞬时 pair-setup / pair-verify | 已实现。Ed25519 标量乘法还不是常数时间。 |
 | `pinpair.c` 的 SRP PIN | 未实现。`/pair-setup-pin` 返回 501。 |
-| `fairplay_playfair.c` / `POST /fp-setup` | **故意不做。** PlayFair 是 GPL-3.0，不放进这个进程。没有插件时 `/fp-setup` 仍是 501。见下面的媒体密钥。 |
+| `fairplay_playfair.c` / `POST /fp-setup` | 已接入。进程内 [AirPlayFairPlay](https://github.com/huiyuanai709/AirPlayFairPlayPlugin)（GPL-3.0-only），源自 PlayFair / xenos1337。宿主默认启用。`--media-key-plugin` 只是可选的原生覆盖。 |
 | `raop_rtp_mirror.c` 的镜像数据 | 已实现骨架：TCP 128 字节头、type 0/1、UDP 计时探测。不是经典 UDP 视频 RTP。 |
 | `raop_rtp.c` 音频 | 未实现。type 96 的 SETUP 返回 501。 |
 | FFmpeg H.264 / AAC-ELD、YUV、SDL、ImGui | Windows 的 `IH264Decoder` 是 Media Foundation（能锁住输出缓冲的同步硬件变换优先，否则用系统自带的 H.264 软件解码器），输出 BGRA。其它平台默认不产出画面。不链接 FFmpeg。 |
@@ -100,13 +103,13 @@ Windows（需要 Visual Studio 的 C++ 生成工具，AOT 用它做链接）：
 
 ## 媒体密钥
 
-真实的 iOS 镜像把 72 字节 `ekey` 用 FairPlay 包成 16 字节 AES 内容密钥，并且先走 `POST /fp-setup`。本仓库不实现这个解包，也不附带 PlayFair。生产环境的 iPhone 镜像在补上真正的 72 字节解包之前，仍然解不开。
+真实的 iOS 镜像先走 `POST /fp-setup`，再把 72 字节 `ekey` 解成 16 字节 AES 内容密钥。宿主默认调用 `AirPlayReceiverOptions.EnableInProcessFairPlay()`，把**同一个** `FairPlayKeys`（里面是一个 `FairPlaySession`）同时交给 `IFairPlaySetup` 和 `IMediaKeyUnwrapper`。16 字节 setup 回复 142 字节并清掉旧握手；164 字节握手回复 32 字节并留下 key message；之后的 72 字节 `ekey` 才能解开。握手没完成时，加密画面仍然丢掉，不会当成手机屏幕。
 
 可以用的做法：
 
-- `--lab-key`：32 个十六进制字符，16 字节实验内容密钥。发送端如果直接给出 16 字节 `ekey`，也会当成原始密钥。这不是 FairPlay。pair-verify 完成之后，加密的 type 0 会解密并送进解码器。
-- 进程内实现 `IMediaKeyUnwrapper`，挂到 `AirPlayReceiverOptions.MediaKeyUnwrapper`。返回 false 就保持失败关闭。
-- `--media-key-plugin 路径`：Native AOT 不能加载托管插件，所以钩子是一个本地 DLL / `.so`。导出可以只有其中一个：
+- 默认：进程内 AirPlayFairPlay。不需要 `--media-key-plugin`。
+- `--lab-key`：32 个十六进制字符，16 字节实验内容密钥。SETUP 用这把密钥，不再解 `ekey`。`/fp-setup` 仍然由进程内 FairPlay 回答。发送端如果直接给出 16 字节 `ekey`，也会当成原始密钥。pair-verify 完成之后，加密的 type 0 会解密并送进解码器。
+- `--media-key-plugin 路径`：可选。Native AOT 不能在运行时加载托管程序集，所以这是一条原生覆盖，FairPlay 不再依赖它。传入之后，宿主不再挂上进程内 `FairPlayKeys`。导出可以只有其中一个：
 
 ```c
 int AirPlay_TryUnwrapContentKey(const uint8_t* wrapped, int wrappedLength, uint8_t* contentKey16);
@@ -114,8 +117,7 @@ int AirPlay_FairPlaySetup(const uint8_t* request, int requestLength,
                           uint8_t* response, int responseCapacity, int* written);
 ```
 
-返回 1 表示成功。没有 `AirPlay_FairPlaySetup`，或者它返回 0 时，`/fp-setup` 仍是 501。也可以直接提供 `IFairPlaySetup`，不经过 DLL。
-- 不要把 GPL-3.0 的 PlayFair 编进这个二进制，也不要把它链进插件后再当成仓库的一部分发布。
+返回 1 表示成功。没有对应导出，或者它返回 0 时，那一项失败关闭。
 
 没有内容密钥，或者还没有 pair-verify 的 32 字节共享秘密时，type 0 负载会被丢弃并计数（`Mirror.DroppedEncryptedPayloads`）。type 1 的 SPS/PPS 是明文，仍然会解析。
 
@@ -144,6 +146,8 @@ TapClock 的点击留在它自己的主机 TCP `42123`（ATB/1）。坐标是板
 
 ## 许可与致谢
 
-本仓库原创代码使用 [MIT](LICENSE)。Copyright (c) 2026 AirPlayServer.NET contributors.
+本仓库使用 [GPL-3.0-only](LICENSE)。Copyright (c) 2026 AirPlayServer.NET contributors.
 
-协议行为参考了 [xenos1337/AirPlayServer](https://github.com/xenos1337/AirPlayServer)（MIT，Copyright (c) 2025 xenos1337），以及它的上游 [fingergit/airplay2-win](https://github.com/fingergit/airplay2-win)。实现是按 .NET 的方式重写的，不是逐行翻译，也没有拷贝那些仓库里的二进制文件。
+发布出来的 Native AOT 宿主是 GPL-3.0-only，因为它把 FairPlay 编进了进程。FairPlay 实现是 [AirPlayFairPlayPlugin](https://github.com/huiyuanai709/AirPlayFairPlayPlugin) `8a6a9c46` 的纯 .NET 库，源自 PlayFair（[xenos1337/AirPlayServer](https://github.com/xenos1337/AirPlayServer) 的 `AirPlayServerLib/lib/playfair` 与 `fairplay_playfair.c`）。
+
+协议行为还参考了 xenos1337/AirPlayServer（MIT，Copyright (c) 2025 xenos1337），以及它的上游 [fingergit/airplay2-win](https://github.com/fingergit/airplay2-win)。除 FairPlay 表和算法移植外，接收路径是按 .NET 的方式重写的，没有拷贝那些仓库里的二进制文件。

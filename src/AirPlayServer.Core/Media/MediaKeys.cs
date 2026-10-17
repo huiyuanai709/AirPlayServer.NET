@@ -7,21 +7,22 @@ namespace AirPlayServer.Core.Media;
 
 /// <summary>
 /// Turns a FairPlay-wrapped content key (the 72-byte SETUP ekey) into the 16-byte
-/// AES key the mirror stream uses. This repository does not ship an implementation.
-/// PlayFair is GPL-3.0 and is not vendored. Return false to keep encrypted frames dropped.
+/// AES key the mirror stream uses. The host default is <see cref="FairPlayKeys"/>.
+/// Return false to keep encrypted frames dropped.
 /// </summary>
 public interface IMediaKeyUnwrapper
 {
     /// <summary>
     /// Unwrap a 72-byte FairPlay ekey into 16 content-key bytes.
-    /// Return false to keep encrypted frames dropped. Do not call PlayFair from here.
+    /// Return false to keep encrypted frames dropped.
     /// </summary>
     bool TryUnwrap(ReadOnlySpan<byte> wrappedKey, Span<byte> contentKey);
 }
 
 /// <summary>
-/// Optional answer for <c>POST /fp-setup</c>. Return false, or write nothing, and the
-/// control server stays on HTTP 501. This process does not implement FairPlay.
+/// Answer for <c>POST /fp-setup</c>. Return false, or write nothing, and the
+/// control server stays on HTTP 501. Use the same instance that unwraps the ekey
+/// so the handshake survives until SETUP.
 /// </summary>
 public interface IFairPlaySetup
 {

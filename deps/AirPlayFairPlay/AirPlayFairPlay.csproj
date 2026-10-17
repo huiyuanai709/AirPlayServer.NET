@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>AirPlayFairPlay</RootNamespace>
+    <AssemblyName>AirPlayFairPlay</AssemblyName>
+    <Description>Pure managed FairPlay session: fp-setup replies and 72-byte ekey unwrap.</Description>
+    <Version>0.2.0</Version>
+    <Authors>AirPlayFairPlayPlugin</Authors>
+    <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
+  </PropertyGroup>
+</Project>

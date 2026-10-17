@@ -58,7 +58,7 @@ internal static class ServerInfo
         return BinaryPropertyList.Write(root);
     }
 
-    public static string PlainStatus(ReceiverAdvertisement advertisement, bool discovery)
+    public static string PlainStatus(ReceiverAdvertisement advertisement, bool discovery, bool fairPlay)
     {
         var builder = new StringBuilder();
         builder.AppendLine("AirPlayServer.NET");
@@ -66,7 +66,9 @@ internal static class ServerInfo
         builder.Append("airplay: ").Append(advertisement.AirPlayPort).AppendLine();
         builder.Append("raop: ").Append(advertisement.RaopPort).AppendLine();
         builder.Append("discovery: ").AppendLine(discovery ? "enabled" : "disabled");
-        builder.AppendLine("media: mirror skeleton; FairPlay unwrap unavailable; H.264 decoder pluggable");
+        builder.AppendLine(fairPlay
+            ? "media: mirror; FairPlay fp-setup and 72-byte ekey unwrap configured; H.264 decoder pluggable"
+            : "media: mirror; FairPlay not configured; H.264 decoder pluggable");
         return builder.ToString();
     }
 

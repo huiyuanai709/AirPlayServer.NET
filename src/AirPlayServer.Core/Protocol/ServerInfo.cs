@@ -66,7 +66,7 @@ internal static class ServerInfo
         builder.Append("airplay: ").Append(advertisement.AirPlayPort).AppendLine();
         builder.Append("raop: ").Append(advertisement.RaopPort).AppendLine();
         builder.Append("discovery: ").AppendLine(discovery ? "enabled" : "disabled");
-        builder.AppendLine("media: not implemented");
+        builder.AppendLine("media: mirror skeleton; FairPlay unwrap unavailable; H.264 decoder pluggable");
         return builder.ToString();
     }
 

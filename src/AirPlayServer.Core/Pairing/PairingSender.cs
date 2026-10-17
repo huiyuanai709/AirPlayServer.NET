@@ -13,6 +13,7 @@ public sealed class PairingSender : IDisposable
     private X25519DiffieHellman? _ephemeral;
     private byte[]? _ourEphemeralPublic;
     private byte[]? _serverLongTermPublic;
+    private byte[]? _sharedSecret;
     private bool _disposed;
 
     public PairingSender(PairingIdentity identity)
@@ -20,6 +21,8 @@ public sealed class PairingSender : IDisposable
         ArgumentNullException.ThrowIfNull(identity);
         _identity = identity;
     }
+
+    internal ReadOnlyMemory<byte> SharedSecret => _sharedSecret ?? ReadOnlyMemory<byte>.Empty;
 
     public byte[] CreateSetupRequest()
     {
@@ -68,6 +71,12 @@ public sealed class PairingSender : IDisposable
         var serverEphemeral = receiverResponse[..32].ToArray();
         var encryptedSignature = receiverResponse.Slice(32, 64).ToArray();
         var shared = _ephemeral.DeriveRawSecretAgreement(serverEphemeral);
+        if (_sharedSecret is not null)
+        {
+            CryptographicOperations.ZeroMemory(_sharedSecret);
+        }
+
+        _sharedSecret = shared.ToArray();
 
         Span<byte> key = stackalloc byte[16];
         Span<byte> iv = stackalloc byte[16];
@@ -105,6 +114,11 @@ public sealed class PairingSender : IDisposable
         }
 
         _ephemeral?.Dispose();
+        if (_sharedSecret is not null)
+        {
+            CryptographicOperations.ZeroMemory(_sharedSecret);
+        }
+
         _disposed = true;
     }
 }

@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using AirPlayServer.Core.Pairing;
 using AirPlayServer.Core.Protocol;
@@ -28,6 +29,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private readonly MirrorDecryptor _decryptor = new();
     private readonly CancellationTokenSource _cancellation = new();
     private readonly object _gate = new();
+    private readonly object _media = new();
+    private readonly Queue<PendingCipher> _pending = new();
     private readonly Task _acceptLoop;
     private readonly Task _timingLoop;
     private Socket? _client;
@@ -35,8 +38,25 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private int _remoteTimingPort;
     private byte[]? _sequence;
     private byte[]? _picture;
+    private byte[]? _wrappedEkey;
+    private byte[]? _heldKeyframe;
+    private ulong _streamId;
+    private ulong _armedStreamId;
+    private bool _streamIdKnown;
+    private bool _hasArmedStream;
+    private int _pendingBytes;
     private int _loggedDecoder;
+    private int _loggedHold;
+    private int _loggedOverflow;
+    private int _loggedHeldKeyframe;
+    private int _loggedDecoded;
     private int _disposed;
+
+    /// <summary>
+    /// Ciphertext kept while FairPlay or the stream key is still missing.
+    /// Tests shrink this so an overflow can be forced without an 8 MiB buffer.
+    /// </summary>
+    internal int PendingEncryptedByteLimit { get; set; } = 8 * 1024 * 1024;
 
     private MirrorRuntime(
         Socket data,
@@ -132,9 +152,45 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
     internal void ArmForStream(ReadOnlySpan<byte> contentKey, ReadOnlySpan<byte> ecdhSecret, ulong streamConnectionId)
     {
-        _decryptor.SetMaterial(contentKey, ecdhSecret);
-        var ready = _decryptor.TryBind(streamConnectionId);
-        Activity.SetKeysReady(ready);
+        lock (_media)
+        {
+            ClearWrappedEkey();
+            _decryptor.SetMaterial(contentKey, ecdhSecret);
+            _streamId = streamConnectionId;
+            _streamIdKnown = true;
+            var ready = _decryptor.TryBind(streamConnectionId);
+            Activity.SetKeysReady(ready);
+            if (ready)
+            {
+                OnArmedLocked(streamConnectionId);
+            }
+        }
+    }
+
+    internal void NotePairingSecret(ReadOnlySpan<byte> secret)
+    {
+        if (secret.Length != 32)
+        {
+            return;
+        }
+
+        lock (_media)
+        {
+            if (!_decryptor.NoteSecret(secret))
+            {
+                return;
+            }
+
+            TryFinishArmLocked();
+        }
+    }
+
+    internal void RetryPendingFairPlay()
+    {
+        lock (_media)
+        {
+            TryFinishArmLocked();
+        }
     }
 
     internal Http1Response HandleMedia(Http1Request request, PairingSession session, EndPoint? remote)
@@ -181,10 +237,16 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
         if (method.Equals("TEARDOWN", StringComparison.OrdinalIgnoreCase))
         {
-            _decryptor.Reset();
-            Activity.SetKeysReady(false);
-            lock (_gate)
+            lock (_media)
             {
+                _decryptor.Reset();
+                Activity.SetKeysReady(false);
+                Activity.SetPendingEncrypted(0);
+                ClearPendingLocked();
+                _heldKeyframe = null;
+                ClearWrappedEkey();
+                _streamIdKnown = false;
+                _hasArmedStream = false;
                 _sequence = null;
                 _picture = null;
             }
@@ -268,6 +330,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
         var ekey = Find(root, "ekey") is PlistData keyData ? keyData.Value : [];
         byte[]? contentKey = null;
+        byte[]? wrapped = null;
         if (_labKey is not null)
         {
             contentKey = _labKey;
@@ -275,7 +338,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         }
         else if (ekey.Length == 16)
         {
-            contentKey = ekey;
+            contentKey = ekey.ToArray();
             _log.Log(AirPlayLogLevel.Information, "SETUP ekey is already 16 bytes and is used as a raw content key.");
         }
         else if (ekey.Length == 72)
@@ -288,7 +351,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             }
             else
             {
-                _log.Log(AirPlayLogLevel.Warning, "FairPlay ekey (72 bytes) was not unwrapped. Encrypted mirror frames will be dropped. Finish POST /fp-setup on the same FairPlay session before SETUP, or supply a 16-byte lab content key.");
+                wrapped = ekey.ToArray();
+                _log.Log(AirPlayLogLevel.Warning, "FairPlay ekey (72 bytes) is not unwrapped yet. Encrypted frames are held until POST /fp-setup finishes on this FairPlay session.");
             }
         }
         else if (ekey.Length > 0)
@@ -302,15 +366,27 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             _log.Log(AirPlayLogLevel.Warning, "Pair-verify X25519 secret is missing, so the mirror stream key cannot be derived yet.");
         }
 
-        if (contentKey is null)
+        lock (_media)
         {
-            _decryptor.SetMaterial([], secret);
+            ClearWrappedEkey();
+            _wrappedEkey = wrapped;
+            ClearPendingLocked();
+            _heldKeyframe = null;
+            _sequence = null;
+            _picture = null;
+            _hasArmedStream = false;
+            if (contentKey is null)
+            {
+                _decryptor.SetMaterial([], secret);
+            }
+            else
+            {
+                _decryptor.SetMaterial(contentKey, secret);
+            }
+
+            Activity.SetKeysReady(false);
         }
-        else
-        {
-            _decryptor.SetMaterial(contentKey, secret);
-        }
-        Activity.SetKeysReady(false);
+
         var name = Find(root, "name") is PlistString sender ? sender.Value : "unknown";
         _log.Log(AirPlayLogLevel.Information, "Mirror session setup from " + name + ". Video CTR starts at the next type-110 SETUP.");
         return Http1Response.Empty(200);
@@ -319,12 +395,23 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private Http1Response HandleMirrorSetup(PlistDictionary stream)
     {
         var streamId = Find(stream, "streamConnectionID") is PlistInteger id && id.Value >= 0 ? (ulong)id.Value : 0UL;
-        var ready = _decryptor.TryBind(streamId);
-        Activity.SetKeysReady(ready);
+        bool ready;
+        lock (_media)
+        {
+            _streamId = streamId;
+            _streamIdKnown = true;
+            ready = _decryptor.TryBind(streamId);
+            Activity.SetKeysReady(ready);
+            if (ready)
+            {
+                OnArmedLocked(streamId);
+            }
+        }
+
         _log.Log(ready ? AirPlayLogLevel.Information : AirPlayLogLevel.Warning,
             ready
                 ? "Mirror stream " + streamId + " is armed. data=" + Activity.DataPort + " timing=" + Activity.TimingPort
-                : "Mirror stream " + streamId + " has no content key. Type 0 payloads will be dropped. data=" + Activity.DataPort);
+                : "Mirror stream " + streamId + " is not armed yet. Type 0 payloads are held until the content key and pair-verify secret are ready. data=" + Activity.DataPort);
 
         var inner = new PlistDictionary();
         inner.Add("dataPort", new PlistInteger(Activity.DataPort));
@@ -367,6 +454,10 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             }
             catch (Exception ex) when (ex is OperationCanceledException or SocketException or ObjectDisposedException or EndOfStreamException or IOException)
             {
+            }
+            catch (Exception ex)
+            {
+                _log.Log(AirPlayLogLevel.Warning, "Mirror data connection stopped: " + ex.Message);
             }
 
             _log.Log(AirPlayLogLevel.Information, "Mirror data client disconnected.");
@@ -416,13 +507,20 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             try
             {
                 await ReadExactAsync(client, rented.AsMemory(0, parsed.PayloadSize), cancellationToken).ConfigureAwait(false);
-                if (parsed.PayloadType == 0)
+                try
                 {
-                    HandleEncrypted(rented.AsSpan(0, parsed.PayloadSize), parsed.IsKeyframe);
+                    if (parsed.PayloadType == 0)
+                    {
+                        HandleEncrypted(rented.AsSpan(0, parsed.PayloadSize), parsed.IsKeyframe);
+                    }
+                    else if (parsed.PayloadType == 1)
+                    {
+                        HandleCodec(rented.AsSpan(0, parsed.PayloadSize), parsed);
+                    }
                 }
-                else if (parsed.PayloadType == 1)
+                catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    HandleCodec(rented.AsSpan(0, parsed.PayloadSize), parsed);
+                    _log.Log(AirPlayLogLevel.Warning, "Mirror payload was not decoded: " + ex.Message);
                 }
             }
             finally
@@ -434,12 +532,28 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
     private void HandleEncrypted(Span<byte> payload, bool keyFrame)
     {
+        lock (_media)
+        {
+            if (!_decryptor.MediaKeysReady && !TryFinishArmLocked())
+            {
+                HoldEncryptedLocked(payload, keyFrame);
+                return;
+            }
+
+            DrainPendingLocked();
+            ConsumeEncryptedLocked(payload, keyFrame);
+        }
+    }
+
+    private void ConsumeEncryptedLocked(ReadOnlySpan<byte> payload, bool keyFrame)
+    {
         var plain = ArrayPool<byte>.Shared.Rent(payload.Length);
         try
         {
             if (!_decryptor.TryDecrypt(payload, plain.AsSpan(0, payload.Length)))
             {
                 Activity.DropEncrypted();
+                _log.Log(AirPlayLogLevel.Warning, "Encrypted mirror payload could not be decrypted. DroppedEncrypted=" + Activity.DroppedEncryptedPayloads + ", DecodedFrames=" + Activity.DecodedFrames + ".");
                 return;
             }
 
@@ -452,14 +566,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             }
 
             Activity.AcceptAccessUnit();
-            byte[]? sequence;
-            byte[]? picture;
-            lock (_gate)
-            {
-                sequence = _sequence;
-                picture = _picture;
-            }
-
+            var sequence = _sequence;
+            var picture = _picture;
             ReadOnlySpan<byte> presented = accessUnit;
             if (keyFrame && sequence is not null && picture is not null)
             {
@@ -468,11 +576,24 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
             if (_decoder.TryDecode(presented, keyFrame, out var frame))
             {
-                _frames.Publish(frame.Width, frame.Height, frame.Bgra.Span, frame.Stride);
+                PublishDecodedLocked(frame);
+                return;
             }
-            else if (Interlocked.Exchange(ref _loggedDecoder, 1) == 0)
+
+            if (keyFrame && (sequence is null || picture is null))
             {
-                _log.Log(AirPlayLogLevel.Information, "H.264 decoder \"" + _decoder.Name + "\" did not return a picture. Ciphertext is not shown as the phone screen.");
+                _heldKeyframe = accessUnit.ToArray();
+                if (Interlocked.Exchange(ref _loggedHeldKeyframe, 1) == 0)
+                {
+                    _log.Log(AirPlayLogLevel.Information, "Keyframe arrived before SPS/PPS and is held until codec data arrives.");
+                }
+
+                return;
+            }
+
+            if (Interlocked.Exchange(ref _loggedDecoder, 1) == 0)
+            {
+                _log.Log(AirPlayLogLevel.Information, "H.264 decoder \"" + _decoder.Name + "\" did not return a picture. Ciphertext is not shown as the phone screen. DecodedFrames=" + Activity.DecodedFrames + ".");
             }
         }
         finally
@@ -495,17 +616,169 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             return;
         }
 
-        lock (_gate)
+        lock (_media)
         {
             _sequence = sequence;
             _picture = picture;
+            // Record the configuration before the decoder callback. A waiter resumed
+            // from Configure must already observe CodecConfigurations.
+            Activity.ConfigureCodec();
+            _decoder.Configure(sequence, picture);
+            if (_heldKeyframe is not null)
+            {
+                var held = _heldKeyframe;
+                _heldKeyframe = null;
+                PresentAnnexLocked(held, keyFrame: true);
+            }
+        }
+    }
+
+    private void PresentAnnexLocked(ReadOnlySpan<byte> annexB, bool keyFrame)
+    {
+        ReadOnlySpan<byte> presented = annexB;
+        if (keyFrame && _sequence is not null && _picture is not null)
+        {
+            presented = PrefixParameterSets(_sequence, _picture, annexB);
         }
 
-        // Record the configuration before the decoder callback. A waiter resumed
-        // from Configure must already observe CodecConfigurations.
-        Activity.ConfigureCodec();
-        _decoder.Configure(sequence, picture);
+        if (_decoder.TryDecode(presented, keyFrame, out var frame))
+        {
+            PublishDecodedLocked(frame);
+        }
+        else if (Interlocked.Exchange(ref _loggedDecoder, 1) == 0)
+        {
+            _log.Log(AirPlayLogLevel.Information, "H.264 decoder \"" + _decoder.Name + "\" did not return a picture. Ciphertext is not shown as the phone screen. DecodedFrames=" + Activity.DecodedFrames + ".");
+        }
     }
+
+    private void PublishDecodedLocked(DecodedFrame frame)
+    {
+        _frames.Publish(frame.Width, frame.Height, frame.Bgra.Span, frame.Stride);
+        Activity.DecodeFrame();
+        if (Interlocked.Exchange(ref _loggedDecoded, 1) == 0)
+        {
+            _log.Log(AirPlayLogLevel.Information, "Decoded mirror frame " + frame.Width + "x" + frame.Height + " published for the window and TapClock.");
+        }
+    }
+
+    private bool TryFinishArmLocked()
+    {
+        if (_decryptor.MediaKeysReady)
+        {
+            return true;
+        }
+
+        if (_wrappedEkey is not null)
+        {
+            var unwrapped = new byte[16];
+            if (_unwrapper.TryUnwrap(_wrappedEkey, unwrapped))
+            {
+                _decryptor.SetContentKey(unwrapped);
+                CryptographicOperations.ZeroMemory(unwrapped);
+                ClearWrappedEkey();
+                _log.Log(AirPlayLogLevel.Information, "FairPlay handshake unwrapped the 72-byte ekey.");
+            }
+        }
+
+        if (!_streamIdKnown)
+        {
+            Activity.SetKeysReady(false);
+            return false;
+        }
+
+        var ready = _decryptor.TryBind(_streamId);
+        Activity.SetKeysReady(ready);
+        if (ready)
+        {
+            _log.Log(AirPlayLogLevel.Information, "Mirror stream " + _streamId + " is armed after the content key became ready.");
+            OnArmedLocked(_streamId);
+        }
+
+        return ready;
+    }
+
+    private void OnArmedLocked(ulong streamId)
+    {
+        if (_hasArmedStream && _armedStreamId != streamId)
+        {
+            ClearPendingLocked();
+            _heldKeyframe = null;
+        }
+        else
+        {
+            DrainPendingLocked();
+        }
+
+        _armedStreamId = streamId;
+        _hasArmedStream = true;
+    }
+
+    private void DrainPendingLocked()
+    {
+        var replayed = 0;
+        while (_pending.Count > 0 && _decryptor.MediaKeysReady)
+        {
+            var item = _pending.Dequeue();
+            _pendingBytes -= item.Payload.Length;
+            if (_pendingBytes < 0)
+            {
+                _pendingBytes = 0;
+            }
+
+            replayed++;
+            ConsumeEncryptedLocked(item.Payload, item.KeyFrame);
+        }
+
+        Activity.SetPendingEncrypted(_pending.Count);
+        if (replayed > 0)
+        {
+            _log.Log(AirPlayLogLevel.Information, "Replayed " + replayed + " held encrypted mirror payload(s).");
+        }
+    }
+
+    private void HoldEncryptedLocked(ReadOnlySpan<byte> payload, bool keyFrame)
+    {
+        var limit = Math.Max(1, PendingEncryptedByteLimit);
+        if (_decryptor.LostAlignment || _pendingBytes > limit - payload.Length)
+        {
+            _decryptor.FailStream();
+            ClearPendingLocked();
+            Activity.DropEncrypted();
+            Activity.SetKeysReady(false);
+            if (Interlocked.Exchange(ref _loggedOverflow, 1) == 0)
+            {
+                _log.Log(AirPlayLogLevel.Warning, "Encrypted mirror data before the content key overflowed the hold buffer. This stream stays dropped until the phone starts a new mirror session.");
+            }
+
+            return;
+        }
+
+        _pending.Enqueue(new PendingCipher(payload.ToArray(), keyFrame));
+        _pendingBytes += payload.Length;
+        Activity.SetPendingEncrypted(_pending.Count);
+        if (Interlocked.Exchange(ref _loggedHold, 1) == 0)
+        {
+            _log.Log(AirPlayLogLevel.Warning, "Encrypted mirror payload is held until the content key is ready. It is not counted as dropped.");
+        }
+    }
+
+    private void ClearPendingLocked()
+    {
+        _pending.Clear();
+        _pendingBytes = 0;
+        Activity.SetPendingEncrypted(0);
+    }
+
+    private void ClearWrappedEkey()
+    {
+        if (_wrappedEkey is not null)
+        {
+            CryptographicOperations.ZeroMemory(_wrappedEkey);
+            _wrappedEkey = null;
+        }
+    }
+
+    private readonly record struct PendingCipher(byte[] Payload, bool KeyFrame);
 
     private async Task TimingLoop()
     {

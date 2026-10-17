@@ -104,26 +104,71 @@ internal static class BaselineJpegEncoder
         return output.ToArray();
     }
 
-    private static void EncodeBlock(double[] samples, ReadOnlySpan<int> quant, int[] coefficients, ref int previousDc, HuffmanTable dc, HuffmanTable ac, BitWriter bits)
+    internal static bool TryReadSize(ReadOnlySpan<byte> jpeg, out int width, out int height)
     {
-        for (var v = 0; v < 8; v++)
+        width = 0;
+        height = 0;
+        if (jpeg.Length < 4 || jpeg[0] != 0xFF || jpeg[1] != 0xD8)
         {
-            for (var u = 0; u < 8; u++)
+            return false;
+        }
+
+        var index = 2;
+        while (index + 4 < jpeg.Length)
+        {
+            if (jpeg[index] != 0xFF)
             {
-                double sum = 0;
-                for (var y = 0; y < 8; y++)
+                return false;
+            }
+
+            while (index < jpeg.Length && jpeg[index] == 0xFF)
+            {
+                index++;
+            }
+
+            if (index >= jpeg.Length)
+            {
+                return false;
+            }
+
+            var marker = jpeg[index++];
+            if (marker is 0xD8 or 0xD9 or 0xDA or 0x01 || (marker >= 0xD0 && marker <= 0xD7))
+            {
+                return false;
+            }
+
+            if (index + 1 >= jpeg.Length)
+            {
+                return false;
+            }
+
+            var length = (jpeg[index] << 8) | jpeg[index + 1];
+            if (length < 2 || index + length > jpeg.Length)
+            {
+                return false;
+            }
+
+            if (marker == 0xC0)
+            {
+                if (length < 7)
                 {
-                    for (var x = 0; x < 8; x++)
-                    {
-                        sum += samples[(y * 8) + x] * Cosine[u, x] * Cosine[v, y];
-                    }
+                    return false;
                 }
 
-                var cu = u == 0 ? 0.7071067811865476 : 1d;
-                var cv = v == 0 ? 0.7071067811865476 : 1d;
-                coefficients[(v * 8) + u] = (int)Math.Round((sum * 0.25 * cu * cv) / quant[(v * 8) + u]);
+                height = (jpeg[index + 3] << 8) | jpeg[index + 4];
+                width = (jpeg[index + 5] << 8) | jpeg[index + 6];
+                return width > 0 && height > 0;
             }
+
+            index += length;
         }
+
+        return false;
+    }
+
+    private static void EncodeBlock(double[] samples, ReadOnlySpan<int> quant, int[] coefficients, ref int previousDc, HuffmanTable dc, HuffmanTable ac, BitWriter bits)
+    {
+        ForwardDct(samples, quant, coefficients);
 
         Span<int> zigzag = stackalloc int[64];
         for (var i = 0; i < 64; i++)
@@ -157,6 +202,60 @@ internal static class BaselineJpegEncoder
         if (trailing || run > 0)
         {
             ac.Write(0x00, bits);
+        }
+    }
+
+    private static void ForwardDct(double[] samples, ReadOnlySpan<int> quant, int[] coefficients)
+    {
+        Span<double> horizontal = stackalloc double[64];
+        Span<double> row = stackalloc double[8];
+        Span<double> frequency = stackalloc double[8];
+        for (var y = 0; y < 8; y++)
+        {
+            for (var x = 0; x < 8; x++)
+            {
+                row[x] = samples[(y * 8) + x];
+            }
+
+            Dct8(row, frequency);
+            for (var u = 0; u < 8; u++)
+            {
+                horizontal[(y * 8) + u] = frequency[u];
+            }
+        }
+
+        Span<double> column = stackalloc double[8];
+        for (var u = 0; u < 8; u++)
+        {
+            for (var y = 0; y < 8; y++)
+            {
+                column[y] = horizontal[(y * 8) + u];
+            }
+
+            Dct8(column, frequency);
+            var cu = u == 0 ? 0.7071067811865476 : 1d;
+            for (var v = 0; v < 8; v++)
+            {
+                var cv = v == 0 ? 0.7071067811865476 : 1d;
+                var rounded = (int)Math.Round((frequency[v] * 0.25 * cu * cv) / quant[(v * 8) + u]);
+                // Baseline Huffman tables stop at DC category 11 and AC category 10.
+                var limit = u == 0 && v == 0 ? 1020 : 1023;
+                coefficients[(v * 8) + u] = Math.Clamp(rounded, -limit, limit);
+            }
+        }
+    }
+
+    private static void Dct8(ReadOnlySpan<double> input, Span<double> output)
+    {
+        for (var bin = 0; bin < 8; bin++)
+        {
+            double sum = 0;
+            for (var sample = 0; sample < 8; sample++)
+            {
+                sum += input[sample] * Cosine[bin, sample];
+            }
+
+            output[bin] = sum;
         }
     }
 

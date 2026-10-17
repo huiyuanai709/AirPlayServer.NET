@@ -119,7 +119,7 @@ int AirPlay_FairPlaySetup(const uint8_t* request, int requestLength,
 
 返回 1 表示成功。没有对应导出，或者它返回 0 时，那一项失败关闭。
 
-没有内容密钥，或者还没有 pair-verify 的 32 字节共享秘密时，type 0 负载会被丢弃并计数（`Mirror.DroppedEncryptedPayloads`）。type 1 的 SPS/PPS 是明文，仍然会解析。
+没有内容密钥，或者还没有 pair-verify 的 32 字节共享秘密时，type 0 负载先放进 hold 缓冲（`Mirror.PendingEncryptedPayloads`），不推进 AES-CTR。握手和 stream id 到齐后按原顺序解密。缓冲放不下，或者中间丢掉了字节，这一条流才会记入 `Mirror.DroppedEncryptedPayloads`，并且要等下一次会话才能重新对齐。type 1 的 SPS/PPS 是明文，仍然会解析。
 
 ## 画面与 TapClock
 
@@ -129,7 +129,22 @@ Windows 宿主默认打开 GDI 窗口，把最新一帧拉伸进去。`--no-wind
 
 TapClock 的点击留在它自己的主机 TCP `42123`（ATB/1）。坐标是板上的 HID 计数（AssistiveTouch），不是这台电脑窗口里的像素。`--screen` 是向手机宣告的逻辑分辨率（`/info` 里的宽高）。和 TapClock 一起用时，镜像宣告常用 `480x1040`，宿主默认就是这个尺寸，用来对齐那次校准。库的默认值仍是 1920×1080，避免把协议测试绑死在这块板上。
 
-帧导出默认关闭。合同以 [TapClock airplay.md](https://github.com/huiyuanai709/TapClock/blob/main/docs/airplay.md) 为准：
+帧导出默认关闭。合同以 [TapClock airplay.md](https://github.com/huiyuanai709/TapClock/blob/main/docs/airplay.md) 为准。`--tapclock` 订阅的是直播的 `FrameSlot`：FairPlay 解开并解码出的画面会推过去，不依赖 `--demo-frame`。`--demo-frame` 只是一张合成图。
+
+Windows 上的顺序：
+
+1. 先启动 TapClock，让它监听 ATBF（TCP `42125`）。点击仍是 TapClock 自己的 ATB/1，TCP `42123`。
+2. 再启动宿主。FairPlay 默认开着，不要加 `--demo-frame`：
+
+```powershell
+./artifacts/win-x64/AirPlayServer.Host.exe --screen 480x1040 --tapclock 127.0.0.1:42125
+```
+
+3. iPhone 在同一局域网里发现接收端并镜像。
+
+`POST /fp-setup` 如果比带 `ekey` 的 SETUP 晚到，72 字节 `ekey` 会留着，握手完成后重试解开，这段时间的密文会按到达顺序补解密，而不是直接丢掉。关键帧如果比 SPS/PPS 早到，会留到 codec 数据到达后再解码。Hold 缓冲溢出会让这一条流保持丢弃，直到手机重新开一次镜像。`Mirror.DecodedFrames` 只在真正写出 BGRA 时增加；`DroppedEncryptedPayloads` 只计被丢掉的密文；`PendingEncryptedPayloads` 是还在等密钥的包。连不上 TapClock 时，控制台会写出 `TapClock connect to host:port failed` 并继续重试。
+
+合同：
 
 - 优先：TCP 连到 `主机:42125`。12 字节小端头是 `ATBF` | version = 1 | type u8 | flags u16 | length u32，然后是负载。
 - Type 3 是一整张 PNG 或 JPEG。本进程发送 JPEG，flags = 0。不发送 H.264 type 1/2。

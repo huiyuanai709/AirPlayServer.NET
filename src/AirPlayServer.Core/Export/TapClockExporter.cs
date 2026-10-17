@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Sockets;
 using AirPlayServer.Core.Video;
 
@@ -17,6 +18,8 @@ internal sealed class TapClockExporter : IAsyncDisposable
     private readonly Task _loop;
     private int _delivered;
     private int _loggedSend;
+    private int _connectFailed;
+    private long _nextConnectLog;
     private int _disposed;
 
     private TapClockExporter(TapClockExportOptions options, FrameSlot frames, IAirPlayLog log, CancellationToken cancellationToken)
@@ -87,11 +90,18 @@ internal sealed class TapClockExporter : IAsyncDisposable
         long sentGeneration = 0;
         try
         {
+            if (!string.IsNullOrWhiteSpace(_options.Endpoint))
+            {
+                socket = await EnsureConnectedAsync(socket, cancellationToken).ConfigureAwait(false);
+            }
+
             while (!cancellationToken.IsCancellationRequested)
             {
+                var width = 0;
+                var height = 0;
                 try
                 {
-                    if (_frames.TryRead(out var width, out var height, out var stride, out var pixels, out var generation)
+                    if (_frames.TryRead(out width, out height, out var stride, out var pixels, out var generation)
                         && generation != sentGeneration)
                     {
                         var jpeg = BaselineJpegEncoder.EncodeBgra(pixels, width, height, stride, _options.JpegQuality);
@@ -103,6 +113,10 @@ internal sealed class TapClockExporter : IAsyncDisposable
                             Interlocked.Increment(ref _delivered);
                         }
                     }
+                    else if (socket is null && !string.IsNullOrWhiteSpace(_options.Endpoint))
+                    {
+                        socket = await EnsureConnectedAsync(socket, cancellationToken).ConfigureAwait(false);
+                    }
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -112,7 +126,7 @@ internal sealed class TapClockExporter : IAsyncDisposable
                 {
                     socket?.Dispose();
                     socket = null;
-                    _log.Log(AirPlayLogLevel.Warning, "TapClock frame export failed: " + ex.Message);
+                    _log.Log(AirPlayLogLevel.Warning, "TapClock frame export failed (" + width + "x" + height + "): " + ex.Message);
                 }
 
                 try
@@ -158,58 +172,134 @@ internal sealed class TapClockExporter : IAsyncDisposable
     {
         if (!TapClockExportOptions.TryParseEndpoint(_options.Endpoint!, out var host, out var port))
         {
+            NoteConnectFailure(host, port, new IOException("TapClock endpoint could not be parsed."));
             return null;
         }
 
         var packet = AtbfFraming.ImageFrame(jpeg);
-        for (var attempt = 0; attempt < 2; attempt++)
+        socket = await EnsureConnectedAsync(socket, cancellationToken).ConfigureAwait(false);
+        if (socket is null)
         {
-            try
+            return null;
+        }
+
+        try
+        {
+            var sent = 0;
+            while (sent < packet.Length)
             {
-                if (socket is null || !socket.Connected)
+                var count = await socket.SendAsync(packet.AsMemory(sent), SocketFlags.None, cancellationToken).ConfigureAwait(false);
+                if (count == 0)
                 {
-                    socket?.Dispose();
-                    socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
-                    {
-                        NoDelay = true,
-                    };
-                    using var connectTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                    connectTimeout.CancelAfter(TimeSpan.FromSeconds(2));
-                    await socket.ConnectAsync(host, port, connectTimeout.Token).ConfigureAwait(false);
+                    throw new IOException("TapClock closed the connection.");
                 }
 
-                var sent = 0;
-                while (sent < packet.Length)
-                {
-                    var count = await socket.SendAsync(packet.AsMemory(sent), SocketFlags.None, cancellationToken).ConfigureAwait(false);
-                    if (count == 0)
-                    {
-                        throw new IOException("TapClock closed the connection.");
-                    }
-
-                    sent += count;
-                }
-
-                if (Interlocked.Exchange(ref _loggedSend, 1) == 0)
-                {
-                    _log.Log(AirPlayLogLevel.Information, "TapClock ATBF JPEG sent to " + host + ":" + port + " (type 3, flags 0).");
-                }
-
-                return socket;
+                sent += count;
             }
-            catch (Exception) when (attempt == 0 && !cancellationToken.IsCancellationRequested)
+
+            if (Interlocked.Exchange(ref _loggedSend, 1) == 0)
             {
-                socket?.Dispose();
-                socket = null;
+                _log.Log(AirPlayLogLevel.Information, "TapClock ATBF JPEG sent to " + host + ":" + port + " (type 3, flags 0, " + jpeg.Length + " bytes).");
             }
-            catch
+
+            return socket;
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            socket.Dispose();
+            NoteConnectFailure(host, port, ex);
+            return null;
+        }
+    }
+
+    private async Task<Socket?> EnsureConnectedAsync(Socket? socket, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_options.Endpoint))
+        {
+            return socket;
+        }
+
+        if (socket is { Connected: true })
+        {
+            return socket;
+        }
+
+        socket?.Dispose();
+        socket = null;
+        if (!TapClockExportOptions.TryParseEndpoint(_options.Endpoint, out var host, out var port))
+        {
+            NoteConnectFailure(_options.Endpoint, 0, new IOException("TapClock endpoint must be host:port."));
+            return null;
+        }
+
+        var endpoint = await ResolveIPv4Async(host, port, cancellationToken).ConfigureAwait(false);
+        if (endpoint is null)
+        {
+            NoteConnectFailure(host, port, new IOException("No IPv4 address for " + host + "."));
+            return null;
+        }
+
+        var connected = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
+        {
+            NoDelay = true,
+        };
+        try
+        {
+            using var connectTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            connectTimeout.CancelAfter(TimeSpan.FromSeconds(2));
+            await connected.ConnectAsync(endpoint, connectTimeout.Token).ConfigureAwait(false);
+            _connectFailed = 0;
+            _log.Log(AirPlayLogLevel.Information, "TapClock connected to " + host + ":" + port + ".");
+            return connected;
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            connected.Dispose();
+            NoteConnectFailure(host, port, ex);
+            return null;
+        }
+    }
+
+    private async Task<IPEndPoint?> ResolveIPv4Async(string host, int port, CancellationToken cancellationToken)
+    {
+        if (IPAddress.TryParse(host, out var parsed))
+        {
+            return parsed.AddressFamily == AddressFamily.InterNetwork ? new IPEndPoint(parsed, port) : null;
+        }
+
+        IPAddress[] addresses;
+        try
+        {
+            addresses = await Dns.GetHostAddressesAsync(host, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is SocketException or ArgumentException)
+        {
+            NoteConnectFailure(host, port, ex);
+            return null;
+        }
+
+        foreach (var address in addresses)
+        {
+            if (address.AddressFamily == AddressFamily.InterNetwork)
             {
-                socket?.Dispose();
-                throw;
+                return new IPEndPoint(address, port);
             }
         }
 
         return null;
+    }
+
+    private void NoteConnectFailure(string host, int port, Exception ex)
+    {
+        var now = Environment.TickCount64;
+        if (_connectFailed == 1 && now < _nextConnectLog)
+        {
+            return;
+        }
+
+        _connectFailed = 1;
+        _nextConnectLog = now + 5000;
+        _log.Log(AirPlayLogLevel.Warning, "TapClock connect to " + host + ":" + port + " failed: " + ex.Message + ". Will keep retrying.");
     }
 
     private readonly record struct ExportAttempt(bool Delivered, Socket? Socket);

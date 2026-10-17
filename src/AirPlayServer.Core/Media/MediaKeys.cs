@@ -79,8 +79,10 @@ internal static class StreamCipher
 
 /// <summary>
 /// One mirror's content key and the CTR transform that continues across payloads.
-/// A payload that arrives before the key exists desynchronizes the counter; later
-/// packets stay dropped until the next stream bind.
+/// Ciphertext that arrives before the key is held by the mirror runtime and decrypted
+/// in order once the key exists. Bytes that are discarded before that point set
+/// <see cref="LostAlignment"/>; the same session cannot invent a new counter.
+/// A later session <see cref="SetMaterial"/> or <see cref="Reset"/> starts clean.
 /// </summary>
 internal sealed class MirrorDecryptor : IDisposable
 {
@@ -88,7 +90,7 @@ internal sealed class MirrorDecryptor : IDisposable
     private byte[]? _contentKey;
     private byte[]? _ecdh;
     private AesCtr? _ctr;
-    private bool _desynced;
+    private bool _lostAlignment;
 
     public bool MediaKeysReady
     {
@@ -96,7 +98,18 @@ internal sealed class MirrorDecryptor : IDisposable
         {
             lock (_gate)
             {
-                return _ctr is not null && !_desynced;
+                return _ctr is not null && !_lostAlignment;
+            }
+        }
+    }
+
+    public bool LostAlignment
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _lostAlignment;
             }
         }
     }
@@ -105,11 +118,56 @@ internal sealed class MirrorDecryptor : IDisposable
     {
         lock (_gate)
         {
+            Replace(contentKey, ecdhSecret, resetAlignment: true);
+        }
+    }
+
+    /// <summary>
+    /// Store a content key unlocked after a late FairPlay handshake.
+    /// Does not clear <see cref="LostAlignment"/> and does not restart CTR.
+    /// </summary>
+    public void SetContentKey(ReadOnlySpan<byte> contentKey)
+    {
+        if (contentKey.Length != 16)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
             _ctr?.Dispose();
             _ctr = null;
-            _desynced = false;
-            _contentKey = contentKey.Length == 16 ? contentKey.ToArray() : null;
-            _ecdh = ecdhSecret.Length == 32 ? ecdhSecret.ToArray() : null;
+            if (_contentKey is not null)
+            {
+                CryptographicOperations.ZeroMemory(_contentKey);
+            }
+
+            _contentKey = contentKey.ToArray();
+        }
+    }
+
+    /// <summary>
+    /// Remember a pair-verify secret that showed up after session SETUP.
+    /// Returns false when the stored secret is already these bytes.
+    /// </summary>
+    public bool NoteSecret(ReadOnlySpan<byte> ecdhSecret)
+    {
+        if (ecdhSecret.Length != 32)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (_ecdh is not null && _ecdh.AsSpan().SequenceEqual(ecdhSecret))
+            {
+                return false;
+            }
+
+            _ctr?.Dispose();
+            _ctr = null;
+            _ecdh = ecdhSecret.ToArray();
+            return true;
         }
     }
 
@@ -117,9 +175,15 @@ internal sealed class MirrorDecryptor : IDisposable
     {
         lock (_gate)
         {
+            if (_lostAlignment)
+            {
+                _ctr?.Dispose();
+                _ctr = null;
+                return false;
+            }
+
             _ctr?.Dispose();
             _ctr = null;
-            _desynced = false;
             if (_contentKey is null || _ecdh is null)
             {
                 return false;
@@ -135,13 +199,22 @@ internal sealed class MirrorDecryptor : IDisposable
         }
     }
 
+    public void FailStream()
+    {
+        lock (_gate)
+        {
+            _lostAlignment = true;
+            _ctr?.Dispose();
+            _ctr = null;
+        }
+    }
+
     public bool TryDecrypt(ReadOnlySpan<byte> input, Span<byte> output)
     {
         lock (_gate)
         {
-            if (_ctr is null || _desynced)
+            if (_ctr is null || _lostAlignment)
             {
-                _desynced = true;
                 return false;
             }
 
@@ -154,18 +227,27 @@ internal sealed class MirrorDecryptor : IDisposable
     {
         lock (_gate)
         {
-            _ctr?.Dispose();
-            _ctr = null;
-            _desynced = false;
-            if (_contentKey is not null)
-            {
-                CryptographicOperations.ZeroMemory(_contentKey);
-            }
-
-            _contentKey = null;
-            _ecdh = null;
+            Replace([], [], resetAlignment: true);
         }
     }
 
     public void Dispose() => Reset();
+
+    private void Replace(ReadOnlySpan<byte> contentKey, ReadOnlySpan<byte> ecdhSecret, bool resetAlignment)
+    {
+        _ctr?.Dispose();
+        _ctr = null;
+        if (resetAlignment)
+        {
+            _lostAlignment = false;
+        }
+
+        if (_contentKey is not null)
+        {
+            CryptographicOperations.ZeroMemory(_contentKey);
+        }
+
+        _contentKey = contentKey.Length == 16 ? contentKey.ToArray() : null;
+        _ecdh = ecdhSecret.Length == 32 ? ecdhSecret.ToArray() : null;
+    }
 }

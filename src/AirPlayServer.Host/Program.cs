@@ -125,6 +125,13 @@ internal sealed class Args
 
         FairPlay 默认开启。POST /fp-setup 和 72 字节 ekey 共用同一次进程内握手。
         TapClock 仍然用 --tapclock、--tapclock-dir、--tapclock-fps。
+        Windows 上让手机画面进 TapClock 的顺序：
+          1. 先启动 TapClock，让它监听 ATBF（TCP 42125）。点击仍走 TapClock 自己的 TCP 42123。
+          2. 再启动本宿主，FairPlay 默认开着，不要加 --demo-frame：
+             AirPlayServer.Host --screen 480x1040 --tapclock 127.0.0.1:42125
+          3. iPhone 发现这台电脑并开始镜像。解码出的最新帧会推给 TapClock。
+        握手或 SPS/PPS 比第一帧晚到时，主机会先保住数据，就绪后再解码并推送。
+        连不上 TapClock 时，控制台会写出失败原因并继续重试。
         --self-check     核对 X25519、Ed25519、一次 pair-verify，以及一张 JPEG/ATBF。
         --seed           仅存在于内存的 32 字节身份种子，不会写入磁盘。
         --screen         向手机宣告的逻辑分辨率。和 TapClock 配合时常用 480x1040，
@@ -220,6 +227,7 @@ internal sealed class Args
         }
 
         options.TapClock = tapClock;
+        options.Log ??= ConsoleAirPlayLog.Instance;
         options.EnableInProcessFairPlay();
         parsed.Options = options;
         return parsed;

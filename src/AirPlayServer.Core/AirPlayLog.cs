@@ -20,3 +20,23 @@ public sealed class NullAirPlayLog : IAirPlayLog
     {
     }
 }
+
+/// <summary>
+/// Writes receiver logs to stdout. The host uses this so FairPlay, decode, and
+/// TapClock connect failures are visible without a separate log sink.
+/// </summary>
+public sealed class ConsoleAirPlayLog : IAirPlayLog
+{
+    public static ConsoleAirPlayLog Instance { get; } = new();
+
+    public void Log(AirPlayLogLevel level, string message)
+    {
+        var prefix = level switch
+        {
+            AirPlayLogLevel.Error => "error: ",
+            AirPlayLogLevel.Warning => "warning: ",
+            _ => "",
+        };
+        Console.WriteLine(prefix + message);
+    }
+}

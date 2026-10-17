@@ -119,6 +119,19 @@ public sealed class FairPlayKeysTests
         await PairAsync(conversation);
         await SetupMirrorAsync(conversation, Ekey());
         Assert.False(receiver.Mirror.MediaKeysReady);
+
+        var phase1 = await conversation.ExchangeAsync("POST /fp-setup HTTP/1.1", SetupRequest(0));
+        Assert.Equal(200, phase1.Status);
+        Assert.False(receiver.Mirror.MediaKeysReady);
+
+        var handshake = await conversation.ExchangeAsync("POST /fp-setup HTTP/1.1", Handshake(0));
+        Assert.Equal(200, handshake.Status);
+        Assert.Equal(32, handshake.Body.Length);
+        Assert.True(receiver.Mirror.MediaKeysReady);
+
+        var contentKey = new byte[16];
+        Assert.True(keys.TryUnwrap(Ekey(), contentKey));
+        Assert.Equal(ContentKeys[0], Convert.ToHexString(contentKey).ToLowerInvariant());
     }
 
     [Fact]

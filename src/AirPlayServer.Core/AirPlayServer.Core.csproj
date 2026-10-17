@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <RootNamespace>AirPlayServer.Core</RootNamespace>
+    <AssemblyName>AirPlayServer.Core</AssemblyName>
+    <IsAotCompatible>true</IsAotCompatible>
+    <Description>AirPlay receive core: IPv4 mDNS advertisement, transient pairing, and the control connection.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AirPlayServer.Core.Tests" />
+  </ItemGroup>
+</Project>

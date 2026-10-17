@@ -11,6 +11,8 @@ namespace AirPlayServer.Core.Export;
 /// </summary>
 internal sealed class TapClockExporter : IAsyncDisposable
 {
+    internal static readonly TimeSpan ConnectAttemptTimeout = TimeSpan.FromSeconds(2);
+
     private readonly TapClockExportOptions _options;
     private readonly FrameSlot _frames;
     private readonly IAirPlayLog _log;
@@ -239,18 +241,23 @@ internal sealed class TapClockExporter : IAsyncDisposable
             return null;
         }
 
+        return await ConnectWithinTimeoutAsync(endpoint, host, port, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<Socket?> ConnectWithinTimeoutAsync(IPEndPoint endpoint, string host, int port, CancellationToken cancellationToken)
+    {
         var connected = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
         {
             NoDelay = true,
         };
+
+        // A closed port fails immediately on Linux. Windows can leave the same
+        // SYN pending, and cancelling ConnectAsync does not always complete it.
+        // Own the deadline and close the socket so the export loop can retry.
+        Task connectTask;
         try
         {
-            using var connectTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            connectTimeout.CancelAfter(TimeSpan.FromSeconds(2));
-            await connected.ConnectAsync(endpoint, connectTimeout.Token).ConfigureAwait(false);
-            _connectFailed = 0;
-            _log.Log(AirPlayLogLevel.Information, "TapClock connected to " + host + ":" + port + ".");
-            return connected;
+            connectTask = connected.ConnectAsync(endpoint);
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
@@ -258,6 +265,56 @@ internal sealed class TapClockExporter : IAsyncDisposable
             NoteConnectFailure(host, port, ex);
             return null;
         }
+
+        using var attempt = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var timeoutTask = Task.Delay(ConnectAttemptTimeout, attempt.Token);
+        await Task.WhenAny(connectTask, timeoutTask).ConfigureAwait(false);
+        if (cancellationToken.IsCancellationRequested)
+        {
+            connected.Dispose();
+            Observe(connectTask);
+            throw new OperationCanceledException(cancellationToken);
+        }
+
+        if (!connectTask.IsCompleted)
+        {
+            NoteConnectFailure(host, port, new TimeoutException("timed out"));
+            connected.Dispose();
+            Observe(connectTask);
+            return null;
+        }
+
+        try
+        {
+            await connectTask.ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            connected.Dispose();
+            NoteConnectFailure(host, port, ex);
+            return null;
+        }
+
+        if (!connected.Connected)
+        {
+            connected.Dispose();
+            NoteConnectFailure(host, port, new IOException("TapClock connect finished without a connection."));
+            return null;
+        }
+
+        attempt.Cancel();
+        _connectFailed = 0;
+        _log.Log(AirPlayLogLevel.Information, "TapClock connected to " + host + ":" + port + ".");
+        return connected;
+    }
+
+    private static void Observe(Task task)
+    {
+        _ = task.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private async Task<IPEndPoint?> ResolveIPv4Async(string host, int port, CancellationToken cancellationToken)

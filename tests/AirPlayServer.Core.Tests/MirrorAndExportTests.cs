@@ -438,7 +438,11 @@ public sealed class MirrorAndExportTests
         var slot = new FrameSlot();
         var options = new TapClockExportOptions { Endpoint = "127.0.0.1:1", FramesPerSecond = 20 };
         await using var exporter = TapClockExporter.Start(options, slot, log, CancellationToken.None);
-        await WaitUntilAsync(() => log.Contains("TapClock connect to 127.0.0.1:1 failed"));
+        // Windows does not refuse 127.0.0.1:1 within the shared 2s helper. The log
+        // is written when the exporter's own connect deadline expires.
+        await WaitUntilAsync(
+            () => log.Contains("TapClock connect to 127.0.0.1:1 failed"),
+            TapClockExporter.ConnectAttemptTimeout + TimeSpan.FromSeconds(3));
         slot.Publish(4, 4, new byte[64], 16);
         await Task.Delay(80);
         Assert.Equal(0, exporter.FramesDelivered);
@@ -572,9 +576,12 @@ public sealed class MirrorAndExportTests
         return jpeg;
     }
 
-    private static async Task WaitUntilAsync(Func<bool> condition)
+    private static Task WaitUntilAsync(Func<bool> condition) =>
+        WaitUntilAsync(condition, TimeSpan.FromSeconds(2));
+
+    private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
     {
-        var deadline = Environment.TickCount64 + 2000;
+        var deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
         while (!condition())
         {
             if (Environment.TickCount64 > deadline)

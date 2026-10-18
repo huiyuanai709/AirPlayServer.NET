@@ -116,6 +116,9 @@ PY
 }
 
 write_publish "$tmp/linux" "AirPlayServer.Host"
+# 0600 plus chmod +x becomes 0711 on Unix. The zip must still say 0755,
+# including when this fixture runs on Windows where chmod does not stick.
+chmod 600 "$tmp/linux/AirPlayServer.Host" || true
 "$stage" linux-x64 v0.0.0-test "$tmp/linux" "$tmp/linux.zip"
 expect_zip "$tmp/linux.zip" linux-x64 "AirPlayServer.Host" 1
 
@@ -124,16 +127,31 @@ import sys
 import zipfile
 name = "AirPlayServer.Host-v0.0.0-test-linux-x64/AirPlayServer.Host"
 with zipfile.ZipFile(sys.argv[1]) as archive:
-    print(archive.getinfo(name).external_attr >> 16)
+    info = archive.getinfo(name)
+    print(info.external_attr >> 16)
+    if info.create_system != 3:
+        sys.exit("linux binary create_system is not Unix")
 PY
 )"
-if [ $((mode & 0111)) -eq 0 ]; then
-  fail "linux binary is not executable in the zip (mode ${mode})"
+if [ $((mode & 0777)) -ne $((0755)) ]; then
+  fail "linux binary mode is ${mode}, want 0755"
 fi
 
 write_publish "$tmp/win" "AirPlayServer.Host.exe"
 "$stage" win-x64 v0.0.0-test "$tmp/win" "$tmp/win.zip"
 expect_zip "$tmp/win.zip" win-x64 "AirPlayServer.Host.exe" 0
+
+win_mode="$("$py" - "$tmp/win.zip" <<'PY'
+import sys
+import zipfile
+name = "AirPlayServer.Host-v0.0.0-test-win-x64/AirPlayServer.Host.exe"
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    print(archive.getinfo(name).external_attr >> 16)
+PY
+)"
+if [ $((win_mode & 0111)) -ne 0 ]; then
+  fail "win-x64 binary must not be marked executable (mode ${win_mode})"
+fi
 
 if "$stage" linux-x64 v0.0.0-test "$tmp/empty-publish" "$tmp/missing.zip" >/dev/null 2>"$tmp/missing.err"; then
   fail "missing binary should fail"

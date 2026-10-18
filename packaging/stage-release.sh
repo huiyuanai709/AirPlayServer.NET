@@ -116,6 +116,7 @@ STAGE_DIR="$stage" \
   EXPECT_SERVICE="$expect_service" \
   "$py" - <<'PY'
 import os
+import stat
 import sys
 import zipfile
 
@@ -125,6 +126,9 @@ prefix = os.environ["ZIP_PREFIX"]
 binary = os.environ["BINARY_NAME"]
 expect_exec = os.environ["EXPECT_EXEC"] == "1"
 expect_service = os.environ["EXPECT_SERVICE"] == "1"
+# Unix mode lives in the high 16 bits. Set it explicitly: Git Bash chmod
+# does not produce an execute bit that Python's zipfile will copy.
+linux_binary_attr = (stat.S_IFREG | 0o755) << 16
 
 os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
 if os.path.exists(dest):
@@ -136,7 +140,12 @@ with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name in sorted(filenames):
             path = os.path.join(dirpath, name)
             rel = os.path.relpath(path, stage).replace("\\", "/")
-            archive.write(path, prefix + "/" + rel)
+            arcname = prefix + "/" + rel
+            archive.write(path, arcname)
+            if expect_exec and name == binary:
+                info = archive.getinfo(arcname)
+                info.create_system = 3  # Unix, so unzip honors external_attr
+                info.external_attr = linux_binary_attr
 
     names = set(archive.namelist())
     required = [

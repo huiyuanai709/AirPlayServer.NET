@@ -8,9 +8,18 @@ namespace AirPlayServer.Core.Video;
 internal static class H264Sequence
 {
     public static bool TryGetDimensions(ReadOnlySpan<byte> sequenceParameterSet, out int width, out int height)
+        => TryGetPictureSize(sequenceParameterSet, out width, out height, out _, out _);
+
+    /// <summary>
+    /// Visible size is the cropped picture. Coded size is the macroblock grid the
+    /// decoder must be given; telling it the cropped size shears the planes into a double image.
+    /// </summary>
+    internal static bool TryGetPictureSize(ReadOnlySpan<byte> sequenceParameterSet, out int visibleWidth, out int visibleHeight, out int codedWidth, out int codedHeight)
     {
-        width = 0;
-        height = 0;
+        visibleWidth = 0;
+        visibleHeight = 0;
+        codedWidth = 0;
+        codedHeight = 0;
         if (sequenceParameterSet.Length < 4)
         {
             return false;
@@ -160,8 +169,8 @@ internal static class H264Sequence
             return false;
         }
 
-        var codedWidth = (int)(widthMbs + 1) * 16;
-        var codedHeight = (int)(heightUnits + 1) * 16 * (frameMbsOnly == 0 ? 2 : 1);
+        codedWidth = (int)(widthMbs + 1) * 16;
+        codedHeight = (int)(heightUnits + 1) * 16 * (frameMbsOnly == 0 ? 2 : 1);
         var chromaArray = separateColourPlane ? 0 : (int)chroma;
         int cropX;
         int cropY;
@@ -178,15 +187,17 @@ internal static class H264Sequence
             cropY = subHeight * (2 - frameMbsOnly);
         }
 
-        var visibleWidth = codedWidth - (int)(cropLeft + cropRight) * cropX;
-        var visibleHeight = codedHeight - (int)(cropTop + cropBottom) * cropY;
+        visibleWidth = codedWidth - (int)(cropLeft + cropRight) * cropX;
+        visibleHeight = codedHeight - (int)(cropTop + cropBottom) * cropY;
         if (visibleWidth is < 2 or > 8192 || visibleHeight is < 2 or > 8192)
         {
+            codedWidth = 0;
+            codedHeight = 0;
+            visibleWidth = 0;
+            visibleHeight = 0;
             return false;
         }
 
-        width = visibleWidth;
-        height = visibleHeight;
         return true;
     }
 

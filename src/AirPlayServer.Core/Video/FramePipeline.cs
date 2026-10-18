@@ -117,9 +117,10 @@ public sealed class FrameSlot
 
 /// <summary>
 /// H.264 access-unit decoder. The mirror pipeline converts AVCC length prefixes to
-/// Annex-B before calling <see cref="TryDecode"/>. A key frame may be prefixed with
-/// the cached SPS and PPS. Windows uses Media Foundation. Other platforms keep
-/// <see cref="UnavailableH264Decoder"/> unless the process supplies its own decoder.
+/// Annex-B before calling <see cref="TryDecode"/>. The first key frame after a new
+/// SPS/PPS may be prefixed with those parameter sets. Windows uses Media Foundation.
+/// Other platforms keep <see cref="UnavailableH264Decoder"/> unless the process
+/// supplies its own decoder.
 /// </summary>
 public interface IH264Decoder
 {
@@ -128,6 +129,12 @@ public interface IH264Decoder
     string Name { get; }
 
     void Configure(ReadOnlySpan<byte> sequenceParameterSet, ReadOnlySpan<byte> pictureParameterSet);
+
+    /// <summary>
+    /// Drop decoded reference pictures but keep the current parameter sets.
+    /// Used when the phone locks, resumes, or replaces the mirror stream.
+    /// </summary>
+    void Reset();
 
     bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame);
 }
@@ -143,6 +150,10 @@ public sealed class UnavailableH264Decoder : IH264Decoder
     public string Name => "unavailable";
 
     public void Configure(ReadOnlySpan<byte> sequenceParameterSet, ReadOnlySpan<byte> pictureParameterSet)
+    {
+    }
+
+    public void Reset()
     {
     }
 

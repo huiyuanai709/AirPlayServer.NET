@@ -50,7 +50,13 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private int _loggedOverflow;
     private int _loggedHeldKeyframe;
     private int _loggedDecoded;
+    private int _loggedBadAvcc;
+    private int _consecutiveBadAvcc;
+    private bool _prependParameterSets;
+    private bool _senderPaused;
     private int _disposed;
+
+    private const int BadAccessUnitLimit = 4;
 
     /// <summary>
     /// Ciphertext kept while FairPlay or the stream key is still missing.
@@ -237,22 +243,56 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
         if (method.Equals("TEARDOWN", StringComparison.OrdinalIgnoreCase))
         {
+            var kind = ClassifyTeardown(request);
+            if (kind == TeardownKind.AudioOnly)
+            {
+                _log.Log(AirPlayLogLevel.Information, "Audio teardown ignored. Mirror video stays armed.");
+                return Http1Response.Empty(200);
+            }
+
             lock (_media)
             {
-                _decryptor.Reset();
-                Activity.SetKeysReady(false);
-                Activity.SetPendingEncrypted(0);
-                ClearPendingLocked();
-                _heldKeyframe = null;
-                ClearWrappedEkey();
-                _streamIdKnown = false;
-                _hasArmedStream = false;
-                _sequence = null;
-                _picture = null;
+                if (kind == TeardownKind.VideoOnly)
+                {
+                    // The phone locks by tearing down type 110 and keeping the session
+                    // key. Wiping the content key here left the next SETUP unable to
+                    // decrypt, so the last picture stayed on screen.
+                    _decryptor.UnbindStream();
+                    _streamIdKnown = false;
+                    _hasArmedStream = false;
+                    _senderPaused = false;
+                    _prependParameterSets = false;
+                    _sequence = null;
+                    _picture = null;
+                    _heldKeyframe = null;
+                    ClearPendingLocked();
+                    ClearStreamHealthLocked();
+                    Activity.SetKeysReady(false);
+                }
+                else
+                {
+                    _decryptor.Reset();
+                    Activity.SetKeysReady(false);
+                    Activity.SetPendingEncrypted(0);
+                    ClearPendingLocked();
+                    _heldKeyframe = null;
+                    ClearWrappedEkey();
+                    _streamIdKnown = false;
+                    _hasArmedStream = false;
+                    _senderPaused = false;
+                    _prependParameterSets = false;
+                    _sequence = null;
+                    _picture = null;
+                    ClearStreamHealthLocked();
+                }
+
+                _decoder.Reset();
             }
 
             DropClient();
-            _log.Log(AirPlayLogLevel.Information, "Mirror teardown.");
+            _log.Log(AirPlayLogLevel.Information, kind == TeardownKind.VideoOnly
+                ? "Mirror video teardown. Session key kept for the next SETUP."
+                : "Mirror teardown.");
             return Http1Response.Empty(200);
         }
 
@@ -374,7 +414,12 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             _heldKeyframe = null;
             _sequence = null;
             _picture = null;
+            _prependParameterSets = false;
+            _senderPaused = false;
             _hasArmedStream = false;
+            _streamIdKnown = false;
+            ClearStreamHealthLocked();
+            _decoder.Reset();
             if (contentKey is null)
             {
                 _decryptor.SetMaterial([], secret);
@@ -387,6 +432,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             Activity.SetKeysReady(false);
         }
 
+        DropClient();
         var name = Find(root, "name") is PlistString sender ? sender.Value : "unknown";
         _log.Log(AirPlayLogLevel.Information, "Mirror session setup from " + name + ". Video CTR starts at the next type-110 SETUP.");
         return Http1Response.Empty(200);
@@ -394,18 +440,24 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
     private Http1Response HandleMirrorSetup(PlistDictionary stream)
     {
-        var streamId = Find(stream, "streamConnectionID") is PlistInteger id && id.Value >= 0 ? (ulong)id.Value : 0UL;
+        // streamConnectionID is a uint64. The high bit is set on some connects;
+        // reading it as a signed plist integer and rejecting the negative value
+        // derived the stream key for id 0, so every payload failed the AVCC check.
+        var streamId = Find(stream, "streamConnectionID") is PlistInteger id ? unchecked((ulong)id.Value) : 0UL;
         bool ready;
+        bool dropStaleClient;
         lock (_media)
         {
             _streamId = streamId;
             _streamIdKnown = true;
-            ready = _decryptor.TryBind(streamId);
+            ready = _decryptor.Restart(streamId);
             Activity.SetKeysReady(ready);
-            if (ready)
-            {
-                OnArmedLocked(streamId);
-            }
+            dropStaleClient = ready && OnArmedLocked(streamId);
+        }
+
+        if (dropStaleClient)
+        {
+            DropClient();
         }
 
         _log.Log(ready ? AirPlayLogLevel.Information : AirPlayLogLevel.Warning,
@@ -534,6 +586,21 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     {
         lock (_media)
         {
+            if (_decryptor.LostAlignment)
+            {
+                Activity.DropEncrypted();
+                return;
+            }
+
+            if (_senderPaused)
+            {
+                // Video resumed without a 0x16 codec packet. Drop pre-lock references
+                // so the next IDR does not blend into the frozen picture.
+                _senderPaused = false;
+                _prependParameterSets = true;
+                _decoder.Reset();
+            }
+
             if (!_decryptor.MediaKeysReady && !TryFinishArmLocked())
             {
                 HoldEncryptedLocked(payload, keyFrame);
@@ -560,27 +627,18 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             var accessUnit = plain.AsSpan(0, payload.Length);
             if (!AvccAnnexB.TryConvertInPlace(accessUnit))
             {
-                Activity.Reject();
-                _log.Log(AirPlayLogLevel.Warning, "Dropped a mirror payload that was not AVCC.");
+                NoteInvalidAccessUnitLocked();
                 return;
             }
 
+            _consecutiveBadAvcc = 0;
             Activity.AcceptAccessUnit();
-            var sequence = _sequence;
-            var picture = _picture;
-            ReadOnlySpan<byte> presented = accessUnit;
-            if (keyFrame && sequence is not null && picture is not null)
+            if (PresentAnnexLocked(accessUnit, keyFrame))
             {
-                presented = PrefixParameterSets(sequence, picture, accessUnit);
-            }
-
-            if (_decoder.TryDecode(presented, keyFrame, out var frame))
-            {
-                PublishDecodedLocked(frame);
                 return;
             }
 
-            if (keyFrame && (sequence is null || picture is null))
+            if (keyFrame && (_sequence is null || _picture is null))
             {
                 _heldKeyframe = accessUnit.ToArray();
                 if (Interlocked.Exchange(ref _loggedHeldKeyframe, 1) == 0)
@@ -618,37 +676,70 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
         lock (_media)
         {
+            var resume = header.SenderResumed || (_senderPaused && !header.SenderPaused);
+            if (header.SenderPaused)
+            {
+                _senderPaused = true;
+            }
+            else if (header.SenderResumed)
+            {
+                _senderPaused = false;
+            }
+
+            var changed = _sequence is null
+                || _picture is null
+                || !_sequence.AsSpan().SequenceEqual(sequence)
+                || !_picture.AsSpan().SequenceEqual(picture);
             _sequence = sequence;
             _picture = picture;
+            // Prefix only the next keyframe. Doing it on every 0x10 packet feeds a
+            // second copy of the parameter sets into the open GOP and the picture ghosts.
+            _prependParameterSets = true;
             // Record the configuration before the decoder callback. A waiter resumed
             // from Configure must already observe CodecConfigurations.
             Activity.ConfigureCodec();
-            _decoder.Configure(sequence, picture);
+            if (changed)
+            {
+                _decoder.Configure(sequence, picture);
+            }
+            else if (resume)
+            {
+                _decoder.Reset();
+            }
+
             if (_heldKeyframe is not null)
             {
                 var held = _heldKeyframe;
                 _heldKeyframe = null;
-                PresentAnnexLocked(held, keyFrame: true);
+                if (!PresentAnnexLocked(held, keyFrame: true) && Interlocked.Exchange(ref _loggedDecoder, 1) == 0)
+                {
+                    _log.Log(AirPlayLogLevel.Information, "H.264 decoder \"" + _decoder.Name + "\" did not return a picture. Ciphertext is not shown as the phone screen. DecodedFrames=" + Activity.DecodedFrames + ".");
+                }
             }
         }
     }
 
-    private void PresentAnnexLocked(ReadOnlySpan<byte> annexB, bool keyFrame)
+    private bool PresentAnnexLocked(ReadOnlySpan<byte> annexB, bool keyFrame)
     {
-        ReadOnlySpan<byte> presented = annexB;
-        if (keyFrame && _sequence is not null && _picture is not null)
+        var presented = annexB;
+        byte[]? prefixed = null;
+        if (_prependParameterSets && keyFrame && _sequence is not null && _picture is not null)
         {
-            presented = PrefixParameterSets(_sequence, _picture, annexB);
+            _prependParameterSets = false;
+            if (!AvccAnnexB.ContainsNalType(annexB, 7))
+            {
+                prefixed = PrefixParameterSets(_sequence, _picture, annexB);
+                presented = prefixed;
+            }
         }
 
-        if (_decoder.TryDecode(presented, keyFrame, out var frame))
+        if (!_decoder.TryDecode(presented, keyFrame, out var frame))
         {
-            PublishDecodedLocked(frame);
+            return false;
         }
-        else if (Interlocked.Exchange(ref _loggedDecoder, 1) == 0)
-        {
-            _log.Log(AirPlayLogLevel.Information, "H.264 decoder \"" + _decoder.Name + "\" did not return a picture. Ciphertext is not shown as the phone screen. DecodedFrames=" + Activity.DecodedFrames + ".");
-        }
+
+        PublishDecodedLocked(frame);
+        return true;
     }
 
     private void PublishDecodedLocked(DecodedFrame frame)
@@ -697,20 +788,67 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         return ready;
     }
 
-    private void OnArmedLocked(ulong streamId)
+    /// <summary>
+    /// Returns true when the data socket must be dropped. A new stream id has a new
+    /// CTR key; bytes still queued on the old socket would walk that counter and
+    /// every later payload would fail the AVCC check.
+    /// </summary>
+    private bool OnArmedLocked(ulong streamId)
     {
-        if (_hasArmedStream && _armedStreamId != streamId)
+        var switched = _hasArmedStream && _armedStreamId != streamId;
+        var restarted = _hasArmedStream && _armedStreamId == streamId;
+        if (switched || restarted)
         {
             ClearPendingLocked();
             _heldKeyframe = null;
+            if (switched)
+            {
+                _sequence = null;
+                _picture = null;
+                _prependParameterSets = false;
+            }
+
+            _decoder.Reset();
         }
         else
         {
             DrainPendingLocked();
         }
 
+        ClearStreamHealthLocked();
         _armedStreamId = streamId;
         _hasArmedStream = true;
+        return switched;
+    }
+
+    private void NoteInvalidAccessUnitLocked()
+    {
+        Activity.Reject();
+        if (_decryptor.LostAlignment)
+        {
+            return;
+        }
+
+        _consecutiveBadAvcc++;
+        if (Interlocked.Exchange(ref _loggedBadAvcc, 1) == 0)
+        {
+            _log.Log(AirPlayLogLevel.Warning, "Dropped a mirror payload that was not AVCC.");
+        }
+
+        if (_consecutiveBadAvcc < BadAccessUnitLimit)
+        {
+            return;
+        }
+
+        _decryptor.FailStream();
+        Activity.SetKeysReady(false);
+        _log.Log(AirPlayLogLevel.Warning, "Mirror payloads are not AVCC. This stream stays dropped until the next SETUP.");
+    }
+
+    private void ClearStreamHealthLocked()
+    {
+        _consecutiveBadAvcc = 0;
+        _loggedBadAvcc = 0;
     }
 
     private void DrainPendingLocked()
@@ -890,6 +1028,67 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         }
 
         return null;
+    }
+
+    private enum TeardownKind
+    {
+        Session = 0,
+        VideoOnly = 1,
+        AudioOnly = 2,
+    }
+
+    private static TeardownKind ClassifyTeardown(Http1Request request)
+    {
+        if (request.Body.Length == 0)
+        {
+            return TeardownKind.Session;
+        }
+
+        try
+        {
+            if (BinaryPropertyList.Read(request.Body) is not PlistDictionary root
+                || Find(root, "streams") is not PlistArray streams
+                || streams.Items.Count == 0)
+            {
+                return TeardownKind.Session;
+            }
+
+            var video = false;
+            var audio = false;
+            foreach (var item in streams.Items)
+            {
+                if (item is not PlistDictionary stream)
+                {
+                    continue;
+                }
+
+                var type = Find(stream, "type") is PlistInteger value ? value.Value : 0;
+                if (type == 110)
+                {
+                    video = true;
+                }
+                else if (type == 96)
+                {
+                    audio = true;
+                }
+            }
+
+            if (video && !audio)
+            {
+                return TeardownKind.VideoOnly;
+            }
+
+            if (audio && !video)
+            {
+                return TeardownKind.AudioOnly;
+            }
+
+            return TeardownKind.Session;
+        }
+        catch (FormatException)
+        {
+            return TeardownKind.Session;
+        }
     }
 
     private static Socket BindTcp(IPAddress listen)

@@ -87,7 +87,9 @@ public class HostArgsTests
         Assert.Contains("UIKit", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("/info", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("480x1040", HostArgs.HelpText, StringComparison.Ordinal);
-        Assert.Contains("绝对像素", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("TapClock x, y", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("像素 x, y", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("iphone-15-pro-max", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("点击仍然不发给手机", HostArgs.HelpText, StringComparison.Ordinal);
     }
 }

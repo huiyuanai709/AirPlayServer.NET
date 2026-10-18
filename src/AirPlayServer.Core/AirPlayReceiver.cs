@@ -151,7 +151,16 @@ public sealed class AirPlayReceiver : IAsyncDisposable
 #if WINDOWS_HOST
             if (options.ShowWindow && OperatingSystem.IsWindows())
             {
-                window = WindowsDisplayWindow.Start(frames, instance, log, CancellationToken.None);
+                // 0,0 keeps the hover readout in decoded-frame pixels (TapClock identity
+                // when no screen is configured). A --model size is the absolute screen.
+                var logical = options.TapClockLogicalScreen;
+                window = WindowsDisplayWindow.Start(
+                    frames,
+                    instance,
+                    log,
+                    logical?.Width ?? 0,
+                    logical?.Height ?? 0,
+                    CancellationToken.None);
             }
 #endif
             control = ControlServer.Start(

@@ -37,7 +37,7 @@ mDNS announcer                         control listeners :7001 and :5001
                     |                         |
                     |                         +-- Windows GDI window
                     |                         +-- ATBF type 3 JPEG -> TapClock :42125
-                    |                         +-- mirror.jpg.part -> mirror.jpg
+                    |                         +-- temp file -> mirror.jpg
                     +-- Windows: Media Foundation H.264 -> BGRA
                     +-- other OS: unavailable unless a decoder is supplied
 ```
@@ -193,7 +193,7 @@ Windows 上的顺序：
 
 上面这条里，`/info` 仍宣告 `480x1040`。`iphone-15-pro` 的 393×852 只作为 TapClock 的 UIKit 逻辑点。省略 `--model` 时广告尺寸不变，逻辑点留空。只写 `--model iphone-15-pro`、不写 `--screen` 时，广告仍是宿主默认的 `480x1040`。
 
-3. iPhone 在同一局域网里发现接收端并镜像。
+3. iPhone 在同一局域网里发现接收端并镜像。锁屏再解锁后，带 type 110 的 TEARDOWN（即使同一条里还有 type 96）只停视频：FairPlay 内容密钥和上一组 SPS/PPS 保留，下一次 type-110 SETUP 从计数器 0 重新开始，并丢掉锁屏前积压的密文。解不开的重复会话 SETUP 不会清掉正在用的密钥。Windows 上 Media Foundation 会释放当前解码器，下一帧重建，避免画面停在锁屏前的最后一帧。
 
 `POST /fp-setup` 如果比带 `ekey` 的 SETUP 晚到，72 字节 `ekey` 会留着，握手完成后重试解开，这段时间的密文会按到达顺序补解密，而不是直接丢掉。关键帧如果比 SPS/PPS 早到，会留到 codec 数据到达后再解码。Hold 缓冲溢出会让这一条流保持丢弃，直到手机重新开一次镜像。`Mirror.DecodedFrames` 只在真正写出 BGRA 时增加；`DroppedEncryptedPayloads` 只计被丢掉的密文；`PendingEncryptedPayloads` 是还在等密钥的包。连不上 TapClock 时，控制台会写出 `TapClock connect to host:port failed` 并继续重试。
 
@@ -201,7 +201,7 @@ Windows 上的顺序：
 
 - 优先：TCP 连到 `主机:42125`。12 字节小端头是 `ATBF` | version = 1 | type u8 | flags u16 | length u32，然后是负载。
 - Type 3 是一整张 PNG 或 JPEG。本进程发送 JPEG，flags = 0。不发送 H.264 type 1/2。
-- 备用：把 `mirror.jpg.part` 写进监视目录，再改名为 `mirror.jpg`。
+- 备用：把 JPEG 写进监视目录里的临时文件，再替换 `mirror.jpg`。目录不可写或文件被占用时，日志写出完整路径；同时开着 `--tapclock` 时，目录失败不会拆掉 TCP。
 - 不用共享内存、命名管道或 HTTP。
 - 节拍默认约 2 fps，同一代画面不重复发送。`--tapclock-fps` 可调，上限 30。
 

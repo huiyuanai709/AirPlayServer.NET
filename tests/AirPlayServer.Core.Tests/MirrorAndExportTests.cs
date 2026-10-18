@@ -131,6 +131,111 @@ public sealed class MirrorAndExportTests
     }
 
     [Fact]
+    public async Task Unwritable_watch_directory_does_not_drop_the_tcp_jpeg()
+    {
+        var blocker = Path.Combine(Path.GetTempPath(), "airplay-tapclock-file-" + Guid.NewGuid().ToString("N"));
+        await File.WriteAllBytesAsync(blocker, [1]);
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var slot = new FrameSlot();
+        DemoFrame.Publish(slot, 32, 24);
+        var log = new ListLog();
+        var options = new TapClockExportOptions
+        {
+            Endpoint = "127.0.0.1:" + port,
+            WatchDirectory = blocker,
+            FramesPerSecond = 20,
+        };
+        await using var exporter = TapClockExporter.Start(options, slot, log, CancellationToken.None);
+        using var accept = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var client = await listener.AcceptTcpClientAsync(accept.Token);
+        await using var stream = client.GetStream();
+        var jpeg = await ReadAtbfJpegAsync(stream);
+        Assert.True(BaselineJpegEncoder.TryReadSize(jpeg, out var width, out var height));
+        Assert.Equal(32, width);
+        Assert.Equal(24, height);
+        Assert.True(await exporter.WaitForDeliveryAsync(1, TimeSpan.FromSeconds(2)));
+        Assert.True(log.Contains(blocker));
+        Assert.True(log.Contains("not writable") || log.Contains("could not publish"));
+        Assert.False(log.Contains("frame export failed"));
+        File.Delete(blocker);
+    }
+
+    [Fact]
+    public async Task Tcp_only_phone_frame_exports_without_a_watch_directory()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        const int width = 720;
+        const int height = 1560;
+        var stride = width * 4;
+        var pixels = new byte[stride * height];
+        pixels[2] = 255;
+        pixels[stride + 1] = 180;
+        var slot = new FrameSlot();
+        Assert.True(slot.Publish(width, height, pixels, stride) > 0);
+        var log = new ListLog();
+        var options = new TapClockExportOptions
+        {
+            Endpoint = "127.0.0.1:" + port,
+            FramesPerSecond = 5,
+        };
+        await using var exporter = TapClockExporter.Start(options, slot, log, CancellationToken.None);
+        using var accept = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var client = await listener.AcceptTcpClientAsync(accept.Token);
+        await using var stream = client.GetStream();
+        var jpeg = await ReadAtbfJpegAsync(stream);
+        Assert.True(BaselineJpegEncoder.TryReadSize(jpeg, out var jpegWidth, out var jpegHeight));
+        Assert.Equal(width, jpegWidth);
+        Assert.Equal(height, jpegHeight);
+        Assert.True(await exporter.WaitForDeliveryAsync(1, TimeSpan.FromSeconds(2)));
+        Assert.False(log.Contains("Access to the path"));
+        Assert.False(log.Contains("frame export failed"));
+    }
+
+    [Fact]
+    public async Task Denied_move_still_publishes_mirror_jpg_and_closes_the_handle()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "airplay-tapclock-" + Guid.NewGuid().ToString("N"));
+        var first = new byte[] { 0xFF, 0xD8, 1, 0xFF, 0xD9 };
+        var second = new byte[] { 0xFF, 0xD8, 2, 3, 4, 0xFF, 0xD9 };
+        await AtomicImageFile.WriteJpegAsync(directory, first, CancellationToken.None);
+        await AtomicImageFile.WriteJpegAsync(
+            directory,
+            second,
+            (_, _) => throw new UnauthorizedAccessException("Access to the path is denied."),
+            CancellationToken.None);
+        var finalPath = Path.Combine(directory, "mirror.jpg");
+        Assert.Equal(second, await File.ReadAllBytesAsync(finalPath));
+        Assert.Empty(Directory.GetFiles(directory, "mirror-*.tmp"));
+        await using (var held = new FileStream(finalPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.Equal(second.Length, held.Length);
+        }
+
+        Directory.Delete(directory, recursive: true);
+    }
+
+    [Fact]
+    public async Task Denied_publish_names_the_mirror_jpg_path()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "airplay-tapclock-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var finalPath = Path.Combine(directory, "mirror.jpg");
+        Directory.CreateDirectory(finalPath);
+        var denied = await Assert.ThrowsAsync<IOException>(() => AtomicImageFile.WriteJpegAsync(
+            directory,
+            new byte[] { 0xFF, 0xD8, 0xFF, 0xD9 },
+            (_, _) => throw new UnauthorizedAccessException("Access to the path is denied."),
+            CancellationToken.None));
+        Assert.Contains(finalPath, denied.Message, StringComparison.Ordinal);
+        Assert.Empty(Directory.GetFiles(directory, "mirror-*.tmp"));
+        Directory.Delete(directory, recursive: true);
+    }
+
+    [Fact]
     public async Task Armed_mirror_stream_decrypts_avcc_and_unkeyed_stream_drops_it()
     {
         var decoder = new RecordingDecoder();

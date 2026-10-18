@@ -21,7 +21,9 @@ internal sealed class TapClockExporter : IAsyncDisposable
     private int _delivered;
     private int _loggedSend;
     private int _connectFailed;
+    private int _fileFailed;
     private long _nextConnectLog;
+    private long _nextFileLog;
     private int _disposed;
 
     private TapClockExporter(TapClockExportOptions options, FrameSlot frames, IAirPlayLog log, CancellationToken cancellationToken)
@@ -126,8 +128,9 @@ internal sealed class TapClockExporter : IAsyncDisposable
                 }
                 catch (Exception ex)
                 {
-                    socket?.Dispose();
-                    socket = null;
+                    // A file-publish failure used to land here and dispose the live
+                    // TapClock socket. Encode failures stay on this connection;
+                    // SendJpegAsync already drops the socket when the send itself fails.
                     _log.Log(AirPlayLogLevel.Warning, "TapClock frame export failed (" + width + "x" + height + "): " + ex.Message);
                 }
 
@@ -149,25 +152,50 @@ internal sealed class TapClockExporter : IAsyncDisposable
 
     private async Task<ExportAttempt> DeliverAsync(byte[] jpeg, Socket? socket, CancellationToken cancellationToken)
     {
-        var tcpOk = string.IsNullOrWhiteSpace(_options.Endpoint);
-        if (!tcpOk)
+        var wantTcp = !string.IsNullOrWhiteSpace(_options.Endpoint);
+        var tcpOk = !wantTcp;
+        if (wantTcp)
         {
             socket = await SendJpegAsync(socket, jpeg, cancellationToken).ConfigureAwait(false);
             tcpOk = socket is not null;
         }
 
-        var fileOk = string.IsNullOrWhiteSpace(_options.WatchDirectory);
-        if (!string.IsNullOrWhiteSpace(_options.WatchDirectory))
+        var wantFile = !string.IsNullOrWhiteSpace(_options.WatchDirectory);
+        var fileOk = !wantFile;
+        if (wantFile)
         {
-            await AtomicImageFile.WriteJpegAsync(_options.WatchDirectory, jpeg, cancellationToken).ConfigureAwait(false);
-            fileOk = true;
-            if (string.IsNullOrWhiteSpace(_options.Endpoint) && Interlocked.Exchange(ref _loggedSend, 1) == 0)
+            try
             {
-                _log.Log(AirPlayLogLevel.Information, "TapClock JPEG written to " + Path.Combine(_options.WatchDirectory, "mirror.jpg"));
+                await AtomicImageFile.WriteJpegAsync(_options.WatchDirectory!, jpeg, cancellationToken).ConfigureAwait(false);
+                fileOk = true;
+                if (!wantTcp && Interlocked.Exchange(ref _loggedSend, 1) == 0)
+                {
+                    _log.Log(AirPlayLogLevel.Information, "TapClock JPEG written to " + Path.Combine(_options.WatchDirectory!, "mirror.jpg"));
+                }
+            }
+            catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException) && !cancellationToken.IsCancellationRequested)
+            {
+                NoteFileFailure(ex);
             }
         }
 
-        return new ExportAttempt(tcpOk && fileOk, socket);
+        // TCP is the contract for --tapclock. A denied watch directory must not
+        // drop that socket or keep the same generation retrying forever.
+        var delivered = wantTcp ? tcpOk : fileOk;
+        return new ExportAttempt(delivered, socket);
+    }
+
+    private void NoteFileFailure(Exception ex)
+    {
+        var now = Environment.TickCount64;
+        if (_fileFailed == 1 && now < _nextFileLog)
+        {
+            return;
+        }
+
+        _fileFailed = 1;
+        _nextFileLog = now + 5000;
+        _log.Log(AirPlayLogLevel.Warning, "TapClock watch file was not published: " + ex.Message);
     }
 
     private async Task<Socket?> SendJpegAsync(Socket? socket, byte[] jpeg, CancellationToken cancellationToken)

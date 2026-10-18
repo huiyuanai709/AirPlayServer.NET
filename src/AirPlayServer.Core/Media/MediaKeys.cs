@@ -114,11 +114,22 @@ internal sealed class MirrorDecryptor : IDisposable
         }
     }
 
-    public void SetMaterial(ReadOnlySpan<byte> contentKey, ReadOnlySpan<byte> ecdhSecret)
+    public bool HasContentKey
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _contentKey is not null;
+            }
+        }
+    }
+
+    public void SetMaterial(ReadOnlySpan<byte> contentKey, ReadOnlySpan<byte> ecdhSecret, bool keepStoredSecret = false)
     {
         lock (_gate)
         {
-            Replace(contentKey, ecdhSecret, resetAlignment: true);
+            Replace(contentKey, ecdhSecret, resetAlignment: true, keepStoredSecret);
         }
     }
 
@@ -135,6 +146,12 @@ internal sealed class MirrorDecryptor : IDisposable
 
         lock (_gate)
         {
+            if (_contentKey is not null && _contentKey.AsSpan().SequenceEqual(contentKey))
+            {
+                // A repeated /fp-setup must not walk the live counter back to zero.
+                return;
+            }
+
             _ctr?.Dispose();
             _ctr = null;
             if (_contentKey is not null)
@@ -255,13 +272,13 @@ internal sealed class MirrorDecryptor : IDisposable
     {
         lock (_gate)
         {
-            Replace([], [], resetAlignment: true);
+            Replace([], [], resetAlignment: true, keepStoredSecret: false);
         }
     }
 
     public void Dispose() => Reset();
 
-    private void Replace(ReadOnlySpan<byte> contentKey, ReadOnlySpan<byte> ecdhSecret, bool resetAlignment)
+    private void Replace(ReadOnlySpan<byte> contentKey, ReadOnlySpan<byte> ecdhSecret, bool resetAlignment, bool keepStoredSecret)
     {
         _ctr?.Dispose();
         _ctr = null;
@@ -276,6 +293,13 @@ internal sealed class MirrorDecryptor : IDisposable
         }
 
         _contentKey = contentKey.Length == 16 ? contentKey.ToArray() : null;
-        _ecdh = ecdhSecret.Length == 32 ? ecdhSecret.ToArray() : null;
+        if (ecdhSecret.Length == 32)
+        {
+            _ecdh = ecdhSecret.ToArray();
+        }
+        else if (!keepStoredSecret)
+        {
+            _ecdh = null;
+        }
     }
 }

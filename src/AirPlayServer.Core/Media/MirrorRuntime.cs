@@ -54,6 +54,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private int _consecutiveBadAvcc;
     private bool _prependParameterSets;
     private bool _senderPaused;
+    private bool _discardHeld;
+    private CancellationTokenSource _clientStop = new();
     private int _disposed;
 
     private const int BadAccessUnitLimit = 4;
@@ -148,6 +150,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         }
 
         _decryptor.Dispose();
+        _clientStop.Dispose();
         if (_decoder is IDisposable disposable)
         {
             disposable.Dispose();
@@ -254,16 +257,17 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             {
                 if (kind == TeardownKind.VideoOnly)
                 {
-                    // The phone locks by tearing down type 110 and keeping the session
-                    // key. Wiping the content key here left the next SETUP unable to
-                    // decrypt, so the last picture stayed on screen.
+                    // The phone locks by tearing down type 110 (sometimes together
+                    // with type 96) and keeping the RTSP session. The content key
+                    // and the last SPS/PPS stay. Ciphertext still queued from the
+                    // old counter is dropped instead of being replayed on the next
+                    // stream id, which quarantined that stream after four bad AVCCs.
                     _decryptor.UnbindStream();
                     _streamIdKnown = false;
                     _hasArmedStream = false;
                     _senderPaused = false;
-                    _prependParameterSets = false;
-                    _sequence = null;
-                    _picture = null;
+                    _discardHeld = true;
+                    _prependParameterSets = _sequence is not null && _picture is not null;
                     _heldKeyframe = null;
                     ClearPendingLocked();
                     ClearStreamHealthLocked();
@@ -408,6 +412,22 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
         lock (_media)
         {
+            if (contentKey is null && _decryptor.HasContentKey)
+            {
+                // Unlock can repeat the session plist before /fp-setup has a new
+                // key message. Replacing the working key with an empty one left
+                // the next type-110 SETUP unable to arm, so the picture stayed
+                // on the last frame. A later handshake can still unwrap once
+                // the slot is empty; this duplicate does not clear it.
+                if (secret.Length == 32)
+                {
+                    _decryptor.NoteSecret(secret);
+                }
+
+                _log.Log(AirPlayLogLevel.Information, "SETUP did not supply a new content key. The session key already in use is kept.");
+                return Http1Response.Empty(200);
+            }
+
             ClearWrappedEkey();
             _wrappedEkey = wrapped;
             ClearPendingLocked();
@@ -422,11 +442,11 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             _decoder.Reset();
             if (contentKey is null)
             {
-                _decryptor.SetMaterial([], secret);
+                _decryptor.SetMaterial([], secret, keepStoredSecret: true);
             }
             else
             {
-                _decryptor.SetMaterial(contentKey, secret);
+                _decryptor.SetMaterial(contentKey, secret, keepStoredSecret: true);
             }
 
             Activity.SetKeysReady(false);
@@ -494,15 +514,23 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
             client.NoDelay = true;
             DropClient();
+            CancellationToken clientToken;
             lock (_gate)
             {
+                if (_clientStop.IsCancellationRequested)
+                {
+                    _clientStop.Dispose();
+                    _clientStop = new CancellationTokenSource();
+                }
+
                 _client = client;
+                clientToken = _clientStop.Token;
             }
 
             _log.Log(AirPlayLogLevel.Information, "Mirror data client connected.");
             try
             {
-                await ReadClientAsync(client, cancellationToken).ConfigureAwait(false);
+                await ReadClientAsync(client, clientToken, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is OperationCanceledException or SocketException or ObjectDisposedException or EndOfStreamException or IOException)
             {
@@ -516,12 +544,14 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         }
     }
 
-    private async Task ReadClientAsync(Socket client, CancellationToken cancellationToken)
+    private async Task ReadClientAsync(Socket client, CancellationToken clientToken, CancellationToken cancellationToken)
     {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(clientToken, cancellationToken);
+        var readToken = linked.Token;
         var header = new byte[128];
-        while (!cancellationToken.IsCancellationRequested)
+        while (!readToken.IsCancellationRequested)
         {
-            await ReadExactAsync(client, header.AsMemory(0, 4), cancellationToken).ConfigureAwait(false);
+            await ReadExactAsync(client, header.AsMemory(0, 4), readToken).ConfigureAwait(false);
             if ((header[0] == (byte)'P' && header[1] == (byte)'O' && header[2] == (byte)'S' && header[3] == (byte)'T')
                 || (header[0] == (byte)'G' && header[1] == (byte)'E' && header[2] == (byte)'T'))
             {
@@ -529,7 +559,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 return;
             }
 
-            await ReadExactAsync(client, header.AsMemory(4, 124), cancellationToken).ConfigureAwait(false);
+            await ReadExactAsync(client, header.AsMemory(4, 124), readToken).ConfigureAwait(false);
             if (!MirrorHeader.TryParse(header, out var parsed))
             {
                 return;
@@ -558,7 +588,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             var rented = ArrayPool<byte>.Shared.Rent(parsed.PayloadSize);
             try
             {
-                await ReadExactAsync(client, rented.AsMemory(0, parsed.PayloadSize), cancellationToken).ConfigureAwait(false);
+                await ReadExactAsync(client, rented.AsMemory(0, parsed.PayloadSize), readToken).ConfigureAwait(false);
                 try
                 {
                     if (parsed.PayloadType == 0)
@@ -759,7 +789,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             return true;
         }
 
-        if (_wrappedEkey is not null)
+        if (_wrappedEkey is not null && !_decryptor.HasContentKey)
         {
             var unwrapped = new byte[16];
             if (_unwrapper.TryUnwrap(_wrappedEkey, unwrapped))
@@ -797,15 +827,22 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     {
         var switched = _hasArmedStream && _armedStreamId != streamId;
         var restarted = _hasArmedStream && _armedStreamId == streamId;
-        if (switched || restarted)
+        var discard = _discardHeld;
+        if (discard || switched || restarted)
         {
+            if (discard && _pending.Count > 0)
+            {
+                _log.Log(AirPlayLogLevel.Information, "Discarded " + _pending.Count + " encrypted payload(s) held across the video teardown.");
+            }
+
             ClearPendingLocked();
             _heldKeyframe = null;
-            if (switched)
+            _discardHeld = false;
+            if (discard && _sequence is not null && _picture is not null)
             {
-                _sequence = null;
-                _picture = null;
-                _prependParameterSets = false;
+                // The phone often does not send SPS/PPS again after unlock.
+                // Keeping the last parameter sets lets the next IDR decode.
+                _prependParameterSets = true;
             }
 
             _decoder.Reset();
@@ -993,13 +1030,44 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private void DropClient()
     {
         Socket? client;
+        CancellationTokenSource? stop = null;
         lock (_gate)
         {
             client = _client;
             _client = null;
+            if (client is not null && !_clientStop.IsCancellationRequested)
+            {
+                // Dispose alone does not always finish a pending ReceiveAsync
+                // on Windows, so the accept loop never saw the post-unlock socket.
+                stop = _clientStop;
+            }
         }
 
-        client?.Dispose();
+        if (stop is not null)
+        {
+            try
+            {
+                stop.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+
+        if (client is null)
+        {
+            return;
+        }
+
+        try
+        {
+            client.Shutdown(SocketShutdown.Both);
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException or PlatformNotSupportedException)
+        {
+        }
+
+        client.Dispose();
     }
 
     private static async Task ReadExactAsync(Socket socket, Memory<byte> buffer, CancellationToken cancellationToken)
@@ -1073,12 +1141,15 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 }
             }
 
-            if (video && !audio)
+            if (video)
             {
+                // Type 110 keeps the FairPlay session even when the same plist
+                // also tears down audio. Treating that as a full session reset
+                // erased the content key and the unlock SETUP could not decrypt.
                 return TeardownKind.VideoOnly;
             }
 
-            if (audio && !video)
+            if (audio)
             {
                 return TeardownKind.AudioOnly;
             }
@@ -1098,7 +1169,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         {
             socket.NoDelay = true;
             socket.Bind(new IPEndPoint(listen, 0));
-            socket.Listen(2);
+            socket.Listen(8);
             return socket;
         }
         catch

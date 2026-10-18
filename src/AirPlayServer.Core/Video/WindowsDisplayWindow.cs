@@ -1,5 +1,6 @@
 #if WINDOWS_HOST
 using System.Buffers.Binary;
+using System.Globalization;
 using System.Runtime.InteropServices;
 
 namespace AirPlayServer.Core.Video;
@@ -15,10 +16,15 @@ internal static partial class WindowsDisplayWindow
     private const uint WmTimer = 0x0113;
     private const uint WmPaint = 0x000F;
     private const uint WmCreate = 0x0001;
+    private const uint WmMouseMove = 0x0200;
+    private const uint WmMouseLeave = 0x02A3;
+    private const uint TmeLeave = 0x00000002;
     private const int GwlpUserData = -21;
     private const uint SrcCopy = 0x00CC0020;
     private const uint WsOverlappedWindow = 0x00CF0000;
     private const uint WsVisible = 0x10000000;
+    private const int ChipLeft = 8;
+    private const int ChipTop = 8;
 
     public static IAsyncDisposable Start(FrameSlot frames, string title, IAirPlayLog log, CancellationToken cancellationToken)
     {
@@ -30,7 +36,7 @@ internal static partial class WindowsDisplayWindow
     private sealed class Window : IAsyncDisposable
     {
         private readonly FrameSlot _frames;
-        private readonly string _title;
+        private readonly string _windowTitle;
         private readonly IAirPlayLog _log;
         private readonly CancellationToken _cancellation;
         private readonly byte[] _header = new byte[40];
@@ -38,11 +44,21 @@ internal static partial class WindowsDisplayWindow
         private Task _loop = Task.CompletedTask;
         private nint _hwnd;
         private int _disposed;
+        private int _pointerX;
+        private int _pointerY;
+        private bool _pointerInside;
+        private bool _leaveArmed;
+        private bool _hoverVisible;
+        private int _hoverX;
+        private int _hoverY;
+        private string? _hoverLabel;
+        private nint _hoverFont;
+        private bool _hoverFontOwned;
 
         public Window(FrameSlot frames, string title, IAirPlayLog log, CancellationToken cancellationToken)
         {
             _frames = frames;
-            _title = title;
+            _windowTitle = "AirPlayServer.NET — " + title;
             _log = log;
             _cancellation = cancellationToken;
         }
@@ -91,6 +107,7 @@ internal static partial class WindowsDisplayWindow
                     WndProc = WindowProcedurePointer(),
                     Instance = GetModuleHandleW(0),
                     Background = 6,
+                    Cursor = LoadCursorW(0, 32512),
                     ClassName = className,
                 };
                 if (RegisterClassW(ref wndClass) == 0 && Marshal.GetLastPInvokeError() != 1410)
@@ -102,7 +119,7 @@ internal static partial class WindowsDisplayWindow
                 var hwnd = CreateWindowExW(
                     0,
                     "AirPlayServer.NET.Mirror",
-                    "AirPlayServer.NET — " + _title,
+                    _windowTitle,
                     WsOverlappedWindow | WsVisible,
                     unchecked((int)0x80000000),
                     unchecked((int)0x80000000),
@@ -154,7 +171,15 @@ internal static partial class WindowsDisplayWindow
 
                     Blit(hwnd);
                     return 0;
+                case WmMouseMove:
+                    // Button messages stay with DefWindowProc. Clicks in this window are not sent to the phone.
+                    OnPointerMove(hwnd, lParam);
+                    return 0;
+                case WmMouseLeave:
+                    OnPointerLeave(hwnd);
+                    return 0;
                 case WmDestroy:
+                    ReleaseHoverFont();
                     PostQuitMessage(0);
                     return 0;
                 default:
@@ -166,6 +191,7 @@ internal static partial class WindowsDisplayWindow
         {
             if (!_frames.TryRead(out var width, out var height, out _, out var pixels, out _))
             {
+                ClearHover(hwnd);
                 return;
             }
 
@@ -174,8 +200,12 @@ internal static partial class WindowsDisplayWindow
                 return;
             }
 
-            var clientWidth = Math.Max(1, rect.Right - rect.Left);
-            var clientHeight = Math.Max(1, rect.Bottom - rect.Top);
+            var destination = FrameCoordinateMap.Stretch(rect.Right - rect.Left, rect.Bottom - rect.Top);
+            if (destination.Width <= 0 || destination.Height <= 0)
+            {
+                return;
+            }
+
             BinaryPrimitives.WriteInt32LittleEndian(_header.AsSpan(0), 40);
             BinaryPrimitives.WriteInt32LittleEndian(_header.AsSpan(4), width);
             BinaryPrimitives.WriteInt32LittleEndian(_header.AsSpan(8), -height);
@@ -194,10 +224,10 @@ internal static partial class WindowsDisplayWindow
                 SetStretchBltMode(dc, 3);
                 StretchDIBits(
                     dc,
-                    0,
-                    0,
-                    clientWidth,
-                    clientHeight,
+                    destination.X,
+                    destination.Y,
+                    destination.Width,
+                    destination.Height,
                     0,
                     0,
                     width,
@@ -206,6 +236,9 @@ internal static partial class WindowsDisplayWindow
                     headerPin.AddrOfPinnedObject(),
                     0,
                     SrcCopy);
+                // Hover uses this same rectangle. A client point outside it is a letterbox bar, not a frame pixel.
+                ApplyHover(hwnd, width, height, destination);
+                DrawHoverChip(dc);
             }
             finally
             {
@@ -217,6 +250,158 @@ internal static partial class WindowsDisplayWindow
                 headerPin.Free();
                 pixelsPin.Free();
             }
+        }
+
+        private void OnPointerMove(nint hwnd, nint lParam)
+        {
+            _pointerInside = true;
+            FrameCoordinateMap.ClientPoint(lParam, out _pointerX, out _pointerY);
+            if (!_leaveArmed)
+            {
+                var track = new TrackMouseEventInfo
+                {
+                    Size = Marshal.SizeOf<TrackMouseEventInfo>(),
+                    Flags = TmeLeave,
+                    Hwnd = hwnd,
+                };
+                _leaveArmed = TrackMouseEvent(ref track) != 0;
+            }
+
+            UpdateHoverReadout(hwnd);
+        }
+
+        private void OnPointerLeave(nint hwnd)
+        {
+            _leaveArmed = false;
+            _pointerInside = false;
+            UpdateHoverReadout(hwnd);
+        }
+
+        private void UpdateHoverReadout(nint hwnd)
+        {
+            if (!_pointerInside || !_frames.TryRead(out var width, out var height, out _, out _, out _))
+            {
+                ClearHover(hwnd);
+                return;
+            }
+
+            if (GetClientRect(hwnd, out var rect) == 0)
+            {
+                ClearHover(hwnd);
+                return;
+            }
+
+            ApplyHover(hwnd, width, height, FrameCoordinateMap.Stretch(rect.Right - rect.Left, rect.Bottom - rect.Top));
+        }
+
+        private void ApplyHover(nint hwnd, int frameWidth, int frameHeight, FrameCoordinateMap.FrameDestination destination)
+        {
+            if (!_pointerInside
+                || !FrameCoordinateMap.TryMapClientToFrame(_pointerX, _pointerY, destination, frameWidth, frameHeight, out var frameX, out var frameY))
+            {
+                ClearHover(hwnd);
+                return;
+            }
+
+            if (_hoverVisible && _hoverX == frameX && _hoverY == frameY)
+            {
+                return;
+            }
+
+            _hoverVisible = true;
+            _hoverX = frameX;
+            _hoverY = frameY;
+            _hoverLabel = "像素 " + frameX.ToString(CultureInfo.InvariantCulture) + ", " + frameY.ToString(CultureInfo.InvariantCulture);
+            // Coordinates lead the title so a narrow mirror window does not clip them.
+            SetWindowTextW(hwnd, _hoverLabel + " — " + _windowTitle);
+        }
+
+        private void ClearHover(nint hwnd)
+        {
+            _hoverLabel = null;
+            if (!_hoverVisible)
+            {
+                return;
+            }
+
+            _hoverVisible = false;
+            SetWindowTextW(hwnd, _windowTitle);
+        }
+
+        private void DrawHoverChip(nint dc)
+        {
+            var text = _hoverLabel;
+            if (text is null)
+            {
+                return;
+            }
+
+            var font = EnsureHoverFont();
+            var previous = font == 0 ? 0 : SelectObject(dc, font);
+            try
+            {
+                if (GetTextExtentPoint32W(dc, text, text.Length, out var size) == 0)
+                {
+                    return;
+                }
+
+                var width = size.Cx + 16;
+                var height = size.Cy + 10;
+                var box = new Rect
+                {
+                    Left = ChipLeft,
+                    Top = ChipTop,
+                    Right = ChipLeft + width,
+                    Bottom = ChipTop + height,
+                };
+                var brush = CreateSolidBrush(0x00161616);
+                if (brush != 0)
+                {
+                    FillRect(dc, ref box, brush);
+                    DeleteObject(brush);
+                }
+
+                SetBkMode(dc, 1);
+                SetTextColor(dc, 0x00F2F2F2);
+                TextOutW(dc, ChipLeft + 8, ChipTop + 4, text, text.Length);
+            }
+            finally
+            {
+                if (previous != 0)
+                {
+                    SelectObject(dc, previous);
+                }
+            }
+        }
+
+        private nint EnsureHoverFont()
+        {
+            if (_hoverFont != 0)
+            {
+                return _hoverFont;
+            }
+
+            var created = CreateFontW(-18, 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, "Microsoft YaHei");
+            if (created != 0)
+            {
+                _hoverFont = created;
+                _hoverFontOwned = true;
+                return created;
+            }
+
+            _hoverFont = GetStockObject(17);
+            return _hoverFont;
+        }
+
+        private void ReleaseHoverFont()
+        {
+            if (_hoverFontOwned && _hoverFont != 0)
+            {
+                DeleteObject(_hoverFont);
+            }
+
+            _hoverFont = 0;
+            _hoverFontOwned = false;
         }
 
         private static unsafe nint WindowProcedurePointer()
@@ -277,6 +462,22 @@ internal static partial class WindowsDisplayWindow
         public int Bottom;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeSize
+    {
+        public int Cx;
+        public int Cy;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TrackMouseEventInfo
+    {
+        public int Size;
+        public uint Flags;
+        public nint Hwnd;
+        public uint HoverTime;
+    }
+
     [LibraryImport("kernel32.dll", EntryPoint = "GetModuleHandleW")]
     private static partial nint GetModuleHandleW(nint moduleName);
 
@@ -334,6 +535,18 @@ internal static partial class WindowsDisplayWindow
     [LibraryImport("user32.dll", EntryPoint = "GetClientRect")]
     private static partial int GetClientRect(nint hwnd, out Rect rect);
 
+    [LibraryImport("user32.dll", EntryPoint = "LoadCursorW")]
+    private static partial nint LoadCursorW(nint instance, nint cursorName);
+
+    [LibraryImport("user32.dll", EntryPoint = "SetWindowTextW", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int SetWindowTextW(nint hwnd, string text);
+
+    [LibraryImport("user32.dll", EntryPoint = "TrackMouseEvent")]
+    private static partial int TrackMouseEvent(ref TrackMouseEventInfo track);
+
+    [LibraryImport("user32.dll", EntryPoint = "FillRect")]
+    private static partial int FillRect(nint dc, ref Rect rect, nint brush);
+
     [LibraryImport("user32.dll", EntryPoint = "GetDC")]
     private static partial nint GetDC(nint hwnd);
 
@@ -342,6 +555,47 @@ internal static partial class WindowsDisplayWindow
 
     [LibraryImport("gdi32.dll", EntryPoint = "SetStretchBltMode")]
     private static partial int SetStretchBltMode(nint dc, int mode);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "CreateFontW", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial nint CreateFontW(
+        int height,
+        int width,
+        int escapement,
+        int orientation,
+        int weight,
+        uint italic,
+        uint underline,
+        uint strikeOut,
+        uint charSet,
+        uint outputPrecision,
+        uint clipPrecision,
+        uint quality,
+        uint pitchAndFamily,
+        string faceName);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "SelectObject")]
+    private static partial nint SelectObject(nint dc, nint obj);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "DeleteObject")]
+    private static partial int DeleteObject(nint obj);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "GetStockObject")]
+    private static partial nint GetStockObject(int obj);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "CreateSolidBrush")]
+    private static partial nint CreateSolidBrush(uint color);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "SetBkMode")]
+    private static partial int SetBkMode(nint dc, int mode);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "SetTextColor")]
+    private static partial uint SetTextColor(nint dc, uint color);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "GetTextExtentPoint32W", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int GetTextExtentPoint32W(nint dc, string text, int length, out NativeSize size);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "TextOutW", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int TextOutW(nint dc, int x, int y, string text, int length);
 
     [LibraryImport("gdi32.dll", EntryPoint = "StretchDIBits")]
     private static partial int StretchDIBits(

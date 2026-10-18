@@ -1,14 +1,21 @@
+using System.Globalization;
+
 namespace AirPlayServer.Core.Video;
 
 /// <summary>
-/// Maps a window client point into the mirrored frame's pixel space.
-/// The frame is painted into <see cref="FrameDestination"/>: stretch uses the
-/// whole client, letterbox uses the fitted picture and leaves bars outside it.
-/// A point outside that rectangle is not on the picture. A point inside maps with
+/// Maps a window client point into the mirrored frame, then into TapClock's
+/// absolute screen. The frame is painted into <see cref="FrameDestination"/>:
+/// stretch uses the whole client, letterbox uses the fitted picture and leaves
+/// bars outside it. A point outside that rectangle is not on the picture.
+/// A point inside maps with
 /// <c>frame = (client - origin) * frameSize / destinationSize</c> (integer
 /// truncation, the same sample COLORONCOLOR <c>StretchDIBits</c> paints), then
-/// clamps to <c>[0, frameSize)</c>. Y grows downward in both spaces because the
-/// window blits a top-down DIB.
+/// clamps to <c>[0, frameSize)</c>.
+/// Frame pixels then use TapClock <c>ScreenMap.FromImage</c>:
+/// <c>screen = frame * screenSize / frameSize</c>, also integer truncation, with
+/// X and Y scaled on their own axes. A non-positive screen size means
+/// <c>--model</c> was not set, so the frame size is the screen and the point is
+/// unchanged. Y grows downward in both spaces because the window blits a top-down DIB.
 /// </summary>
 internal static class FrameCoordinateMap
 {
@@ -98,6 +105,99 @@ internal static class FrameCoordinateMap
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Maps one decoded-frame pixel into TapClock absolute screen space.
+    /// <c>screen = image * screenSize / imageSize</c> (integer division), the same
+    /// formula as TapClock <c>ScreenMap.FromImage</c>. Each axis is independent.
+    /// When <paramref name="screenWidth"/> or <paramref name="screenHeight"/> is
+    /// not positive, TapClock has no screen configured and the image size is the
+    /// screen, so the point is returned unchanged. The result stays in
+    /// <c>[0, screenSize)</c>.
+    /// </summary>
+    public static bool TryMapFrameToScreen(
+        int frameX,
+        int frameY,
+        int frameWidth,
+        int frameHeight,
+        int screenWidth,
+        int screenHeight,
+        out int screenX,
+        out int screenY)
+    {
+        screenX = 0;
+        screenY = 0;
+        if (frameWidth <= 0 || frameHeight <= 0)
+        {
+            return false;
+        }
+
+        if ((uint)frameX >= (uint)frameWidth || (uint)frameY >= (uint)frameHeight)
+        {
+            return false;
+        }
+
+        if (screenWidth <= 0 || screenHeight <= 0)
+        {
+            screenX = frameX;
+            screenY = frameY;
+            return true;
+        }
+
+        screenX = (int)((long)frameX * screenWidth / frameWidth);
+        screenY = (int)((long)frameY * screenHeight / frameHeight);
+        if ((uint)screenX >= (uint)screenWidth)
+        {
+            screenX = screenWidth - 1;
+        }
+
+        if ((uint)screenY >= (uint)screenHeight)
+        {
+            screenY = screenHeight - 1;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Client point to TapClock screen. Letterbox bars and other points outside
+    /// the painted picture return false. The screen step is
+    /// <see cref="TryMapFrameToScreen"/>.
+    /// </summary>
+    public static bool TryMapClientToScreen(
+        int clientX,
+        int clientY,
+        FrameDestination destination,
+        int frameWidth,
+        int frameHeight,
+        int screenWidth,
+        int screenHeight,
+        out int screenX,
+        out int screenY)
+    {
+        if (!TryMapClientToFrame(clientX, clientY, destination, frameWidth, frameHeight, out var frameX, out var frameY))
+        {
+            screenX = 0;
+            screenY = 0;
+            return false;
+        }
+
+        return TryMapFrameToScreen(frameX, frameY, frameWidth, frameHeight, screenWidth, screenHeight, out screenX, out screenY);
+    }
+
+    /// <summary>
+    /// Hover chip text. <paramref name="tapClockScreen"/> selects TapClock absolute
+    /// screen points (<c>TapClock x, y</c>). Otherwise the numbers are decoded-frame
+    /// pixels (<c>像素 x, y</c>), used when <c>--model</c> is unset.
+    /// </summary>
+    public static string FormatHoverReadout(int x, int y, bool tapClockScreen)
+    {
+        var prefix = tapClockScreen ? "TapClock " : "像素 ";
+        return prefix
+            + x.ToString(CultureInfo.InvariantCulture)
+            + ", "
+            + y.ToString(CultureInfo.InvariantCulture);
     }
 
     /// <summary>

@@ -1,3 +1,4 @@
+using AirPlayServer.Core.Export;
 using AirPlayServer.Core.Video;
 
 namespace AirPlayServer.Core.Tests;
@@ -100,5 +101,107 @@ public sealed class FrameCoordinateMapTests
         var destination = FrameCoordinateMap.Stretch(10, 10);
         Assert.False(FrameCoordinateMap.TryMapClientToFrame(0, 0, destination, 0, 10, out _, out _));
         Assert.False(FrameCoordinateMap.TryMapClientToFrame(0, 0, new FrameCoordinateMap.FrameDestination(0, 0, 0, 10), 10, 10, out _, out _));
+    }
+
+    [Fact]
+    public void Hover_on_a_480x1040_frame_reads_the_logged_35_glyph_in_tapclock_space()
+    {
+        var model = AppleScreens.Resolve("iphone-15-pro-max");
+        Assert.Equal((430, 932), (model.Width, model.Height));
+
+        // screen = image * screenSize / imageSize. Frame cell (323, 850) is the
+        // 480×1040 sample that lands on TapClock screen (289, 761).
+        const int frameX = 323;
+        const int frameY = 850;
+        Assert.Equal(289, frameX * model.Width / 480);
+        Assert.Equal(761, frameY * model.Height / 1040);
+
+        var oneToOne = FrameCoordinateMap.Stretch(480, 1040);
+        Assert.True(FrameCoordinateMap.TryMapClientToScreen(
+            frameX, frameY, oneToOne, 480, 1040, model.Width, model.Height, out var x, out var y));
+        Assert.Equal((289, 761), (x, y));
+        Assert.Equal("TapClock 289, 761", FrameCoordinateMap.FormatHoverReadout(x, y, tapClockScreen: true));
+
+        // A 2× client does not hit every frame pixel on an even boundary.
+        // Client (647, 1700) is the point that truncates to frame (323, 850).
+        var doubled = FrameCoordinateMap.Stretch(960, 2080);
+        Assert.True(FrameCoordinateMap.TryMapClientToFrame(647, 1700, doubled, 480, 1040, out var mappedX, out var mappedY));
+        Assert.Equal((frameX, frameY), (mappedX, mappedY));
+        Assert.True(FrameCoordinateMap.TryMapClientToScreen(
+            647, 1700, doubled, 480, 1040, model.Width, model.Height, out x, out y));
+        Assert.Equal((289, 761), (x, y));
+        Assert.False(FrameCoordinateMap.TryMapClientToScreen(
+            960, 1700, doubled, 480, 1040, model.Width, model.Height, out _, out _));
+    }
+
+    [Fact]
+    public void Screen_scale_is_per_axis_when_the_aspect_ratios_differ()
+    {
+        Assert.True(FrameCoordinateMap.TryMapFrameToScreen(960, 540, 1920, 1080, 430, 932, out var x, out var y));
+        Assert.Equal(960 * 430 / 1920, x);
+        Assert.Equal(540 * 932 / 1080, y);
+        Assert.Equal((215, 466), (x, y));
+
+        Assert.True(FrameCoordinateMap.TryMapFrameToScreen(0, 0, 1920, 1080, 430, 932, out x, out y));
+        Assert.Equal((0, 0), (x, y));
+
+        Assert.True(FrameCoordinateMap.TryMapFrameToScreen(1919, 1079, 1920, 1080, 430, 932, out x, out y));
+        Assert.Equal(1919 * 430 / 1920, x);
+        Assert.Equal(1079 * 932 / 1080, y);
+        Assert.InRange(x, 0, 429);
+        Assert.InRange(y, 0, 931);
+    }
+
+    [Fact]
+    public void Last_pixel_uses_truncating_division_and_stays_inside_the_screen()
+    {
+        Assert.True(FrameCoordinateMap.TryMapFrameToScreen(99, 199, 100, 200, 430, 932, out var x, out var y));
+        Assert.Equal(99 * 430 / 100, x);
+        Assert.Equal(199 * 932 / 200, y);
+        Assert.Equal((425, 927), (x, y));
+        Assert.InRange(x, 0, 429);
+        Assert.InRange(y, 0, 931);
+
+        var model = AppleScreens.Resolve("iphone-16-plus");
+        Assert.Equal((430, 932), (model.Width, model.Height));
+        Assert.True(FrameCoordinateMap.TryMapFrameToScreen(479, 1039, 480, 1040, model.Width, model.Height, out x, out y));
+        Assert.Equal((479 * model.Width / 480, 1039 * model.Height / 1040), (x, y));
+        Assert.InRange(x, 0, model.Width - 1);
+        Assert.InRange(y, 0, model.Height - 1);
+    }
+
+    [Fact]
+    public void Letterbox_bars_stay_unmapped_and_the_picture_scales_to_the_model()
+    {
+        var model = AppleScreens.Resolve("iphone-15-pro-max");
+        var destination = FrameCoordinateMap.Letterbox(200, 200, 480, 1040);
+        Assert.False(FrameCoordinateMap.TryMapClientToScreen(
+            10, 100, destination, 480, 1040, model.Width, model.Height, out _, out _));
+
+        Assert.True(FrameCoordinateMap.TryMapClientToScreen(
+            145, 199, destination, 480, 1040, model.Width, model.Height, out var screenX, out var screenY));
+        var frameX = 91 * 480 / 92;
+        var frameY = 199 * 1040 / 200;
+        Assert.Equal(frameX * model.Width / 480, screenX);
+        Assert.Equal(frameY * model.Height / 1040, screenY);
+        Assert.InRange(screenX, 0, model.Width - 1);
+        Assert.InRange(screenY, 0, model.Height - 1);
+    }
+
+    [Fact]
+    public void Missing_screen_keeps_frame_pixels()
+    {
+        Assert.True(FrameCoordinateMap.TryMapFrameToScreen(323, 850, 480, 1040, 0, 0, out var x, out var y));
+        Assert.Equal((323, 850), (x, y));
+        Assert.True(FrameCoordinateMap.TryMapFrameToScreen(323, 850, 480, 1040, 0, 932, out x, out y));
+        Assert.Equal((323, 850), (x, y));
+        Assert.Equal("像素 323, 850", FrameCoordinateMap.FormatHoverReadout(x, y, tapClockScreen: false));
+
+        Assert.False(FrameCoordinateMap.TryMapFrameToScreen(480, 0, 480, 1040, 430, 932, out _, out _));
+        Assert.False(FrameCoordinateMap.TryMapFrameToScreen(-1, 0, 480, 1040, 430, 932, out _, out _));
+        Assert.False(FrameCoordinateMap.TryMapFrameToScreen(0, 1040, 480, 1040, 430, 932, out _, out _));
+        Assert.False(FrameCoordinateMap.TryMapFrameToScreen(0, 0, 0, 1040, 430, 932, out _, out _));
+        Assert.False(FrameCoordinateMap.TryMapClientToScreen(
+            0, 0, FrameCoordinateMap.Stretch(10, 10), 0, 10, 430, 932, out _, out _));
     }
 }

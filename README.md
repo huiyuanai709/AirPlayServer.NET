@@ -165,7 +165,7 @@ int AirPlay_FairPlaySetup(const uint8_t* request, int requestLength,
 
 Windows 上 Media Foundation 把 Annex-B 访问单元变成 BGRA，写入 `FrameSlot`（只保留最新一帧）。同步硬件变换如果还能锁定 NV12 或 RGB32 缓冲就优先用它；输出是 DXGI 表面、或者只有异步硬件变换时，退回系统自带的软件解码器。其它操作系统默认不解码。没有画面时，访问单元仍然计数，但不会冒充成手机屏幕。Linux 上继续可以用 `--demo-frame` 检查窗口标志和 TapClock。
 
-Windows 宿主默认打开 GDI 窗口，把最新一帧拉伸进去。`--no-window` 关掉它。鼠标悬停时，标题和左上角显示该点在解码帧里的绝对像素：窗口把画面拉伸到客户区，坐标按这个拉伸换算并限制在帧内。这些像素是帧坐标。它们和 `--model` 的 UIKit 逻辑点、`--screen` 的广告分辨率是三套尺寸。窗口里的鼠标点击不会发给手机。
+Windows 宿主默认打开 GDI 窗口，把最新一帧拉伸进去。`--no-window` 关掉它。鼠标悬停时，标题和左上角显示 TapClock 绝对屏幕坐标，和 TapClock 日志里的「屏幕坐标」用同一套整数除法：客户区上的点先换成解码帧像素（拉伸铺满客户区；画出来的画面矩形之外不算），再 `screen = 帧像素 * --model 宽高 / 帧宽高`，X 和 Y 各算各的。例如 `--model iphone-15-pro-max` 是 430×932；480×1040 的帧上，像素 (323, 850) 读成 `TapClock 289, 761`。没写 `--model` 时，图像尺寸就是屏幕，标签退回 `像素 x, y`。悬停不读 `--screen`。窗口里的鼠标点击不会发给手机，也不改 HID。
 
 TapClock 的点击留在它自己的主机 TCP `42123`（ATB/1）。坐标是板上的 HID 计数（AssistiveTouch），不是这台电脑窗口里的像素。点击对齐和镜像广告是两套尺寸，写在不同的参数上：
 
@@ -174,7 +174,7 @@ TapClock 的点击留在它自己的主机 TCP `42123`（ATB/1）。坐标是板
 | `--screen WxH` | AirPlay `GET`/`POST /info` 的 `width`、`height`、`widthPixels`、`heightPixels`。手机按这个尺寸送镜像。 | 广告分辨率 | `480x1040` |
 | `--model <slug>` | TapClock 点击对齐。slug 来自和 TapClock `AppleScreens` 相同的表，解析成竖屏 UIKit 逻辑点。例如 `iphone-15-pro` → 393×852。 | point | 不设置 |
 
-显式 `--screen` 决定广告。`--model` 只填逻辑点，不会把 393×852 写进 `/info`。库里 `AirPlayReceiverOptions` 的显示默认值仍是 1920×1080，协议测试不绑在宿主的 `480x1040` 上。
+显式 `--screen` 决定广告。`--model` 只填逻辑点，不会把 393×852 写进 `/info`。窗口悬停读数用的也是这套逻辑点。库里 `AirPlayReceiverOptions` 的显示默认值仍是 1920×1080，协议测试不绑在宿主的 `480x1040` 上。
 
 `--list-models` 打印全部 slug 和竖屏逻辑点。表内是标准显示的默认值，不是物理像素，也不是 @2x / @3x。USB HID 读不到手机型号，本进程不会自动探测。Display Zoom、横屏、台前调度和分屏会让有效逻辑点偏离表内默认值。折叠屏不在表里。
 

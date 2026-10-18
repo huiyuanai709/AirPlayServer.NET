@@ -80,9 +80,17 @@ await using (receiver)
             + arguments.Options.DisplayWidth + "x" + arguments.Options.DisplayHeight + "。");
     }
     Console.WriteLine("镜像数据端口: " + receiver.Mirror.DataPort + "，计时端口: " + receiver.Mirror.TimingPort);
-    Console.WriteLine(arguments.Options.ShowWindow && OperatingSystem.IsWindows()
-        ? "显示: Windows 窗口只画最新一帧。鼠标悬停显示画面像素坐标。窗口里的点击不会发给手机。"
-        : "显示: 当前进程没有打开窗口。");
+    var windowLine = "显示: 当前进程没有打开窗口。";
+    if (arguments.Options.ShowWindow && OperatingSystem.IsWindows())
+    {
+        windowLine = arguments.Options.TapClockLogicalScreen is { } hoverModel
+            ? "显示: Windows 窗口只画最新一帧。鼠标悬停显示 TapClock 屏幕坐标 "
+                + AppleScreens.FormatPoints(hoverModel)
+                + "。窗口里的点击不会发给手机。"
+            : "显示: Windows 窗口只画最新一帧。未指定 --model，鼠标悬停显示解码帧像素。窗口里的点击不会发给手机。";
+    }
+
+    Console.WriteLine(windowLine);
     if (arguments.Options.TapClock is { Enabled: true } tapClock)
     {
         Console.WriteLine("TapClock: "

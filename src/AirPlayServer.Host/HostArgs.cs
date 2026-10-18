@@ -63,8 +63,10 @@ internal sealed class HostArgs
                          Native AOT 不能在运行时加载托管程序集，所以这里只接受原生库。
         --demo-frame     推送一张合成画面，用来检查窗口和 TapClock。那不是手机屏幕。
         点击不在本进程发送。TapClock 的点击仍走 TCP 42123（ATB/1），坐标按 --model 的 UIKit 点对齐。
-        Windows 窗口里，鼠标停在画面上时，标题和左上角会显示该点在帧里的绝对像素。
-        窗口把画面拉伸到客户区，坐标按这个拉伸换算并限制在帧内。悬停像素是解码帧上的点，不是 --model 的 UIKit 点，也不是 --screen 的广告分辨率。点击仍然不发给手机。
+        Windows 窗口里，鼠标停在画面上时，标题和左上角显示 TapClock 绝对屏幕坐标（标签「TapClock x, y」）。
+        窗口把画面拉伸到客户区。点先换成解码帧像素（整数截断，画面外的黑边不算），再按 TapClock 的算法换成屏幕点：screen = 帧像素 * --model 宽高 / 帧宽高（整数除法，X 和 Y 分开算）。
+        例如 --model iphone-15-pro-max 是 430×932。480×1040 的帧上，像素 (323, 850) 读成 TapClock 289, 761，和 TapClock 日志里的「屏幕坐标」是同一套点。
+        没写 --model 时，图像尺寸就是屏幕，标签退回「像素 x, y」。悬停不使用 --screen 的广告分辨率。点击仍然不发给手机。
         """;
 
     public static HostArgs Parse(string[] args)

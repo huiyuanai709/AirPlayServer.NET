@@ -1,6 +1,5 @@
 #if WINDOWS_HOST
 using System.Buffers.Binary;
-using System.Globalization;
 using System.Runtime.InteropServices;
 
 namespace AirPlayServer.Core.Video;
@@ -26,9 +25,15 @@ internal static partial class WindowsDisplayWindow
     private const int ChipLeft = 8;
     private const int ChipTop = 8;
 
-    public static IAsyncDisposable Start(FrameSlot frames, string title, IAirPlayLog log, CancellationToken cancellationToken)
+    public static IAsyncDisposable Start(
+        FrameSlot frames,
+        string title,
+        IAirPlayLog log,
+        int tapClockScreenWidth,
+        int tapClockScreenHeight,
+        CancellationToken cancellationToken)
     {
-        var window = new Window(frames, title, log, cancellationToken);
+        var window = new Window(frames, title, log, tapClockScreenWidth, tapClockScreenHeight, cancellationToken);
         window.Start();
         return window;
     }
@@ -40,6 +45,9 @@ internal static partial class WindowsDisplayWindow
         private readonly IAirPlayLog _log;
         private readonly CancellationToken _cancellation;
         private readonly byte[] _header = new byte[40];
+        private readonly int _tapClockScreenWidth;
+        private readonly int _tapClockScreenHeight;
+        private readonly bool _tapClockScreen;
         private GCHandle _self;
         private Task _loop = Task.CompletedTask;
         private nint _hwnd;
@@ -55,11 +63,20 @@ internal static partial class WindowsDisplayWindow
         private nint _hoverFont;
         private bool _hoverFontOwned;
 
-        public Window(FrameSlot frames, string title, IAirPlayLog log, CancellationToken cancellationToken)
+        public Window(
+            FrameSlot frames,
+            string title,
+            IAirPlayLog log,
+            int tapClockScreenWidth,
+            int tapClockScreenHeight,
+            CancellationToken cancellationToken)
         {
             _frames = frames;
             _windowTitle = "AirPlayServer.NET — " + title;
             _log = log;
+            _tapClockScreen = tapClockScreenWidth > 0 && tapClockScreenHeight > 0;
+            _tapClockScreenWidth = _tapClockScreen ? tapClockScreenWidth : 0;
+            _tapClockScreenHeight = _tapClockScreen ? tapClockScreenHeight : 0;
             _cancellation = cancellationToken;
         }
 
@@ -236,7 +253,8 @@ internal static partial class WindowsDisplayWindow
                     headerPin.AddrOfPinnedObject(),
                     0,
                     SrcCopy);
-                // Hover uses this same rectangle. A client point outside it is a letterbox bar, not a frame pixel.
+                // Hover uses this same rectangle, then TapClock's image→screen scale.
+                // A client point outside the painted picture stays unmapped.
                 ApplyHover(hwnd, width, height, destination);
                 DrawHoverChip(dc);
             }
@@ -297,21 +315,30 @@ internal static partial class WindowsDisplayWindow
         private void ApplyHover(nint hwnd, int frameWidth, int frameHeight, FrameCoordinateMap.FrameDestination destination)
         {
             if (!_pointerInside
-                || !FrameCoordinateMap.TryMapClientToFrame(_pointerX, _pointerY, destination, frameWidth, frameHeight, out var frameX, out var frameY))
+                || !FrameCoordinateMap.TryMapClientToScreen(
+                    _pointerX,
+                    _pointerY,
+                    destination,
+                    frameWidth,
+                    frameHeight,
+                    _tapClockScreenWidth,
+                    _tapClockScreenHeight,
+                    out var screenX,
+                    out var screenY))
             {
                 ClearHover(hwnd);
                 return;
             }
 
-            if (_hoverVisible && _hoverX == frameX && _hoverY == frameY)
+            if (_hoverVisible && _hoverX == screenX && _hoverY == screenY)
             {
                 return;
             }
 
             _hoverVisible = true;
-            _hoverX = frameX;
-            _hoverY = frameY;
-            _hoverLabel = "像素 " + frameX.ToString(CultureInfo.InvariantCulture) + ", " + frameY.ToString(CultureInfo.InvariantCulture);
+            _hoverX = screenX;
+            _hoverY = screenY;
+            _hoverLabel = FrameCoordinateMap.FormatHoverReadout(screenX, screenY, _tapClockScreen);
             // Coordinates lead the title so a narrow mirror window does not clip them.
             SetWindowTextW(hwnd, _hoverLabel + " — " + _windowTitle);
         }

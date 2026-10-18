@@ -66,6 +66,8 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
     private int _codedHeight;
     private int _visibleWidth;
     private int _visibleHeight;
+    private int _spsCodedWidth;
+    private int _spsCodedHeight;
     private int _stride;
     private bool _bottomUp;
     private long _sampleTime;
@@ -137,23 +139,55 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
                 return;
             }
 
+            if (_sps is not null
+                && _pps is not null
+                && _sps.AsSpan().SequenceEqual(sequenceParameterSet)
+                && _pps.AsSpan().SequenceEqual(pictureParameterSet))
+            {
+                // Lock and unlock repeat the same SPS/PPS. Renegotiating the
+                // transform there leaves it producing no pictures, so the last
+                // frame stays on screen.
+                return;
+            }
+
             _sps = sequenceParameterSet.ToArray();
             _pps = pictureParameterSet.ToArray();
             _visibleWidth = 0;
             _visibleHeight = 0;
-            if (H264Sequence.TryGetDimensions(_sps, out var width, out var height))
+            _spsCodedWidth = 0;
+            _spsCodedHeight = 0;
+            if (H264Sequence.TryGetPictureSize(_sps, out var width, out var height, out var codedWidth, out var codedHeight))
             {
                 _visibleWidth = width;
                 _visibleHeight = height;
+                _spsCodedWidth = codedWidth;
+                _spsCodedHeight = codedHeight;
             }
 
             if (_transform != 0)
             {
-                Slots.ProcessMessage(_transform, MessageFlush, 0);
-                Slots.ProcessMessage(_transform, MessageEndStreaming, 0);
-                _typesReady = false;
-                ApplyTypes();
+                RestartTransform(reapplyTypes: true);
             }
+        }
+    }
+
+    public void Reset()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_disposed != 0 || _transform == 0 || !_typesReady)
+            {
+                return;
+            }
+
+            // Clear the decoded picture buffer without dropping the media types.
+            // A new IDR can then replace the pre-lock picture instead of blending with it.
+            RestartTransform(reapplyTypes: false);
         }
     }
 
@@ -459,7 +493,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
         }
         else
         {
-            var stride = _stride == 0 ? codedWidth : _stride;
+            var stride = _stride == 0 ? InferNv12Stride(pixels.Length, codedWidth, codedHeight) : _stride;
             if (!CopyNv12(pixels, codedWidth, codedHeight, stride, visibleWidth, visibleHeight, tight))
             {
                 return false;
@@ -536,7 +570,47 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
         return true;
     }
 
+    private static int InferNv12Stride(int bufferLength, int codedWidth, int codedHeight)
+    {
+        if (codedWidth <= 0 || codedHeight <= 0)
+        {
+            return Math.Max(codedWidth, 0);
+        }
+
+        var rows = codedHeight + (codedHeight / 2);
+        if (rows <= 0 || bufferLength < codedWidth * rows)
+        {
+            return codedWidth;
+        }
+
+        var stride = bufferLength / rows;
+        if ((stride & 1) != 0)
+        {
+            stride--;
+        }
+
+        return stride >= codedWidth ? stride : codedWidth;
+    }
+
     private static byte Clamp(int value) => (byte)Math.Clamp(value, 0, 255);
+
+    private void RestartTransform(bool reapplyTypes)
+    {
+        Slots.ProcessMessage(_transform, MessageDrain, 0);
+        var discard = default(DecodedFrame);
+        Pull(ref discard);
+        Slots.ProcessMessage(_transform, MessageFlush, 0);
+        Slots.ProcessMessage(_transform, MessageEndStreaming, 0);
+        if (reapplyTypes)
+        {
+            _typesReady = false;
+            ApplyTypes();
+            return;
+        }
+
+        Slots.ProcessMessage(_transform, MessageBeginStreaming, 0);
+        Slots.ProcessMessage(_transform, MessageStartOfStream, 0);
+    }
 
     private bool CreateInputSample(ReadOnlySpan<byte> annexB, bool keyFrame, out nint sample)
     {
@@ -774,14 +848,14 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
             return false;
         }
 
-        var width = _visibleWidth > 0 ? _visibleWidth : 1280;
-        var height = _visibleHeight > 0 ? _visibleHeight : 720;
+        var width = _spsCodedWidth > 0 ? _spsCodedWidth : _visibleWidth > 0 ? _visibleWidth : 1280;
+        var height = _spsCodedHeight > 0 ? _spsCodedHeight : _visibleHeight > 0 ? _visibleHeight : 720;
         if (Slots.SetGuid(type, MajorType, Video) < 0
             || Slots.SetGuid(type, Subtype, H264) < 0
             || Slots.SetUInt64(type, FrameSize, ((ulong)(uint)width << 32) | (uint)height) < 0
             || Slots.SetUInt64(type, FrameRate, ((ulong)30 << 32) | 1) < 0
             || Slots.SetUInt64(type, PixelAspect, ((ulong)1 << 32) | 1) < 0
-            || Slots.SetUInt32(type, InterlaceMode, 7) < 0)
+            || Slots.SetUInt32(type, InterlaceMode, 2) < 0)
         {
             Slots.Release(type);
             type = 0;
@@ -862,8 +936,8 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
 
         try
         {
-            var width = _visibleWidth > 0 ? _visibleWidth : _codedWidth > 0 ? _codedWidth : 1280;
-            var height = _visibleHeight > 0 ? _visibleHeight : _codedHeight > 0 ? _codedHeight : 720;
+            var width = _spsCodedWidth > 0 ? _spsCodedWidth : _visibleWidth > 0 ? _visibleWidth : _codedWidth > 0 ? _codedWidth : 1280;
+            var height = _spsCodedHeight > 0 ? _spsCodedHeight : _visibleHeight > 0 ? _visibleHeight : _codedHeight > 0 ? _codedHeight : 720;
             Slots.SetGuid(chosen, MajorType, Video);
             Slots.SetUInt64(chosen, FrameSize, ((ulong)(uint)width << 32) | (uint)height);
             Slots.SetUInt64(chosen, FrameRate, ((ulong)30 << 32) | 1);

@@ -171,15 +171,43 @@ internal sealed class MirrorDecryptor : IDisposable
         }
     }
 
-    public bool TryBind(ulong streamConnectionId)
+    public bool TryBind(ulong streamConnectionId) => Bind(streamConnectionId, clearLostAlignment: false);
+
+    /// <summary>
+    /// Start the CTR counter at zero for a type-110 SETUP. The sender does the
+    /// same in its stream-key init. This is the recovery from a quarantined
+    /// keystream; <see cref="TryBind"/> will not invent that counter by itself.
+    /// </summary>
+    public bool Restart(ulong streamConnectionId) => Bind(streamConnectionId, clearLostAlignment: true);
+
+    /// <summary>
+    /// Drop the live counter after a video-only teardown. The content key and
+    /// pair-verify secret stay so the next type-110 SETUP can arm without a new ekey.
+    /// </summary>
+    public void UnbindStream()
     {
         lock (_gate)
         {
-            if (_lostAlignment)
+            _ctr?.Dispose();
+            _ctr = null;
+            _lostAlignment = false;
+        }
+    }
+
+    private bool Bind(ulong streamConnectionId, bool clearLostAlignment)
+    {
+        lock (_gate)
+        {
+            if (_lostAlignment && !clearLostAlignment)
             {
                 _ctr?.Dispose();
                 _ctr = null;
                 return false;
+            }
+
+            if (clearLostAlignment)
+            {
+                _lostAlignment = false;
             }
 
             _ctr?.Dispose();

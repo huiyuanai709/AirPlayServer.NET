@@ -49,6 +49,7 @@ public sealed class MirrorAndExportTests
         Assert.True(AvccAnnexB.TryConvertInPlace(payload));
         Assert.Equal(new byte[] { 0, 0, 0, 1, 0x65, 0, 0, 0, 1, 0x41, 0x9A }, payload);
         Assert.False(AvccAnnexB.TryConvertInPlace([0, 0, 0, 5, 1]));
+        Assert.False(AvccAnnexB.TryConvertInPlace([0, 0, 0, 1, 0xE5]));
     }
 
     [Fact]
@@ -636,6 +637,10 @@ public sealed class MirrorAndExportTests
         {
         }
 
+        public void Reset()
+        {
+        }
+
         public bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
         {
             LastAnnexB = annexB.ToArray();
@@ -657,6 +662,10 @@ public sealed class MirrorAndExportTests
         public void Configure(ReadOnlySpan<byte> sequenceParameterSet, ReadOnlySpan<byte> pictureParameterSet)
         {
             Volatile.Write(ref _configured, 1);
+        }
+
+        public void Reset()
+        {
         }
 
         public bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)

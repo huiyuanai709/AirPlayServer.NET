@@ -61,6 +61,13 @@ internal static class AvccAnnexB
                 return false;
             }
 
+            // forbidden_zero_bit. A desynced CTR keystream often still has a
+            // plausible length; the NAL header bit catches it before it is decoded.
+            if ((payload[offset + 4] & 0x80) != 0)
+            {
+                return false;
+            }
+
             payload[offset] = 0;
             payload[offset + 1] = 0;
             payload[offset + 2] = 0;
@@ -70,6 +77,41 @@ internal static class AvccAnnexB
         }
 
         return units > 0 && offset == payload.Length;
+    }
+
+    public static bool ContainsNalType(ReadOnlySpan<byte> annexB, int nalType)
+    {
+        var offset = 0;
+        while (offset + 3 < annexB.Length)
+        {
+            int header;
+            if (annexB[offset] == 0 && annexB[offset + 1] == 0 && annexB[offset + 2] == 1)
+            {
+                header = offset + 3;
+            }
+            else if (offset + 4 < annexB.Length
+                && annexB[offset] == 0
+                && annexB[offset + 1] == 0
+                && annexB[offset + 2] == 0
+                && annexB[offset + 3] == 1)
+            {
+                header = offset + 4;
+            }
+            else
+            {
+                offset++;
+                continue;
+            }
+
+            if (header < annexB.Length && (annexB[header] & 0x1F) == nalType)
+            {
+                return true;
+            }
+
+            offset = header + 1;
+        }
+
+        return false;
     }
 }
 

@@ -24,6 +24,11 @@ public sealed class H264AndMediaKeyTests
         Assert.True(H264Sequence.TryGetDimensions(HighProfileSps(), out width, out height));
         Assert.Equal(320, width);
         Assert.Equal(180, height);
+        Assert.True(H264Sequence.TryGetPictureSize(HighProfileSps(), out var visibleWidth, out var visibleHeight, out var codedWidth, out var codedHeight));
+        Assert.Equal(320, visibleWidth);
+        Assert.Equal(180, visibleHeight);
+        Assert.Equal(320, codedWidth);
+        Assert.Equal(192, codedHeight);
         Assert.False(H264Sequence.TryGetDimensions([0x67, 0x42], out _, out _));
         Assert.True(H264Sequence.TryGetDimensions(BaselineAccessUnitSps, out width, out height));
         Assert.Equal(16, width);
@@ -438,6 +443,10 @@ public sealed class H264AndMediaKeyTests
         public string Name => "painting";
 
         public void Configure(ReadOnlySpan<byte> sequenceParameterSet, ReadOnlySpan<byte> pictureParameterSet)
+        {
+        }
+
+        public void Reset()
         {
         }
 

@@ -63,7 +63,7 @@ await using (receiver)
     Console.WriteLine("宣告画面: " + arguments.Options.DisplayWidth + "x" + arguments.Options.DisplayHeight);
     Console.WriteLine("镜像数据端口: " + receiver.Mirror.DataPort + "，计时端口: " + receiver.Mirror.TimingPort);
     Console.WriteLine(arguments.Options.ShowWindow && OperatingSystem.IsWindows()
-        ? "显示: Windows 窗口只画最新一帧。窗口里的点击不会发给手机。"
+        ? "显示: Windows 窗口只画最新一帧。鼠标悬停显示画面像素坐标。窗口里的点击不会发给手机。"
         : "显示: 当前进程没有打开窗口。");
     if (arguments.Options.TapClock is { Enabled: true } tapClock)
     {
@@ -147,6 +147,8 @@ internal sealed class Args
                          Native AOT 不能在运行时加载托管程序集，所以这里只接受原生库。
         --demo-frame     推送一张合成画面，用来检查窗口和 TapClock。那不是手机屏幕。
         点击不在本进程发送。TapClock 的点击仍走 TCP 42123（ATB/1）。
+        Windows 窗口里，鼠标停在画面上时，标题和左上角会显示该点在帧里的绝对像素。
+        窗口把画面拉伸到客户区，坐标按这个拉伸换算并限制在帧内。点击仍然不发给手机。
         """;
 
     public static Args Parse(string[] args)

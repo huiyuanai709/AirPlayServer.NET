@@ -15,4 +15,8 @@
   <ItemGroup>
     <ProjectReference Include="..\AirPlayServer.Core\AirPlayServer.Core.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AirPlayServer.Host.Tests" />
+  </ItemGroup>
 </Project>

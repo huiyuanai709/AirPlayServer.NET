@@ -21,9 +21,24 @@ public sealed class AirPlayReceiverOptions
 
     public bool EnableDiscovery { get; set; } = true;
 
+    /// <summary>
+    /// AirPlay <c>/info</c> advertised mirror width. The host CLI default is 480.
+    /// TapClock UIKit points live on <see cref="TapClockLogicalScreen"/>.
+    /// </summary>
     public int DisplayWidth { get; set; } = AirPlayCompatibility.DefaultDisplayWidth;
 
+    /// <summary>
+    /// AirPlay <c>/info</c> advertised mirror height. The host CLI default is 1040.
+    /// TapClock UIKit points live on <see cref="TapClockLogicalScreen"/>.
+    /// </summary>
     public int DisplayHeight { get; set; } = AirPlayCompatibility.DefaultDisplayHeight;
+
+    /// <summary>
+    /// TapClock click-alignment size in portrait UIKit points, from <see cref="AppleScreens"/>.
+    /// Null when <c>--model</c> was not set. Assigning this does not change
+    /// <see cref="DisplayWidth"/> or <see cref="DisplayHeight"/>.
+    /// </summary>
+    public AppleScreens.Model? TapClockLogicalScreen { get; set; }
 
     public int MaxFramesPerSecond { get; set; } = AirPlayCompatibility.DefaultMaxFramesPerSecond;
 
@@ -116,6 +131,12 @@ public sealed class AirPlayReceiverOptions
         if (DisplayWidth is < 16 or > 7680 || DisplayHeight is < 16 or > 4320)
         {
             throw new ArgumentException("Display size is outside the supported range.");
+        }
+
+        if (TapClockLogicalScreen is { } logical
+            && (logical.Width is < 2 or > 10000 || logical.Height is < 2 or > 10000 || string.IsNullOrWhiteSpace(logical.Slug)))
+        {
+            throw new ArgumentException("TapClock logical screen is outside the supported range.", nameof(TapClockLogicalScreen));
         }
 
         if (MaxFramesPerSecond is < 1 or > 120)

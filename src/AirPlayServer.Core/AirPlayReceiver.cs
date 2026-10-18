@@ -108,6 +108,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 RaopPort = raopPort,
                 Address = options.EnableDiscovery ? LocalNetwork.SelectAdvertisementAddress(options.ListenAddress) : null,
                 PublicKeyBase64 = identity.PublicKeyBase64,
+                // Advertised mirror size only. TapClockLogicalScreen is UIKit points and stays off /info.
                 DisplayWidth = options.DisplayWidth,
                 DisplayHeight = options.DisplayHeight,
                 MaxFramesPerSecond = options.MaxFramesPerSecond,

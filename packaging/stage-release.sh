@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Stage a Native AOT publish directory into a release zip.
 # Usage: stage-release.sh <rid> <tag> <publish-dir> <zip-path>
-# The zip contains the binary, RUN.txt, LICENSE, and NOTICE.md.
-# linux-x64 also gets airplayserver.service. No secrets are copied.
+# The zip contains the binary, RUN.txt, LICENSE, NOTICE.md, and VERSION.txt.
+# linux-x64 also gets airplayserver.service.
+# Runtime *.dll, *.so, and *.dylib are kept. Debug symbols are not.
+# No secrets are copied.
 set -euo pipefail
 
 if [ "$#" -ne 4 ]; then
@@ -55,8 +57,14 @@ copied_binary=false
 for extra in "$publish_dir"/*; do
   [ -f "$extra" ] || continue
   base="${extra##*/}"
+  lower="${base,,}"
+  case "$lower" in
+    *.pdb | *.dbg | *.dwo | *.debug | *.sym | *.dsym)
+      continue
+      ;;
+  esac
   case "$base" in
-    "$binary" | *.pdb | *.dbg | *.dll | *.so | *.dylib)
+    "$binary" | *.dll | *.so | *.dylib)
       cp "$extra" "$stage/"
       if [ "$base" = "$binary" ]; then
         copied_binary=true
@@ -117,6 +125,11 @@ prefix = os.environ["ZIP_PREFIX"]
 binary = os.environ["BINARY_NAME"]
 expect_exec = os.environ["EXPECT_EXEC"] == "1"
 expect_service = os.environ["EXPECT_SERVICE"] == "1"
+# High 16 bits are the Unix mode, including the regular-file type.
+# Set every entry explicitly. Windows CPython reports .exe as 0777, and
+# Git Bash chmod does not produce a Unix execute bit for the linux binary.
+exec_attr = 0o100755 << 16
+file_attr = 0o100644 << 16
 
 os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
 if os.path.exists(dest):
@@ -128,7 +141,14 @@ with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name in sorted(filenames):
             path = os.path.join(dirpath, name)
             rel = os.path.relpath(path, stage).replace("\\", "/")
-            archive.write(path, prefix + "/" + rel)
+            arcname = prefix + "/" + rel
+            archive.write(path, arcname)
+            info = archive.getinfo(arcname)
+            info.create_system = 3  # Unix, so unzip honors external_attr
+            if expect_exec and name == binary:
+                info.external_attr = exec_attr
+            else:
+                info.external_attr = file_attr
 
     names = set(archive.namelist())
     required = [
@@ -147,6 +167,11 @@ with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as archive:
     missing = [name for name in required if name not in names]
     if missing:
         sys.exit("zip missing " + ", ".join(missing))
+
+    symbol_suffixes = (".pdb", ".dbg", ".dwo", ".debug", ".sym", ".dsym")
+    symbols = sorted(name for name in names if name.lower().endswith(symbol_suffixes))
+    if symbols:
+        sys.exit("zip contains debug symbols: " + ", ".join(symbols))
 
     if expect_exec:
         mode = archive.getinfo(prefix + "/" + binary).external_attr >> 16

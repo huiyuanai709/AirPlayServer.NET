@@ -27,8 +27,11 @@ jobs:
       - name: Test
         run: dotnet test AirPlayServer.slnx --configuration Release --no-build --verbosity normal
 
+      - name: Check the release zip omits debug symbols
+        run: ./packaging/stage-release-test.sh
+
       - name: Native AOT publish (linux-x64)
-        run: dotnet publish src/AirPlayServer.Host/AirPlayServer.Host.csproj --configuration Release --runtime linux-x64 --self-contained true --output artifacts/linux-x64
+        run: ./packaging/publish.sh linux-x64
 
       - name: Smoke the published binary
         run: |
@@ -48,8 +51,12 @@ jobs:
       - name: Test
         run: dotnet test AirPlayServer.slnx --configuration Release --verbosity normal
 
+      - name: Check the release zip omits debug symbols
+        shell: bash
+        run: ./packaging/stage-release-test.sh
+
       - name: Native AOT publish (win-x64)
-        run: dotnet publish src/AirPlayServer.Host/AirPlayServer.Host.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/win-x64
+        run: ./packaging/publish.ps1 -Runtime win-x64
 
       - name: Smoke the published binary
         shell: pwsh

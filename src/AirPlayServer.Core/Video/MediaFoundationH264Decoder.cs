@@ -22,10 +22,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
     private const int RpcChangedMode = unchecked((int)0x80010106);
     private const uint OutputProvidesSamples = 0x100;
     private const uint OutputCanProvideSamples = 0x200;
-    private const int MessageFlush = 0;
-    private const int MessageDrain = 1;
     private const int MessageBeginStreaming = 0x10000000;
-    private const int MessageEndStreaming = 0x10000001;
     private const int MessageStartOfStream = 0x10000003;
 
     private static readonly Guid Video = Guid.Parse("73646976-0000-0010-8000-00aa00389b71");
@@ -141,12 +138,12 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
 
             if (_sps is not null
                 && _pps is not null
+                && _transform != 0
                 && _sps.AsSpan().SequenceEqual(sequenceParameterSet)
                 && _pps.AsSpan().SequenceEqual(pictureParameterSet))
             {
-                // Lock and unlock repeat the same SPS/PPS. Renegotiating the
-                // transform there leaves it producing no pictures, so the last
-                // frame stays on screen.
+                // A periodic SPS/PPS with the same bytes must not rebuild a
+                // transform that is already producing pictures.
                 return;
             }
 
@@ -166,7 +163,9 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
 
             if (_transform != 0)
             {
-                RestartTransform(reapplyTypes: true);
+                // SetInputType again on the locked transform stays silent.
+                // Drop it; the next access unit builds one with these parameter sets.
+                ReleaseTransform();
             }
         }
     }
@@ -180,14 +179,16 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
 
         lock (_gate)
         {
-            if (_disposed != 0 || _transform == 0 || !_typesReady)
+            if (_disposed != 0)
             {
                 return;
             }
 
-            // Clear the decoded picture buffer without dropping the media types.
-            // A new IDR can then replace the pre-lock picture instead of blending with it.
-            RestartTransform(reapplyTypes: false);
+            // Flush plus BeginStreaming on the same Media Foundation object
+            // produced no pictures after an iPhone lock, so the window kept
+            // the last frame. Releasing the transform keeps the stored SPS/PPS.
+            // The next access unit creates a new decoder and can show the new IDR.
+            ReleaseTransform();
         }
     }
 
@@ -593,24 +594,6 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
     }
 
     private static byte Clamp(int value) => (byte)Math.Clamp(value, 0, 255);
-
-    private void RestartTransform(bool reapplyTypes)
-    {
-        Slots.ProcessMessage(_transform, MessageDrain, 0);
-        var discard = default(DecodedFrame);
-        Pull(ref discard);
-        Slots.ProcessMessage(_transform, MessageFlush, 0);
-        Slots.ProcessMessage(_transform, MessageEndStreaming, 0);
-        if (reapplyTypes)
-        {
-            _typesReady = false;
-            ApplyTypes();
-            return;
-        }
-
-        Slots.ProcessMessage(_transform, MessageBeginStreaming, 0);
-        Slots.ProcessMessage(_transform, MessageStartOfStream, 0);
-    }
 
     private bool CreateInputSample(ReadOnlySpan<byte> annexB, bool keyFrame, out nint sample)
     {

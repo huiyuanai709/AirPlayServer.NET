@@ -234,6 +234,197 @@ public sealed class MirrorResumeTests
         Assert.Equal(0, mirror.Activity.RejectedPayloads);
     }
 
+    [Fact]
+    public async Task Video_and_audio_teardown_keeps_the_session_key()
+    {
+        var lab = new byte[16];
+        lab[1] = 4;
+        var secret = new byte[32];
+        secret[2] = 9;
+        const ulong firstId = 41;
+        const ulong secondId = 100;
+        var decoder = new SpyDecoder();
+        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, NullAirPlayLog.Instance);
+        mirror.ArmForStream(lab, secret, firstId);
+        using var session = new PairingSession(PairingIdentity.Generate());
+
+        await SendAsync(
+            mirror,
+            () => mirror.Activity.DecodedFrames == 1,
+            CodecPacket(0),
+            Packet(0, 0x10, 0, Encrypt(lab, secret, firstId, AccessUnit(0x65), skip: 0)));
+
+        Assert.Equal(200, mirror.HandleMedia(Request("TEARDOWN", VideoAndAudioBody(firstId)), session, null).Status);
+        Assert.False(mirror.Activity.MediaKeysReady);
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", StreamBody(secondId)), session, null).Status);
+        Assert.True(mirror.Activity.MediaKeysReady);
+        await SendAsync(
+            mirror,
+            () => mirror.Activity.DecodedFrames == 2,
+            Packet(0, 0x10, 0, Encrypt(lab, secret, secondId, AccessUnit(0x65), skip: 0)));
+        Assert.Equal(0, mirror.Activity.RejectedPayloads);
+        Assert.Equal(Prefixed(AccessUnit(0x65)), decoder.Snapshot()[^1]);
+    }
+
+    [Fact]
+    public async Task Unlock_idr_uses_the_parameter_sets_kept_across_video_teardown()
+    {
+        var lab = new byte[16];
+        lab[2] = 5;
+        var secret = new byte[32];
+        secret[3] = 12;
+        const ulong firstId = 18;
+        const ulong secondId = 19;
+        var decoder = new SpyDecoder();
+        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, NullAirPlayLog.Instance);
+        mirror.ArmForStream(lab, secret, firstId);
+        using var session = new PairingSession(PairingIdentity.Generate());
+
+        await SendAsync(
+            mirror,
+            () => mirror.Activity.DecodedFrames == 1,
+            CodecPacket(0),
+            Packet(0, 0x10, 0, Encrypt(lab, secret, firstId, AccessUnit(0x65), skip: 0)));
+        var resetsAfterPicture = decoder.Resets;
+
+        Assert.Equal(200, mirror.HandleMedia(Request("TEARDOWN", StreamBody(firstId)), session, null).Status);
+        Assert.True(decoder.Resets > resetsAfterPicture);
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", StreamBody(secondId)), session, null).Status);
+        await SendAsync(
+            mirror,
+            () => mirror.Activity.DecodedFrames == 2,
+            Packet(0, 0x10, 0, Encrypt(lab, secret, secondId, AccessUnit(0x65), skip: 0)));
+        Assert.True(decoder.Snapshot().Length >= 2);
+        Assert.Equal(Prefixed(AccessUnit(0x65)), decoder.Snapshot()[^1]);
+        Assert.Equal(0, mirror.Activity.RejectedPayloads);
+    }
+
+    [Fact]
+    public async Task Payloads_held_across_video_teardown_are_not_replayed_onto_the_new_counter()
+    {
+        var lab = new byte[16];
+        lab[4] = 6;
+        var secret = new byte[32];
+        secret[5] = 14;
+        const ulong firstId = 21;
+        const ulong secondId = 22;
+        var decoder = new SpyDecoder();
+        var log = new CountingLog();
+        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, log);
+        mirror.ArmForStream(lab, secret, firstId);
+        using var session = new PairingSession(PairingIdentity.Generate());
+
+        await SendAsync(
+            mirror,
+            () => mirror.Activity.DecodedFrames == 1,
+            CodecPacket(0),
+            Packet(0, 0x10, 0, Encrypt(lab, secret, firstId, AccessUnit(0x65), skip: 0)));
+        Assert.Equal(200, mirror.HandleMedia(Request("TEARDOWN", StreamBody(firstId)), session, null).Status);
+
+        using var client = new TcpClient { NoDelay = true };
+        await client.ConnectAsync(IPAddress.Loopback, mirror.Activity.DataPort);
+        await using var stream = client.GetStream();
+        var garbage = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
+        for (var i = 0; i < 4; i++)
+        {
+            await stream.WriteAsync(Packet(0, 0, 0, garbage));
+        }
+
+        await stream.FlushAsync();
+        await WaitUntilAsync(() => mirror.Activity.PendingEncryptedPayloads == 4);
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", StreamBody(secondId)), session, null).Status);
+        Assert.Equal(0, mirror.Activity.PendingEncryptedPayloads);
+        Assert.True(mirror.Activity.MediaKeysReady);
+        Assert.Equal(1, log.Count("Discarded 4 encrypted payload(s) held across the video teardown."));
+
+        await stream.WriteAsync(Packet(0, 0x10, 0, Encrypt(lab, secret, secondId, AccessUnit(0x65), skip: 0)));
+        await stream.FlushAsync();
+        await WaitUntilAsync(() => mirror.Activity.DecodedFrames == 2);
+        Assert.Equal(0, mirror.Activity.RejectedPayloads);
+        Assert.True(mirror.Activity.MediaKeysReady);
+    }
+
+    [Fact]
+    public async Task Session_setup_that_cannot_unwrap_keeps_the_live_content_key()
+    {
+        var content = new byte[16];
+        content[0] = 0x3C;
+        var decoder = new SpyDecoder();
+        var log = new CountingLog();
+        await using var mirror = MirrorRuntime.Start(
+            IPAddress.Loopback,
+            9,
+            new FrameSlot(),
+            decoder,
+            new OnceUnwrapper(content),
+            ReadOnlySpan<byte>.Empty,
+            log);
+        using var session = FinishPairing(out var secret);
+        var ekey = new byte[72];
+        ekey[0] = 1;
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", SessionBody72(ekey)), session, null).Status);
+        const ulong firstId = 8;
+        const ulong secondId = 9;
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", StreamBody(firstId)), session, null).Status);
+        Assert.True(mirror.Activity.MediaKeysReady);
+
+        await SendAsync(
+            mirror,
+            () => mirror.Activity.DecodedFrames == 1,
+            CodecPacket(0),
+            Packet(0, 0x10, 0, Encrypt(content, secret, firstId, AccessUnit(0x65), skip: 0)));
+
+        var again = new byte[72];
+        again[0] = 2;
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", SessionBody72(again)), session, null).Status);
+        Assert.Equal(1, log.Count("The session key already in use is kept."));
+        Assert.True(mirror.Activity.MediaKeysReady);
+
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", StreamBody(secondId)), session, null).Status);
+        Assert.True(mirror.Activity.MediaKeysReady);
+        await SendAsync(
+            mirror,
+            () => mirror.Activity.DecodedFrames == 2,
+            Packet(0, 0x10, 0, Encrypt(content, secret, secondId, AccessUnit(0x65), skip: 0)));
+        Assert.Equal(0, mirror.Activity.RejectedPayloads);
+    }
+
+    [Fact]
+    public async Task Stalled_data_client_is_released_on_video_teardown()
+    {
+        var lab = new byte[16];
+        lab[9] = 3;
+        var secret = new byte[32];
+        secret[10] = 5;
+        const ulong firstId = 60;
+        const ulong secondId = 61;
+        var decoder = new SpyDecoder();
+        var log = new CountingLog();
+        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, log);
+        mirror.ArmForStream(lab, secret, firstId);
+        using var session = new PairingSession(PairingIdentity.Generate());
+
+        await SendAsync(
+            mirror,
+            () => mirror.Activity.DecodedFrames == 1,
+            CodecPacket(0),
+            Packet(0, 0x10, 0, Encrypt(lab, secret, firstId, AccessUnit(0x65), skip: 0)));
+
+        using var stalled = new TcpClient { NoDelay = true };
+        await stalled.ConnectAsync(IPAddress.Loopback, mirror.Activity.DataPort);
+        await stalled.GetStream().WriteAsync(new byte[] { 1, 2 });
+        await WaitUntilAsync(() => log.Count("Mirror data client connected.") >= 2);
+
+        Assert.Equal(200, mirror.HandleMedia(Request("TEARDOWN", StreamBody(firstId)), session, null).Status);
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", StreamBody(secondId)), session, null).Status);
+        await SendAsync(
+            mirror,
+            () => mirror.Activity.DecodedFrames == 2,
+            CodecPacket(0),
+            Packet(0, 0x10, 0, Encrypt(lab, secret, secondId, AccessUnit(0x65), skip: 0)));
+        Assert.Equal(0, mirror.Activity.RejectedPayloads);
+    }
+
     private static PairingSession FinishPairing(out byte[] secret)
     {
         using var senderKey = PairingIdentity.Generate();
@@ -266,6 +457,15 @@ public sealed class MirrorResumeTests
         return BinaryPropertyList.Write(session);
     }
 
+    private static byte[] SessionBody72(byte[] ekey)
+    {
+        var session = new PlistDictionary();
+        session.Add("eiv", new PlistData(new byte[16]));
+        session.Add("ekey", new PlistData(ekey));
+        session.Add("timingPort", new PlistInteger(46000));
+        return BinaryPropertyList.Write(session);
+    }
+
     private static byte[] StreamBody(ulong streamId)
     {
         var stream = new PlistDictionary();
@@ -284,6 +484,21 @@ public sealed class MirrorResumeTests
         stream.Add("type", new PlistInteger(96));
         var streams = new PlistArray();
         streams.Add(stream);
+        var body = new PlistDictionary();
+        body.Add("streams", streams);
+        return BinaryPropertyList.Write(body);
+    }
+
+    private static byte[] VideoAndAudioBody(ulong streamId)
+    {
+        var video = new PlistDictionary();
+        video.Add("type", new PlistInteger(110));
+        video.Add("streamConnectionID", new PlistInteger(unchecked((long)streamId)));
+        var audio = new PlistDictionary();
+        audio.Add("type", new PlistInteger(96));
+        var streams = new PlistArray();
+        streams.Add(audio);
+        streams.Add(video);
         var body = new PlistDictionary();
         body.Add("streams", streams);
         return BinaryPropertyList.Write(body);
@@ -466,6 +681,22 @@ public sealed class MirrorResumeTests
             }
 
             frame = new DecodedFrame(2, 2, new byte[16], 8);
+            return true;
+        }
+    }
+
+    private sealed class OnceUnwrapper(byte[] key) : IMediaKeyUnwrapper
+    {
+        private int _uses;
+
+        public bool TryUnwrap(ReadOnlySpan<byte> wrappedKey, Span<byte> contentKey)
+        {
+            if (wrappedKey.Length != 72 || contentKey.Length < 16 || Interlocked.Increment(ref _uses) != 1)
+            {
+                return false;
+            }
+
+            key.CopyTo(contentKey);
             return true;
         }
     }

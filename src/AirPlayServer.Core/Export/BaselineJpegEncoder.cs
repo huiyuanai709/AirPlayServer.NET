@@ -84,6 +84,10 @@ internal static class BaselineJpegEncoder
         var cbBlock = new double[64];
         var crBlock = new double[64];
         var coeff = new int[64];
+        // One scratch buffer for the whole frame. stackalloc inside the block
+        // loop is enough to overflow a thread-pool stack on a 720x1560 picture
+        // when the JIT inlines the DCT, and that frame is a normal phone mirror.
+        var scratch = new JpegScratch();
         var previousY = 0;
         var previousCb = 0;
         var previousCr = 0;
@@ -92,9 +96,9 @@ internal static class BaselineJpegEncoder
             for (var blockX = 0; blockX < width; blockX += 8)
             {
                 LoadBlocks(bgra, width, height, stride, blockX, blockY, yBlock, cbBlock, crBlock);
-                EncodeBlock(yBlock, yQuant, coeff, ref previousY, DcLuminance, AcLuminance, bits);
-                EncodeBlock(cbBlock, cQuant, coeff, ref previousCb, DcChrominance, AcChrominance, bits);
-                EncodeBlock(crBlock, cQuant, coeff, ref previousCr, DcChrominance, AcChrominance, bits);
+                EncodeBlock(yBlock, yQuant, coeff, ref previousY, DcLuminance, AcLuminance, bits, scratch);
+                EncodeBlock(cbBlock, cQuant, coeff, ref previousCb, DcChrominance, AcChrominance, bits, scratch);
+                EncodeBlock(crBlock, cQuant, coeff, ref previousCr, DcChrominance, AcChrominance, bits, scratch);
             }
         }
 
@@ -166,11 +170,11 @@ internal static class BaselineJpegEncoder
         return false;
     }
 
-    private static void EncodeBlock(double[] samples, ReadOnlySpan<int> quant, int[] coefficients, ref int previousDc, HuffmanTable dc, HuffmanTable ac, BitWriter bits)
+    private static void EncodeBlock(double[] samples, ReadOnlySpan<int> quant, int[] coefficients, ref int previousDc, HuffmanTable dc, HuffmanTable ac, BitWriter bits, JpegScratch scratch)
     {
-        ForwardDct(samples, quant, coefficients);
+        ForwardDct(samples, quant, coefficients, scratch);
 
-        Span<int> zigzag = stackalloc int[64];
+        var zigzag = scratch.Zigzag;
         for (var i = 0; i < 64; i++)
         {
             zigzag[i] = coefficients[ZigZag[i]];
@@ -205,11 +209,11 @@ internal static class BaselineJpegEncoder
         }
     }
 
-    private static void ForwardDct(double[] samples, ReadOnlySpan<int> quant, int[] coefficients)
+    private static void ForwardDct(double[] samples, ReadOnlySpan<int> quant, int[] coefficients, JpegScratch scratch)
     {
-        Span<double> horizontal = stackalloc double[64];
-        Span<double> row = stackalloc double[8];
-        Span<double> frequency = stackalloc double[8];
+        var horizontal = scratch.Horizontal;
+        var row = scratch.Row;
+        var frequency = scratch.Frequency;
         for (var y = 0; y < 8; y++)
         {
             for (var x = 0; x < 8; x++)
@@ -224,7 +228,7 @@ internal static class BaselineJpegEncoder
             }
         }
 
-        Span<double> column = stackalloc double[8];
+        var column = scratch.Column;
         for (var u = 0; u < 8; u++)
         {
             for (var y = 0; y < 8; y++)
@@ -245,7 +249,7 @@ internal static class BaselineJpegEncoder
         }
     }
 
-    private static void Dct8(ReadOnlySpan<double> input, Span<double> output)
+    private static void Dct8(double[] input, double[] output)
     {
         for (var bin = 0; bin < 8; bin++)
         {
@@ -490,6 +494,15 @@ internal static class BaselineJpegEncoder
         0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8,
         0xF9, 0xFA,
     ];
+
+    private sealed class JpegScratch
+    {
+        public readonly int[] Zigzag = new int[64];
+        public readonly double[] Horizontal = new double[64];
+        public readonly double[] Row = new double[8];
+        public readonly double[] Frequency = new double[8];
+        public readonly double[] Column = new double[8];
+    }
 
     private readonly struct HuffmanTable
     {

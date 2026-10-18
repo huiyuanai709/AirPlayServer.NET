@@ -51,7 +51,9 @@ internal sealed class HostArgs
                          只写入点击对齐尺寸。/info 宣告仍是 --screen（默认 480x1040）。
         --list-models    打印 slug 和竖屏 UIKit 逻辑点，然后退出。
         --tapclock       把最新解码帧按 ATBF type 3 JPEG 推到 host:42125。不发送 H.264。
-        --tapclock-dir   备用：把 mirror.jpg.part 写完后改名为 mirror.jpg。
+        --tapclock-dir   备用：把 JPEG 写进该目录的临时文件，再替换 mirror.jpg。
+                         目录不可写或 mirror.jpg 被占用时，日志会写出完整路径。
+                         同时指定了 --tapclock 时，目录失败不会拆掉 TCP 42125。
         --tapclock-fps   导出节拍，默认约 2，上限 30。
         --lab-key        实验用 16 字节内容密钥。SETUP 用这把密钥。/fp-setup 仍由进程内 FairPlay 回答。
                          pair-verify 完成后，加密的 type 0 会解密。

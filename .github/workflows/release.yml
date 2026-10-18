@@ -112,7 +112,11 @@ jobs:
             -p:Version="$VERSION" \
             -p:InformationalVersion="$TAG" \
             -p:IncludeSourceRevisionInInformationalVersion=false \
+            -p:DebugType=none \
+            -p:DebugSymbols=false \
+            -p:NativeDebugSymbols=false \
             --output "artifacts/$RID"
+          ./packaging/assert-no-publish-symbols.sh "artifacts/$RID"
 
       - name: Smoke the published binary (linux-x64)
         if: runner.os == 'Linux'

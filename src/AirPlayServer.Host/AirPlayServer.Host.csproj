@@ -12,6 +12,14 @@
     <Description>Native AOT host for the AirPlayServer.NET receiver.</Description>
   </PropertyGroup>
 
+  <!-- Release publish is the shipping binary. DebugType=none keeps the
+       Native AOT linker from writing a .pdb (Windows) or .dbg (Linux). -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <NativeDebugSymbols>false</NativeDebugSymbols>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\AirPlayServer.Core\AirPlayServer.Core.csproj" />
   </ItemGroup>

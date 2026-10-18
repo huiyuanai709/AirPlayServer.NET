@@ -29,4 +29,4 @@ linux-x64 包里的 airplayserver.service 是 systemd 草稿，不含 --seed。
 这个二进制在 GitHub 的 ubuntu-latest 上构建，需要兼容的 glibc。
 
 --seed 只留在内存里，不要写进单元文件或脚本后提交。
-同目录的 .pdb 或 .dbg（如果有）是符号文件，运行不需要它。
+发布包不含 .pdb / .dbg 调试符号，运行不需要它们。

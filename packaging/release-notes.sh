@@ -33,7 +33,7 @@ case "$tag" in
 esac
 
 notes=$(cat <<'EOF'
-__PRERELEASE_BLOCK__发布出来的 Native AOT 宿主是 **GPL-3.0-only**，因为进程内编进了 FairPlay。源码就是本仓库的 tag `__TAG__`。压缩包里没有配对种子，也没有 FairPlay 密钥材料。
+__PRERELEASE_BLOCK__发布出来的 Native AOT 宿主是 **GPL-3.0-only**，因为进程内编进了 FairPlay。源码就是本仓库的 tag `__TAG__`。压缩包里没有配对种子，也没有 FairPlay 密钥材料，也没有 .pdb / .dbg 调试符号。
 
 | 文件 | 说明 |
 | --- | --- |

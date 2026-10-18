@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Stage a Native AOT publish directory into a release zip.
 # Usage: stage-release.sh <rid> <tag> <publish-dir> <zip-path>
-# The zip contains the binary, RUN.txt, LICENSE, and NOTICE.md.
-# linux-x64 also gets airplayserver.service. No secrets are copied.
+# The zip contains the binary, RUN.txt, LICENSE, NOTICE.md, and VERSION.txt.
+# linux-x64 also gets airplayserver.service.
+# Runtime *.dll, *.so, and *.dylib are kept. Debug symbols are not.
+# No secrets are copied.
 set -euo pipefail
 
 if [ "$#" -ne 4 ]; then
@@ -55,8 +57,14 @@ copied_binary=false
 for extra in "$publish_dir"/*; do
   [ -f "$extra" ] || continue
   base="${extra##*/}"
+  lower="${base,,}"
+  case "$lower" in
+    *.pdb | *.dbg | *.dwo | *.debug | *.sym | *.dsym)
+      continue
+      ;;
+  esac
   case "$base" in
-    "$binary" | *.pdb | *.dbg | *.dll | *.so | *.dylib)
+    "$binary" | *.dll | *.so | *.dylib)
       cp "$extra" "$stage/"
       if [ "$base" = "$binary" ]; then
         copied_binary=true
@@ -147,6 +155,11 @@ with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as archive:
     missing = [name for name in required if name not in names]
     if missing:
         sys.exit("zip missing " + ", ".join(missing))
+
+    symbol_suffixes = (".pdb", ".dbg", ".dwo", ".debug", ".sym", ".dsym")
+    symbols = sorted(name for name in names if name.lower().endswith(symbol_suffixes))
+    if symbols:
+        sys.exit("zip contains debug symbols: " + ", ".join(symbols))
 
     if expect_exec:
         mode = archive.getinfo(prefix + "/" + binary).external_attr >> 16

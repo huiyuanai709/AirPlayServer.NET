@@ -87,7 +87,7 @@ Windows（需要 Visual Studio 的 C++ 生成工具，AOT 用它做链接）：
 
 ## 切一个 GitHub Release
 
-合并到 `main` 之后，用下面两种方式之一发布 win-x64 和 linux-x64 的 Native AOT 宿主。两种方式走同一个 workflow：`.github/workflows/release.yml`。它用和 `packaging/publish.sh` / `publish.ps1` 相同的 `dotnet publish` 参数做 Native AOT，跑 `--help` 和 `--self-check`，再把 zip 挂到 GitHub Release 上。每个 zip 里有二进制、`RUN.txt`、`LICENSE` 和 `NOTICE.md`。许可仍是 GPL-3.0-only。workflow 不读取密钥，仓库里也不放密钥。
+合并到 `main` 之后，用下面两种方式之一发布 win-x64 和 linux-x64 的 Native AOT 宿主。两种方式走同一个 workflow：`.github/workflows/release.yml`。它用和 `packaging/publish.sh` / `publish.ps1` 相同的 `dotnet publish` 参数做 Native AOT，跑 `--help` 和 `--self-check`，再把 zip 挂到 GitHub Release 上。每个 zip 里有二进制、`RUN.txt`、`LICENSE` 和 `NOTICE.md`，不含 .pdb / .dbg 调试符号。许可仍是 GPL-3.0-only。workflow 不读取密钥，仓库里也不放密钥。
 
 版本号必须是 `v1.2.3` 这种形式，也可以带预发布后缀，例如 `v1.2.3-rc.1`。带连字符的版本会标成 prerelease，不会成为 Latest。`workflow_dispatch` 的输入可以不写前缀 `v`，workflow 会补上。
 

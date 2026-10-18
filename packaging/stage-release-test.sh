@@ -118,7 +118,9 @@ PY
 write_publish "$tmp/linux" "AirPlayServer.Host"
 # 0600 plus chmod +x becomes 0711 on Unix. The zip must still say 0755,
 # including when this fixture runs on Windows where chmod does not stick.
+# Sidecars are 0777 here so a leaked host mode fails the 0644 check.
 chmod 600 "$tmp/linux/AirPlayServer.Host" || true
+chmod 777 "$tmp/linux/SomeNative.dll" "$tmp/linux/libsomething.so" "$tmp/linux/libsomething.dylib" || true
 "$stage" linux-x64 v0.0.0-test "$tmp/linux" "$tmp/linux.zip"
 expect_zip "$tmp/linux.zip" linux-x64 "AirPlayServer.Host" 1
 
@@ -138,8 +140,32 @@ if [ $((mode & 0777)) -ne $((0755)) ]; then
 fi
 
 write_publish "$tmp/win" "AirPlayServer.Host.exe"
+# Host mode must not leak into the zip. Windows CPython reports .exe as 0777.
+chmod 777 "$tmp/win/AirPlayServer.Host.exe" "$tmp/win/SomeNative.dll" "$tmp/win/libsomething.so" || true
 "$stage" win-x64 v0.0.0-test "$tmp/win" "$tmp/win.zip"
 expect_zip "$tmp/win.zip" win-x64 "AirPlayServer.Host.exe" 0
+
+"$py" - "$tmp/linux.zip" "$tmp/win.zip" <<'PY'
+import sys
+import zipfile
+
+def check(path, binary, binary_perm):
+    with zipfile.ZipFile(path) as archive:
+        for info in archive.infolist():
+            if info.create_system != 3:
+                sys.exit(f"{info.filename} create_system is {info.create_system}, want Unix")
+            mode = info.external_attr >> 16
+            perm = mode & 0o777
+            name = info.filename.split("/")[-1]
+            want = binary_perm if name == binary else 0o644
+            if perm != want:
+                sys.exit(f"{info.filename} mode is {oct(mode)}, want {oct(want)}")
+            if name != binary and perm & 0o111:
+                sys.exit(f"{name} must not be marked executable (mode {mode})")
+
+check(sys.argv[1], "AirPlayServer.Host", 0o755)
+check(sys.argv[2], "AirPlayServer.Host.exe", 0o644)
+PY
 
 win_mode="$("$py" - "$tmp/win.zip" <<'PY'
 import sys
@@ -149,11 +175,11 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     print(archive.getinfo(name).external_attr >> 16)
 PY
 )"
-# Staging win-x64 already succeeded, so a missing Unix execute bit is allowed.
-# Do not treat host-provided bits as a failure: Windows CPython reports .exe as
-# 0777. The linux 0755 override must not be applied here.
-if [ $((win_mode & 0777)) -eq $((0755)) ]; then
-  fail "win-x64 binary was forced to 0755 (mode ${win_mode}); execute bits are not required"
+if [ $((win_mode & 0111)) -ne 0 ]; then
+  fail "win-x64 binary must not be marked executable (mode ${win_mode})"
+fi
+if [ $((win_mode & 0777)) -ne $((0644)) ]; then
+  fail "win-x64 binary mode is ${win_mode}, want 0644"
 fi
 
 if "$stage" linux-x64 v0.0.0-test "$tmp/empty-publish" "$tmp/missing.zip" >/dev/null 2>"$tmp/missing.err"; then

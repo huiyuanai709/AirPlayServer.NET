@@ -116,7 +116,6 @@ STAGE_DIR="$stage" \
   EXPECT_SERVICE="$expect_service" \
   "$py" - <<'PY'
 import os
-import stat
 import sys
 import zipfile
 
@@ -126,9 +125,11 @@ prefix = os.environ["ZIP_PREFIX"]
 binary = os.environ["BINARY_NAME"]
 expect_exec = os.environ["EXPECT_EXEC"] == "1"
 expect_service = os.environ["EXPECT_SERVICE"] == "1"
-# Unix mode lives in the high 16 bits. Set it explicitly: Git Bash chmod
-# does not produce an execute bit that Python's zipfile will copy.
-linux_binary_attr = (stat.S_IFREG | 0o755) << 16
+# High 16 bits are the Unix mode, including the regular-file type.
+# Set every entry explicitly. Windows CPython reports .exe as 0777, and
+# Git Bash chmod does not produce a Unix execute bit for the linux binary.
+exec_attr = 0o100755 << 16
+file_attr = 0o100644 << 16
 
 os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
 if os.path.exists(dest):
@@ -142,10 +143,12 @@ with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             rel = os.path.relpath(path, stage).replace("\\", "/")
             arcname = prefix + "/" + rel
             archive.write(path, arcname)
+            info = archive.getinfo(arcname)
+            info.create_system = 3  # Unix, so unzip honors external_attr
             if expect_exec and name == binary:
-                info = archive.getinfo(arcname)
-                info.create_system = 3  # Unix, so unzip honors external_attr
-                info.external_attr = linux_binary_attr
+                info.external_attr = exec_attr
+            else:
+                info.external_attr = file_attr
 
     names = set(archive.namelist())
     required = [

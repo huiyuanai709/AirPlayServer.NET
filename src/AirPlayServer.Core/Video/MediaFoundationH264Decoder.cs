@@ -22,6 +22,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
     private const int RpcChangedMode = unchecked((int)0x80010106);
     private const uint OutputProvidesSamples = 0x100;
     private const uint OutputCanProvideSamples = 0x200;
+    private const int MessageDrain = 1;
     private const int MessageBeginStreaming = 0x10000000;
     private const int MessageStartOfStream = 0x10000003;
 

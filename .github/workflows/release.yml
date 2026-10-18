@@ -1,0 +1,201 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号，例如 0.2.0 或 v0.2.0。预发布用 0.2.0-rc.1。"
+        required: true
+        type: string
+      dry_run:
+        description: "只构建并上传 Actions 产物，不创建 tag 或 GitHub Release"
+        required: false
+        type: boolean
+        default: false
+
+# Publish jobs only read the repo. The release job writes the tag and Release.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}-${{ github.event_name }}-${{ github.event.inputs.version || 'none' }}-${{ github.event.inputs.dry_run || 'false' }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve and check the version
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r line; do
+            key="${line%%=*}"
+            value="${line#*=}"
+            case "$value" in
+              *[!A-Za-z0-9._-]*)
+                echo "unsafe resolver value for ${key}" >&2
+                exit 1
+                ;;
+            esac
+            case "$key" in
+              tag|version|prerelease)
+                printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
+                printf '%s=%s\n' "$key" "$value"
+                ;;
+              *)
+                echo "unexpected resolver output: $line" >&2
+                exit 1
+                ;;
+            esac
+          done < <(./packaging/resolve-release-version.sh)
+          for key in tag version prerelease; do
+            if ! grep -q "^${key}=" "$GITHUB_OUTPUT"; then
+              echo "resolver did not set ${key}" >&2
+              exit 1
+            fi
+          done
+
+  publish:
+    name: Publish ${{ matrix.rid }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # windows-latest already has the VS 2022 C++ toolset Native AOT links with.
+          - os: windows-latest
+            rid: win-x64
+          - os: ubuntu-latest
+            rid: linux-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.x
+          dotnet-quality: preview
+
+      - name: Install Native AOT build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Native AOT publish
+        shell: bash
+        env:
+          RID: ${{ matrix.rid }}
+          VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          dotnet publish src/AirPlayServer.Host/AirPlayServer.Host.csproj \
+            --configuration Release \
+            --runtime "$RID" \
+            --self-contained true \
+            -p:Version="$VERSION" \
+            -p:InformationalVersion="$TAG" \
+            -p:IncludeSourceRevisionInInformationalVersion=false \
+            --output "artifacts/$RID"
+
+      - name: Smoke the published binary (linux-x64)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifacts/linux-x64/AirPlayServer.Host --help
+          artifacts/linux-x64/AirPlayServer.Host --self-check
+
+      - name: Smoke the published binary (win-x64)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./artifacts/win-x64/AirPlayServer.Host.exe --help
+          ./artifacts/win-x64/AirPlayServer.Host.exe --self-check
+
+      - name: Pack the release zip
+        shell: bash
+        env:
+          RID: ${{ matrix.rid }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ./packaging/stage-release.sh \
+            "$RID" \
+            "$TAG" \
+            "artifacts/$RID" \
+            "artifacts/release/AirPlayServer.Host-${TAG}-${RID}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AirPlayServer.Host-${{ matrix.rid }}
+          path: artifacts/release/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: GitHub Release
+    needs: [version, publish]
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: AirPlayServer.Host-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums and release notes
+        shell: bash
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          linux="AirPlayServer.Host-${TAG}-linux-x64.zip"
+          windows="AirPlayServer.Host-${TAG}-win-x64.zip"
+          test -f "dist/$linux"
+          test -f "dist/$windows"
+          (
+            cd dist
+            sha256sum "$linux" "$windows" > SHA256SUMS.txt
+          )
+          ./packaging/release-notes.sh "$TAG" > dist/notes.md
+
+      - name: Create or update the GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+          RELEASE_SHA: ${{ github.sha }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          ./packaging/publish-github-release.sh \
+            "$TAG" \
+            "$RELEASE_SHA" \
+            "$PRERELEASE" \
+            dist/notes.md \
+            "dist/AirPlayServer.Host-${TAG}-linux-x64.zip" \
+            "dist/AirPlayServer.Host-${TAG}-win-x64.zip" \
+            dist/SHA256SUMS.txt

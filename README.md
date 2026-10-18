@@ -48,8 +48,9 @@ mDNS announcer                         control listeners :7001 and :5001
 | `src/AirPlayServer.Core` | 协议库。`IsAotCompatible`。发现、配对、`FairPlayKeys`、镜像、JPEG/ATBF。 |
 | `src/AirPlayServer.Host` | 控制台宿主。`PublishAot`。 |
 | `tests/AirPlayServer.Core.Tests` | 握手、镜像包、解密、SETUP plist、ATBF 与目录改名。 |
-| `packaging/` | AOT 发布脚本和 systemd 单元草稿。不包含密钥，也不做发布。 |
-| `.github/workflows/ci.yml` | restore、build、test，以及 linux-x64 / win-x64 的 AOT 发布冒烟。 |
+| `packaging/` | 本地 AOT 发布脚本、systemd 草稿，以及 Release 包里的 `RUN.txt`。脚本本身不创建 GitHub Release。 |
+| `.github/workflows/ci.yml` | PR 和 push 上的 restore、build、test，以及 linux-x64 / win-x64 的 AOT 发布冒烟。 |
+| `.github/workflows/release.yml` | `v*` tag 或手动触发时构建两个 RID，并创建 GitHub Release。 |
 
 握手用的是运行时的 X25519 和 AES（平台会走 AES-NI 或等价指令），外加一份 RFC 8032 Ed25519。Ed25519 的域运算走 `BigInteger`。镜像 CTR 使用同一套 AES-128-CTR，密钥按 `AirPlayStreamKey` / `AirPlayStreamIV` 和 `streamConnectionID` 的十进制文本从内容密钥与 pair-verify 的 X25519 共享秘密派生。像素路径目前是 BGRA 帧槽；还没有 SIMD YUV 转换。
 
@@ -82,6 +83,44 @@ Windows（需要 Visual Studio 的 C++ 生成工具，AOT 用它做链接）：
 ```
 
 `--self-check` 在发布出的原生二进制里重跑 RFC 7748、RFC 8032、一次 pair-verify，以及一张 JPEG 的 ATBF 封装，用来确认 AOT 之后这些路径还在。`--seed` 是 32 字节十六进制，只留在内存里，仓库和单元文件都不写种子。宿主默认 `--screen 480x1040`，并打开窗口标志；在 Linux 上窗口不会创建。
+
+## 切一个 GitHub Release
+
+合并到 `main` 之后，用下面两种方式之一发布 win-x64 和 linux-x64 的 Native AOT 宿主。两种方式走同一个 workflow：`.github/workflows/release.yml`。它用和 `packaging/publish.sh` / `publish.ps1` 相同的 `dotnet publish` 参数做 Native AOT，跑 `--help` 和 `--self-check`，再把 zip 挂到 GitHub Release 上。每个 zip 里有二进制、`RUN.txt`、`LICENSE` 和 `NOTICE.md`。许可仍是 GPL-3.0-only。workflow 不读取密钥，仓库里也不放密钥。
+
+版本号必须是 `v1.2.3` 这种形式，也可以带预发布后缀，例如 `v1.2.3-rc.1`。带连字符的版本会标成 prerelease，不会成为 Latest。`workflow_dispatch` 的输入可以不写前缀 `v`，workflow 会补上。
+
+CI（`.github/workflows/ci.yml`）仍然在 PR 和普通 push 上做测试和 AOT 冒烟。它监听所有 push，所以推 tag 时也会再跑一遍。Release workflow 是另外一条，不改 CI 里的冒烟步骤。
+
+### 推一个 tag
+
+tag 必须打在已经包含 `release.yml` 的提交上。先把这条 workflow 合并进 `main`，再打 tag。
+
+```bash
+git checkout main
+git pull
+git tag -a v0.1.0 -m "AirPlayServer.NET v0.1.0"
+git push origin v0.1.0
+```
+
+推上去之后，Actions 里的 Release workflow 会构建并创建 Release。不需要再手动跑一遍。
+
+### 在 Actions 里手动跑
+
+`workflow_dispatch` 只有在 workflow 文件已经在默认分支 `main` 上时才会出现。
+
+1. 打开 Actions → Release → Run workflow。
+2. 选 `main`，或者你确实想发布的那次提交所在的分支。
+3. Version 填 `0.1.0` 或 `v0.1.0`。
+4. 想先看构建、先不发 Release 时，勾上 dry run。
+
+不勾 dry run 时，workflow 用 `GITHUB_TOKEN` 在这次提交上创建 tag 并发布。这个 token 创建的 tag 不会再触发第二次构建。dry run 只把 zip 留在这次 Actions 的 artifacts 里（保留 14 天），不创建 tag，也不创建 GitHub Release。
+
+已经存在、而且指向别的提交的 tag 不会被覆盖。要重发同一个版本，先删掉旧的 tag 和 Release，或者在原提交上重跑 workflow。
+
+如果 Release 作业报 `Resource not accessible by integration`，到仓库 Settings → Actions → General → Workflow permissions，允许 `GITHUB_TOKEN` 读写 contents。workflow 已经请求了 `contents: write`，仓库上限不能比它更严。
+
+本地的 `packaging/publish.sh` 和 `publish.ps1` 仍然只负责编出 `artifacts/<rid>/`。编完之后可以用 `packaging/stage-release.sh` 在本地打出同样的 zip，这一步不会创建 GitHub Release。
 
 ## 相对上游还没移植的部分
 

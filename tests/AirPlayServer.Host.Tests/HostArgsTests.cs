@@ -91,5 +91,26 @@ public class HostArgsTests
         Assert.Contains("像素 x, y", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("iphone-15-pro-max", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("点击仍然不发给手机", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("--no-update", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("--update", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("--check-update", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("--version", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("SHA256SUMS.txt", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("GITHUB_TOKEN", HostArgs.HelpText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Update_flags_default_to_a_startup_check()
+    {
+        Assert.Equal(HostUpdateMode.Automatic, HostArgs.Parse([]).UpdateMode);
+        Assert.Equal(HostUpdateMode.Explicit, HostArgs.Parse(["--update"]).UpdateMode);
+        Assert.Equal(HostUpdateMode.Explicit, HostArgs.Parse(["--check-update", "--name", "客厅"]).UpdateMode);
+        Assert.Equal(HostUpdateMode.Disabled, HostArgs.Parse(["--no-update"]).UpdateMode);
+        Assert.True(HostArgs.Parse(["--version"]).ShowVersion);
+
+        var updateFirst = Assert.Throws<ArgumentException>(() => HostArgs.Parse(["--update", "--no-update"]));
+        Assert.Contains("--update", updateFirst.Message, StringComparison.Ordinal);
+        var skipFirst = Assert.Throws<ArgumentException>(() => HostArgs.Parse(["--no-update", "--check-update"]));
+        Assert.Contains("--no-update", skipFirst.Message, StringComparison.Ordinal);
     }
 }

@@ -5,13 +5,24 @@ using AirPlayServer.Core.Export;
 
 namespace AirPlayServer.Host;
 
+internal enum HostUpdateMode
+{
+    Automatic,
+    Explicit,
+    Disabled,
+}
+
 internal sealed class HostArgs
 {
     public bool Help { get; private set; }
 
+    public bool ShowVersion { get; private set; }
+
     public bool ListModels { get; private set; }
 
     public bool SelfCheck { get; private set; }
+
+    public HostUpdateMode UpdateMode { get; private set; } = HostUpdateMode.Automatic;
 
     public AirPlayReceiverOptions Options { get; private set; } = new();
 
@@ -28,7 +39,11 @@ internal sealed class HostArgs
                              [--no-discovery] [--no-window] [--demo-frame]
                              [--tapclock 主机:42125] [--tapclock-dir 目录] [--tapclock-fps 2]
                              [--lab-key 32位十六进制] [--media-key-plugin 路径] [--seed 64位十六进制]
+                             [--no-update]
           AirPlayServer.Host --self-check
+          AirPlayServer.Host --update
+          AirPlayServer.Host --check-update
+          AirPlayServer.Host --version
           AirPlayServer.Host --help
 
         FairPlay 默认开启。POST /fp-setup 和 72 字节 ekey 共用同一次进程内握手。
@@ -67,6 +82,15 @@ internal sealed class HostArgs
         窗口把画面拉伸到客户区。点先换成解码帧像素（整数截断，画面外的黑边不算），再按 TapClock 的算法换成屏幕点：screen = 帧像素 * --model 宽高 / 帧宽高（整数除法，X 和 Y 分开算）。
         例如 --model iphone-15-pro-max 是 430×932。480×1040 的帧上，像素 (323, 850) 读成 TapClock 289, 761，和 TapClock 日志里的「屏幕坐标」是同一套点。
         没写 --model 时，图像尺寸就是屏幕，标签退回「像素 x, y」。悬停不使用 --screen 的广告分辨率。点击仍然不发给手机。
+        启动时会检查 GitHub 上 huiyuanai709/AirPlayServer.NET 的最新稳定版（不含预发布）。
+        版本优先读可执行文件旁边的 VERSION.txt；没有这个文件时用编译进去的版本。
+        有较新的 vX.Y.Z 时，下载 win-x64 或 linux-x64 的 zip。Release 里有 SHA256SUMS.txt 就先校验，再替换本目录里的程序并重新启动。
+        网络失败、校验失败或目录不可写时只记日志，继续跑当前程序。检查有超时，不会一直卡住。
+        --no-update      这次启动不检查更新。
+        --update         检查并安装更新，然后重新启动。已经是最新则退出，不启动接收端。
+        --check-update   与 --update 相同。
+        --version        打印程序内版本和 VERSION.txt，然后退出。不访问网络。
+        公开的 Release 不需要令牌。私有仓库请设置环境变量 GITHUB_TOKEN 或 GH_TOKEN。
         """;
 
     public static HostArgs Parse(string[] args)
@@ -93,6 +117,26 @@ internal sealed class HostArgs
                     break;
                 case "--self-check":
                     parsed.SelfCheck = true;
+                    break;
+                case "--version":
+                    parsed.ShowVersion = true;
+                    break;
+                case "--update":
+                case "--check-update":
+                    if (parsed.UpdateMode == HostUpdateMode.Disabled)
+                    {
+                        throw new ArgumentException("--update and --no-update cannot be combined.");
+                    }
+
+                    parsed.UpdateMode = HostUpdateMode.Explicit;
+                    break;
+                case "--no-update":
+                    if (parsed.UpdateMode == HostUpdateMode.Explicit)
+                    {
+                        throw new ArgumentException("--update and --no-update cannot be combined.");
+                    }
+
+                    parsed.UpdateMode = HostUpdateMode.Disabled;
                     break;
                 case "--no-discovery":
                     options.EnableDiscovery = false;

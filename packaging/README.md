@@ -24,4 +24,6 @@ To stage a zip locally after a publish, without creating a release:
 
 `stage-release-test.sh` checks that fixture zip without a Native AOT publish. It keeps the binary and runtime libraries, and it fails if a `.pdb` or `.dbg` is packed. Zip modes are explicit: the linux-x64 binary is `0755`, and every other entry, including the win-x64 binary, is `0644`.
 
+The host checks GitHub Releases on startup and, when `VERSION.txt` is older than the latest stable tag, replaces this zip's layout in place. The updater refuses debug-symbol names, so a release zip still must not contain `.pdb` or `.dbg`. `--no-update` skips the check. See the README section on automatic updates.
+
 `resolve-release-version.sh` is what the workflow uses to turn a tag or a dispatch input into `vMAJOR.MINOR.PATCH`. A dispatch input of `0.1.0` becomes tag `v0.1.0`. See the README section on cutting a release.

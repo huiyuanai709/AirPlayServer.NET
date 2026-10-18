@@ -3,6 +3,7 @@ using AirPlayServer.Core;
 using AirPlayServer.Core.Export;
 using AirPlayServer.Core.Protocol;
 using AirPlayServer.Host;
+using AirPlayServer.Host.Update;
 
 HostArgs arguments;
 try
@@ -19,6 +20,12 @@ catch (Exception ex) when (ex is ArgumentException or FormatException)
 if (arguments.Help)
 {
     Console.WriteLine(HostArgs.HelpText);
+    return 0;
+}
+
+if (arguments.ShowVersion)
+{
+    HostUpdate.PrintVersion();
     return 0;
 }
 
@@ -42,6 +49,27 @@ Console.CancelKeyPress += (_, eventArgs) =>
     eventArgs.Cancel = true;
     shutdown.Cancel();
 };
+
+HostUpdate.CleanupStaleFiles();
+
+if (arguments.UpdateMode == HostUpdateMode.Explicit)
+{
+    return await HostUpdate.RunExplicitAsync(args, shutdown.Token).ConfigureAwait(false);
+}
+
+if (arguments.UpdateMode == HostUpdateMode.Automatic && !HostUpdate.WasJustUpdated())
+{
+    var restarted = await HostUpdate.TryAutomaticAsync(args, shutdown.Token).ConfigureAwait(false);
+    if (restarted || shutdown.IsCancellationRequested)
+    {
+        if (shutdown.IsCancellationRequested)
+        {
+            Console.WriteLine("已取消。");
+        }
+
+        return 0;
+    }
+}
 
 AirPlayReceiver receiver;
 try

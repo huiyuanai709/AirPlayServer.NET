@@ -1,0 +1,28 @@
+AirPlayServer.NET Native AOT 宿主
+
+本目录是一次发布包。版本和平台写在 VERSION.txt。
+程序是 GPL-3.0-only，因为进程内编进了 FairPlay。
+对应源码是本仓库里同名的 git tag。包里没有配对种子，也没有密钥材料。
+
+先确认二进制还能跑自检：
+
+  Windows:  AirPlayServer.Host.exe --self-check
+  Linux:    chmod +x AirPlayServer.Host
+            ./AirPlayServer.Host --self-check
+
+自检通过会打印 self-check ok。--help 打印全部参数。
+
+和 TapClock 一起用（Windows，主路径）：
+
+  1. 先启动 TapClock，让它监听 ATBF（TCP 42125）。点击仍走 TapClock 自己的 TCP 42123。
+  2. 再启动本宿主，不要加 --demo-frame：
+       AirPlayServer.Host.exe --screen 480x1040 --tapclock 127.0.0.1:42125
+  3. iPhone 在同一局域网里发现接收端并开始镜像。
+
+Linux 包不创建窗口，也不包含 Media Foundation 解码。可以用 --demo-frame 检查导出。
+linux-x64 包里的 airplayserver.service 是 systemd 草稿，不含 --seed。
+把 AirPlayServer.Host 拷到 /usr/local/bin/ 后再启用。
+这个二进制在 GitHub 的 ubuntu-latest 上构建，需要兼容的 glibc。
+
+--seed 只留在内存里，不要写进单元文件或脚本后提交。
+同目录的 .pdb 或 .dbg（如果有）是符号文件，运行不需要它。

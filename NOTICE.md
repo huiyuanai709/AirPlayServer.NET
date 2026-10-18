@@ -66,6 +66,16 @@ compiled only into the Windows host. The linux-x64 publish does not link
 `mfplat` or `user32`. FFmpeg is not linked. JPEG stills for TapClock are
 encoded in-process; ImageSharp is not linked.
 
+## TapClock screen catalog
+
+`src/AirPlayServer.Core/Export/AppleScreens.cs` is adapted from
+[TapClock](https://github.com/huiyuanai709/TapClock)
+`host/src/TapClock.Core/AppleScreens.cs`. That file is MIT,
+Copyright (c) 2026 TapClock contributors. The permission notice is kept in
+the source header. The catalog maps a device slug to portrait UIKit points
+for TapClock click alignment. Those points are separate from the AirPlay
+`/info` advertised mirror size.
+
 ## Trademarks
 
 Apple, AirPlay, Bonjour, and Apple TV are trademarks of Apple Inc. Model and

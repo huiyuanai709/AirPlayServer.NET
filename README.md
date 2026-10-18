@@ -47,7 +47,8 @@ mDNS announcer                         control listeners :7001 and :5001
 | `deps/AirPlayFairPlay` | 进程内 FairPlay。`FairPlaySession` 来自 AirPlayFairPlayPlugin `8a6a9c46`。GPL-3.0-only。 |
 | `src/AirPlayServer.Core` | 协议库。`IsAotCompatible`。发现、配对、`FairPlayKeys`、镜像、JPEG/ATBF。 |
 | `src/AirPlayServer.Host` | 控制台宿主。`PublishAot`。 |
-| `tests/AirPlayServer.Core.Tests` | 握手、镜像包、解密、SETUP plist、ATBF 与目录改名。 |
+| `tests/AirPlayServer.Core.Tests` | 握手、镜像包、解密、SETUP plist、ATBF 与目录改名、机型表与 `/info` 广告尺寸。 |
+| `tests/AirPlayServer.Host.Tests` | `--model` 解析 UIKit 点，`--screen` 单独决定广告分辨率。 |
 | `packaging/` | 本地 AOT 发布脚本、systemd 草稿，以及 Release 包里的 `RUN.txt`。脚本本身不创建 GitHub Release。 |
 | `.github/workflows/ci.yml` | PR 和 push 上的 restore、build、test，以及 linux-x64 / win-x64 的 AOT 发布冒烟。 |
 | `.github/workflows/release.yml` | `v*` tag 或手动触发时构建两个 RID，并创建 GitHub Release。 |
@@ -82,7 +83,7 @@ Windows（需要 Visual Studio 的 C++ 生成工具，AOT 用它做链接）：
 ./artifacts/win-x64/AirPlayServer.Host.exe --help
 ```
 
-`--self-check` 在发布出的原生二进制里重跑 RFC 7748、RFC 8032、一次 pair-verify，以及一张 JPEG 的 ATBF 封装，用来确认 AOT 之后这些路径还在。`--seed` 是 32 字节十六进制，只留在内存里，仓库和单元文件都不写种子。宿主默认 `--screen 480x1040`，并打开窗口标志；在 Linux 上窗口不会创建。
+`--self-check` 在发布出的原生二进制里重跑 RFC 7748、RFC 8032、一次 pair-verify，以及一张 JPEG 的 ATBF 封装，用来确认 AOT 之后这些路径还在。`--seed` 是 32 字节十六进制，只留在内存里，仓库和单元文件都不写种子。宿主默认 `--screen 480x1040`（这是 `/info` 里的广告分辨率），并打开窗口标志；在 Linux 上窗口不会创建。`--model` 另选 TapClock 点击对齐的 UIKit 逻辑点，不改这个广告尺寸。`--list-models` 打印 slug。
 
 ## 切一个 GitHub Release
 
@@ -164,9 +165,20 @@ int AirPlay_FairPlaySetup(const uint8_t* request, int requestLength,
 
 Windows 上 Media Foundation 把 Annex-B 访问单元变成 BGRA，写入 `FrameSlot`（只保留最新一帧）。同步硬件变换如果还能锁定 NV12 或 RGB32 缓冲就优先用它；输出是 DXGI 表面、或者只有异步硬件变换时，退回系统自带的软件解码器。其它操作系统默认不解码。没有画面时，访问单元仍然计数，但不会冒充成手机屏幕。Linux 上继续可以用 `--demo-frame` 检查窗口标志和 TapClock。
 
-Windows 宿主默认打开 GDI 窗口，把最新一帧拉伸进去。`--no-window` 关掉它。窗口里的鼠标点击不会发给手机。
+Windows 宿主默认打开 GDI 窗口，把最新一帧拉伸进去。`--no-window` 关掉它。鼠标悬停时，标题和左上角显示该点在解码帧里的绝对像素：窗口把画面拉伸到客户区，坐标按这个拉伸换算并限制在帧内。这些像素是帧坐标。它们和 `--model` 的 UIKit 逻辑点、`--screen` 的广告分辨率是三套尺寸。窗口里的鼠标点击不会发给手机。
 
-TapClock 的点击留在它自己的主机 TCP `42123`（ATB/1）。坐标是板上的 HID 计数（AssistiveTouch），不是这台电脑窗口里的像素。`--screen` 是向手机宣告的逻辑分辨率（`/info` 里的宽高）。和 TapClock 一起用时，镜像宣告常用 `480x1040`，宿主默认就是这个尺寸，用来对齐那次校准。库的默认值仍是 1920×1080，避免把协议测试绑死在这块板上。
+TapClock 的点击留在它自己的主机 TCP `42123`（ATB/1）。坐标是板上的 HID 计数（AssistiveTouch），不是这台电脑窗口里的像素。点击对齐和镜像广告是两套尺寸，写在不同的参数上：
+
+| 参数 | 写入哪里 | 单位 | 宿主默认 |
+| --- | --- | --- | --- |
+| `--screen WxH` | AirPlay `GET`/`POST /info` 的 `width`、`height`、`widthPixels`、`heightPixels`。手机按这个尺寸送镜像。 | 广告分辨率 | `480x1040` |
+| `--model <slug>` | TapClock 点击对齐。slug 来自和 TapClock `AppleScreens` 相同的表，解析成竖屏 UIKit 逻辑点。例如 `iphone-15-pro` → 393×852。 | point | 不设置 |
+
+显式 `--screen` 决定广告。`--model` 只填逻辑点，不会把 393×852 写进 `/info`。库里 `AirPlayReceiverOptions` 的显示默认值仍是 1920×1080，协议测试不绑在宿主的 `480x1040` 上。
+
+`--list-models` 打印全部 slug 和竖屏逻辑点。表内是标准显示的默认值，不是物理像素，也不是 @2x / @3x。USB HID 读不到手机型号，本进程不会自动探测。Display Zoom、横屏、台前调度和分屏会让有效逻辑点偏离表内默认值。折叠屏不在表里。
+
+和 TapClock 一起用时，镜像广告仍常用 `480x1040`（这是能工作的广告值）。点击对齐另选机型。
 
 帧导出默认关闭。合同以 [TapClock airplay.md](https://github.com/huiyuanai709/TapClock/blob/main/docs/airplay.md) 为准。`--tapclock` 订阅的是直播的 `FrameSlot`：FairPlay 解开并解码出的画面会推过去，不依赖 `--demo-frame`。`--demo-frame` 只是一张合成图。
 
@@ -176,8 +188,10 @@ Windows 上的顺序：
 2. 再启动宿主。FairPlay 默认开着，不要加 `--demo-frame`：
 
 ```powershell
-./artifacts/win-x64/AirPlayServer.Host.exe --screen 480x1040 --tapclock 127.0.0.1:42125
+./artifacts/win-x64/AirPlayServer.Host.exe --screen 480x1040 --model iphone-15-pro --tapclock 127.0.0.1:42125
 ```
+
+上面这条里，`/info` 仍宣告 `480x1040`。`iphone-15-pro` 的 393×852 只作为 TapClock 的 UIKit 逻辑点。省略 `--model` 时广告尺寸不变，逻辑点留空。只写 `--model iphone-15-pro`、不写 `--screen` 时，广告仍是宿主默认的 `480x1040`。
 
 3. iPhone 在同一局域网里发现接收端并镜像。
 

@@ -8,5 +8,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/AirPlayServer.Core.Tests/AirPlayServer.Core.Tests.csproj" />
+    <Project Path="tests/AirPlayServer.Host.Tests/AirPlayServer.Host.Tests.csproj" />
   </Folder>
 </Solution>

@@ -16,8 +16,12 @@ AirPlayServer.NET Native AOT 宿主
 
   1. 先启动 TapClock，让它监听 ATBF（TCP 42125）。点击仍走 TapClock 自己的 TCP 42123。
   2. 再启动本宿主，不要加 --demo-frame：
-       AirPlayServer.Host.exe --screen 480x1040 --tapclock 127.0.0.1:42125
+       AirPlayServer.Host.exe --screen 480x1040 --model iphone-15-pro --tapclock 127.0.0.1:42125
   3. iPhone 在同一局域网里发现接收端并开始镜像。
+
+--screen 是 /info 里的广告分辨率，宿主默认 480x1040。
+--model 是 TapClock 点击对齐的竖屏 UIKit 逻辑点（iphone-15-pro 为 393x852），不改广告。
+--list-models 打印全部 slug。两个参数可以只写其中一个。
 
 Linux 包不创建窗口，也不包含 Media Foundation 解码。可以用 --demo-frame 检查导出。
 linux-x64 包里的 airplayserver.service 是 systemd 草稿，不含 --seed。

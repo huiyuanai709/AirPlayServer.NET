@@ -22,6 +22,6 @@ To stage a zip locally after a publish, without creating a release:
 ./packaging/stage-release.sh linux-x64 v0.1.0 artifacts/linux-x64 /tmp/AirPlayServer.Host-v0.1.0-linux-x64.zip
 ```
 
-`stage-release-test.sh` checks that fixture zip without a Native AOT publish. It keeps the binary and runtime libraries, and it fails if a `.pdb` or `.dbg` is packed.
+`stage-release-test.sh` checks that fixture zip without a Native AOT publish. It keeps the binary and runtime libraries, fails if a `.pdb` or `.dbg` is packed, and requires the linux-x64 binary to be mode `0755` in the zip. The win-x64 binary is not required to be executable.
 
 `resolve-release-version.sh` is what the workflow uses to turn a tag or a dispatch input into `vMAJOR.MINOR.PATCH`. A dispatch input of `0.1.0` becomes tag `v0.1.0`. See the README section on cutting a release.

@@ -149,8 +149,11 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     print(archive.getinfo(name).external_attr >> 16)
 PY
 )"
-if [ $((win_mode & 0111)) -ne 0 ]; then
-  fail "win-x64 binary must not be marked executable (mode ${win_mode})"
+# Staging win-x64 already succeeded, so a missing Unix execute bit is allowed.
+# Do not treat host-provided bits as a failure: Windows CPython reports .exe as
+# 0777. The linux 0755 override must not be applied here.
+if [ $((win_mode & 0777)) -eq $((0755)) ]; then
+  fail "win-x64 binary was forced to 0755 (mode ${win_mode}); execute bits are not required"
 fi
 
 if "$stage" linux-x64 v0.0.0-test "$tmp/empty-publish" "$tmp/missing.zip" >/dev/null 2>"$tmp/missing.err"; then

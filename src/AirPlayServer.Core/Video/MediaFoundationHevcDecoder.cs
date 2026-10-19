@@ -59,6 +59,7 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
     private static int _comReady;
 
     private readonly IAirPlayLog _log;
+    private readonly BgraBufferPool _buffers;
     private readonly object _gate = new();
     private byte[]? _vps;
     private byte[]? _sps;
@@ -82,11 +83,13 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
     private int _pictures;
     private int _consecutiveMisses;
     private byte[]? _lastKeyframe;
+    private byte[]? _contiguous;
     private const int MaxKeyframeBytes = 4 * 1024 * 1024;
 
-    public MediaFoundationHevcDecoder(IAirPlayLog? log)
+    public MediaFoundationHevcDecoder(IAirPlayLog? log, BgraBufferPool? buffers = null)
     {
         _log = log ?? NullAirPlayLog.Instance;
+        _buffers = buffers ?? new BgraBufferPool();
     }
 
     public bool IsAvailable
@@ -525,7 +528,12 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
                         return PullResult.Unsupported;
                     }
 
-                    var copy = new byte[bytes];
+                    if (_contiguous is null || _contiguous.Length < (int)bytes)
+                    {
+                        _contiguous = new byte[bytes];
+                    }
+
+                    var copy = _contiguous;
                     fixed (byte* destination = copy)
                     {
                         if (Slots.ContiguousCopyTo(twoD, destination, bytes) < 0)
@@ -562,61 +570,31 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
 
         var visibleWidth = _visibleWidth > 0 && _visibleWidth <= codedWidth ? _visibleWidth : codedWidth;
         var visibleHeight = _visibleHeight > 0 && _visibleHeight <= codedHeight ? _visibleHeight : codedHeight;
-        var tight = new byte[visibleWidth * visibleHeight * 4];
+        var byteCount = visibleWidth * visibleHeight * 4;
+        var tight = _buffers.Rent(byteCount);
+        var wrote = false;
         if (_rgb32)
         {
             var stride = _stride == 0 ? codedWidth * 4 : _stride;
-            if (!CopyRgb32(pixels, codedWidth, codedHeight, stride, _bottomUp, visibleWidth, visibleHeight, tight))
-            {
-                return false;
-            }
+            wrote = BgraRows.TryCopyRgb32(pixels, codedWidth, codedHeight, stride, _bottomUp, visibleWidth, visibleHeight, tight.AsSpan(0, byteCount));
         }
         else
         {
             var stride = _stride == 0 ? InferNv12Stride(pixels.Length, codedWidth, codedHeight) : _stride;
-            if (!CopyNv12Bt709(pixels, codedWidth, codedHeight, stride, visibleWidth, visibleHeight, tight))
-            {
-                return false;
-            }
+            wrote = CopyNv12Bt709(pixels, codedWidth, codedHeight, stride, visibleWidth, visibleHeight, tight.AsSpan(0, byteCount));
         }
 
-        frame = new DecodedFrame(visibleWidth, visibleHeight, tight, visibleWidth * 4);
-        return true;
-    }
-
-    private static bool CopyRgb32(ReadOnlySpan<byte> source, int codedWidth, int codedHeight, int stride, bool bottomUp, int width, int height, byte[] destination)
-    {
-        if (stride < codedWidth * 4)
+        if (!wrote)
         {
+            _buffers.Return(tight);
             return false;
         }
 
-        var needed = stride * codedHeight;
-        if (source.Length < needed)
-        {
-            return false;
-        }
-
-        for (var y = 0; y < height; y++)
-        {
-            var sourceRow = bottomUp ? codedHeight - 1 - y : y;
-            var from = sourceRow * stride;
-            var to = y * width * 4;
-            for (var x = 0; x < width; x++)
-            {
-                destination[to] = source[from];
-                destination[to + 1] = source[from + 1];
-                destination[to + 2] = source[from + 2];
-                destination[to + 3] = 255;
-                from += 4;
-                to += 4;
-            }
-        }
-
+        frame = DecodedFrame.Own(visibleWidth, visibleHeight, tight, visibleWidth * 4);
         return true;
     }
 
-    private static bool CopyNv12Bt709(ReadOnlySpan<byte> source, int codedWidth, int codedHeight, int stride, int width, int height, byte[] destination)
+    private static bool CopyNv12Bt709(ReadOnlySpan<byte> source, int codedWidth, int codedHeight, int stride, int width, int height, Span<byte> destination)
     {
         if (stride < codedWidth || (codedHeight & 1) != 0 || (codedWidth & 1) != 0)
         {
@@ -625,7 +603,7 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
 
         var chroma = stride * codedHeight;
         var needed = chroma + stride * (codedHeight / 2);
-        if (source.Length < needed)
+        if (source.Length < needed || destination.Length < (long)width * height * 4)
         {
             return false;
         }

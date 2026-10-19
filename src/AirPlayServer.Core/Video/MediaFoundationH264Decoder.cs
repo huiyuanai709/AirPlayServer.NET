@@ -64,6 +64,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
     private static int _comReady;
 
     private readonly IAirPlayLog _log;
+    private readonly BgraBufferPool _buffers;
     private readonly object _gate = new();
     private byte[]? _sps;
     private byte[]? _pps;
@@ -88,11 +89,13 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
     private int _pictures;
     private int _consecutiveMisses;
     private byte[]? _lastKeyframe;
+    private byte[]? _contiguous;
     private const int MaxKeyframeBytes = 4 * 1024 * 1024;
 
-    public MediaFoundationH264Decoder(IAirPlayLog? log)
+    public MediaFoundationH264Decoder(IAirPlayLog? log, BgraBufferPool? buffers = null)
     {
         _log = log ?? NullAirPlayLog.Instance;
+        _buffers = buffers ?? new BgraBufferPool();
     }
 
     public bool IsAvailable
@@ -540,7 +543,12 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
                         return PullResult.Unsupported;
                     }
 
-                    var copy = new byte[bytes];
+                    if (_contiguous is null || _contiguous.Length < (int)bytes)
+                    {
+                        _contiguous = new byte[bytes];
+                    }
+
+                    var copy = _contiguous;
                     fixed (byte* destination = copy)
                     {
                         if (Slots.ContiguousCopyTo(twoD, destination, bytes) < 0)
@@ -581,57 +589,27 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
         var visibleHeight = _visibleHeight > 0 && codedHeight >= _visibleHeight && codedHeight - _visibleHeight <= 16
             ? _visibleHeight
             : codedHeight;
-        var tight = new byte[visibleWidth * visibleHeight * 4];
+        var byteCount = visibleWidth * visibleHeight * 4;
+        var tight = _buffers.Rent(byteCount);
+        var wrote = false;
         if (_rgb32)
         {
             var stride = _stride == 0 ? codedWidth * 4 : _stride;
-            if (!CopyRgb32(pixels, codedWidth, codedHeight, stride, _bottomUp, visibleWidth, visibleHeight, tight))
-            {
-                return false;
-            }
+            wrote = BgraRows.TryCopyRgb32(pixels, codedWidth, codedHeight, stride, _bottomUp, visibleWidth, visibleHeight, tight.AsSpan(0, byteCount));
         }
         else
         {
             var stride = _stride == 0 ? InferNv12Stride(pixels.Length, codedWidth, codedHeight) : _stride;
-            if (!Nv12Color.TryCopy(pixels, codedWidth, codedHeight, stride, visibleWidth, visibleHeight, _color, tight))
-            {
-                return false;
-            }
+            wrote = Nv12Color.TryCopy(pixels, codedWidth, codedHeight, stride, visibleWidth, visibleHeight, _color, tight.AsSpan(0, byteCount));
         }
 
-        frame = new DecodedFrame(visibleWidth, visibleHeight, tight, visibleWidth * 4);
-        return true;
-    }
-
-    private static bool CopyRgb32(ReadOnlySpan<byte> source, int codedWidth, int codedHeight, int stride, bool bottomUp, int width, int height, byte[] destination)
-    {
-        if (stride < codedWidth * 4)
+        if (!wrote)
         {
+            _buffers.Return(tight);
             return false;
         }
 
-        var needed = stride * codedHeight;
-        if (source.Length < needed)
-        {
-            return false;
-        }
-
-        for (var y = 0; y < height; y++)
-        {
-            var sourceRow = bottomUp ? codedHeight - 1 - y : y;
-            var from = sourceRow * stride;
-            var to = y * width * 4;
-            for (var x = 0; x < width; x++)
-            {
-                destination[to] = source[from];
-                destination[to + 1] = source[from + 1];
-                destination[to + 2] = source[from + 2];
-                destination[to + 3] = 255;
-                from += 4;
-                to += 4;
-            }
-        }
-
+        frame = DecodedFrame.Own(visibleWidth, visibleHeight, tight, visibleWidth * 4);
         return true;
     }
 

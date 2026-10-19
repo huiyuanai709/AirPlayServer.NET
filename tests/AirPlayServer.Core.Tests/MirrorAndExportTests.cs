@@ -88,7 +88,95 @@ public sealed class MirrorAndExportTests
         Assert.Equal(1, height);
         Assert.Equal(second, generation);
         Assert.True(second > first);
-        Assert.Equal(new byte[] { 1, 2, 3, 4 }, pixels);
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, pixels.AsSpan(0, 4).ToArray());
+    }
+
+    [Fact]
+    public void Frame_slot_reuses_buffers_for_a_stable_picture_size()
+    {
+        var slot = new FrameSlot();
+        var frame = new byte[32 * 24 * 4];
+        frame[0] = 4;
+        frame[^1] = 9;
+        slot.Publish(32, 24, frame, frame.Length / 24);
+        Assert.Equal(1, slot.BufferAllocations);
+
+        slot.Publish(32, 24, frame, frame.Length / 24);
+        Assert.Equal(2, slot.BufferAllocations);
+        var stable = slot.BufferAllocations;
+        for (var i = 0; i < 8; i++)
+        {
+            frame[0] = (byte)i;
+            slot.Publish(32, 24, frame, frame.Length / 24);
+        }
+
+        Assert.Equal(stable, slot.BufferAllocations);
+        Assert.True(slot.TryRead(out var width, out var height, out var stride, out var pixels, out var generation));
+        Assert.Equal(32, width);
+        Assert.Equal(24, height);
+        Assert.Equal(128, stride);
+        Assert.Equal(7, pixels[0]);
+        Assert.Equal(9, pixels[(stride * height) - 1]);
+        Assert.Equal(10, generation);
+
+        var grown = new byte[40 * 30 * 4];
+        grown[0] = 3;
+        slot.Publish(40, 30, grown, 40 * 4);
+        var afterGrow = slot.BufferAllocations;
+        Assert.True(afterGrow > stable);
+        slot.Publish(32, 24, frame, frame.Length / 24);
+        slot.Publish(32, 24, frame, frame.Length / 24);
+        Assert.Equal(afterGrow, slot.BufferAllocations);
+    }
+
+    [Fact]
+    public void Owned_publish_keeps_a_leased_frame_stable_and_recycles_the_buffer()
+    {
+        var slot = new FrameSlot();
+        var first = slot.Buffers.Rent(16);
+        first[0] = 1;
+        first[1] = 2;
+        first[2] = 3;
+        first[3] = 4;
+        Assert.Equal(1, slot.BufferAllocations);
+        slot.PublishOwned(2, 2, first, 8);
+
+        Assert.True(slot.TryLease(out var width, out var height, out var stride, out var held, out _, out var lease));
+        Assert.Equal(2, width);
+        Assert.Equal(2, height);
+        Assert.Equal(8, stride);
+        var second = slot.Buffers.Rent(16);
+        second[0] = 9;
+        slot.PublishOwned(2, 2, second, 8);
+        Assert.Equal(2, slot.BufferAllocations);
+        Assert.Equal(1, held[0]);
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, held.AsSpan(0, 4).ToArray());
+        lease.Dispose();
+
+        var third = slot.Buffers.Rent(16);
+        Assert.Equal(2, slot.BufferAllocations);
+        third[0] = 8;
+        slot.PublishOwned(2, 2, third, 8);
+        Assert.Equal(2, slot.BufferAllocations);
+        Assert.True(slot.TryRead(out _, out _, out _, out var latest, out _));
+        Assert.Equal(8, latest[0]);
+    }
+
+    [Fact]
+    public void Padded_rows_are_packed_once_into_the_slot()
+    {
+        var slot = new FrameSlot();
+        var source = new byte[12 * 2];
+        source[0] = 9;
+        source[4] = 6;
+        source[12] = 5;
+        slot.Publish(2, 2, source, 12);
+        Assert.True(slot.TryRead(out _, out _, out var stride, out var pixels, out _));
+        Assert.Equal(8, stride);
+        Assert.Equal(9, pixels[0]);
+        Assert.Equal(6, pixels[4]);
+        Assert.Equal(5, pixels[8]);
+        Assert.Equal(0, pixels[12]);
     }
 
     [Fact]

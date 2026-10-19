@@ -45,6 +45,7 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
 {
     private readonly FFmpegLibrary _library;
     private readonly IAirPlayLog _log;
+    private readonly BgraBufferPool _buffers;
     private readonly object _gate = new();
     private readonly nint _frame;
     private nint _context;
@@ -54,12 +55,13 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
     private int _loggedFormat;
     private int _loggedSend;
 
-    private FFmpegDecodeSession(FFmpegLibrary library, nint context, nint frame, IAirPlayLog? log, string name)
+    private FFmpegDecodeSession(FFmpegLibrary library, nint context, nint frame, IAirPlayLog? log, string name, BgraBufferPool buffers)
     {
         _library = library;
         _context = context;
         _frame = frame;
         _log = log ?? NullAirPlayLog.Instance;
+        _buffers = buffers;
         Name = name;
     }
 
@@ -67,7 +69,7 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
 
     internal string Name { get; }
 
-    internal static bool TryOpen(FFmpegLibrary library, int codecId, string name, IAirPlayLog? log, out FFmpegDecodeSession? session)
+    internal static bool TryOpen(FFmpegLibrary library, int codecId, string name, IAirPlayLog? log, BgraBufferPool? buffers, out FFmpegDecodeSession? session)
     {
         session = null;
         var codec = library.FindDecoder(codecId);
@@ -118,7 +120,7 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
             return false;
         }
 
-        session = new FFmpegDecodeSession(library, context, frame, log, name);
+        session = new FFmpegDecodeSession(library, context, frame, log, name, buffers ?? new BgraBufferPool());
         return true;
     }
 
@@ -156,13 +158,20 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
 
         lock (_gate)
         {
-            if (_context == 0 || !Send(annexB, out var drained))
+            if (_context == 0)
             {
+                return false;
+            }
+
+            if (!Send(annexB, out var drained))
+            {
+                ReturnFrame(drained);
                 return false;
             }
 
             if (Receive(out frame))
             {
+                ReturnFrame(drained);
                 return true;
             }
 
@@ -276,6 +285,7 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
             _library.ApplyCropping(_frame);
             if (TryConvert(_frame, out var decoded))
             {
+                ReturnFrame(frame);
                 frame = decoded;
                 produced = true;
             }
@@ -318,21 +328,24 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
             _log.Log(AirPlayLogLevel.Information, Name + " YUV to BGRA is " + color.Describe() + ".");
         }
 
-        var pixels = new byte[width * height * 4];
+        var byteCount = width * height * 4;
+        var pixels = _buffers.Rent(byteCount);
+        var destination = pixels.AsSpan(0, byteCount);
         var copied = format switch
         {
             FFmpegLibrary.PixelYuv420P or FFmpegLibrary.PixelYuvJ420P => YuvPlanarColor.TryCopyPlanes(
-                y, yStride, u, uStride, v, vStride, width, height, color, 1, 0, false, false, pixels),
+                y, yStride, u, uStride, v, vStride, width, height, color, 1, 0, false, false, destination),
             FFmpegLibrary.PixelYuv420P10Le => YuvPlanarColor.TryCopyPlanes(
-                y, yStride, u, uStride, v, vStride, width, height, color, 2, 2, false, false, pixels),
+                y, yStride, u, uStride, v, vStride, width, height, color, 2, 2, false, false, destination),
             FFmpegLibrary.PixelNv12 => YuvPlanarColor.TryCopyPlanes(
-                y, yStride, u, uStride, 0, 0, width, height, color, 1, 0, true, false, pixels),
+                y, yStride, u, uStride, 0, 0, width, height, color, 1, 0, true, false, destination),
             FFmpegLibrary.PixelNv21 => YuvPlanarColor.TryCopyPlanes(
-                y, yStride, u, uStride, 0, 0, width, height, color, 1, 0, true, true, pixels),
+                y, yStride, u, uStride, 0, 0, width, height, color, 1, 0, true, true, destination),
             _ => false,
         };
         if (!copied)
         {
+            _buffers.Return(pixels);
             if (Interlocked.Exchange(ref _loggedFormat, 1) == 0)
             {
                 _log.Log(
@@ -344,8 +357,16 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
             return false;
         }
 
-        frame = new DecodedFrame(width, height, pixels, width * 4);
+        frame = DecodedFrame.Own(width, height, pixels, width * 4);
         return true;
+    }
+
+    private void ReturnFrame(DecodedFrame frame)
+    {
+        if (frame.Owned is { } owned)
+        {
+            _buffers.Return(owned);
+        }
     }
 }
 
@@ -382,9 +403,12 @@ internal sealed class FFmpegH264Decoder : IH264Decoder, IDisposable
     public void Dispose() => _session.Dispose();
 
     internal static bool TryCreate(FFmpegLibrary library, IAirPlayLog? log, out FFmpegH264Decoder? decoder)
+        => TryCreate(library, log, null, out decoder);
+
+    internal static bool TryCreate(FFmpegLibrary library, IAirPlayLog? log, BgraBufferPool? buffers, out FFmpegH264Decoder? decoder)
     {
         decoder = null;
-        if (!FFmpegDecodeSession.TryOpen(library, FFmpegLibrary.CodecH264, "ffmpeg-h264", log, out var session) || session is null)
+        if (!FFmpegDecodeSession.TryOpen(library, FFmpegLibrary.CodecH264, "ffmpeg-h264", log, buffers, out var session) || session is null)
         {
             return false;
         }
@@ -427,9 +451,12 @@ internal sealed class FFmpegHevcDecoder : IHevcDecoder, IDisposable
     public void Dispose() => _session.Dispose();
 
     internal static bool TryCreate(FFmpegLibrary library, IAirPlayLog? log, out FFmpegHevcDecoder? decoder)
+        => TryCreate(library, log, null, out decoder);
+
+    internal static bool TryCreate(FFmpegLibrary library, IAirPlayLog? log, BgraBufferPool? buffers, out FFmpegHevcDecoder? decoder)
     {
         decoder = null;
-        if (!FFmpegDecodeSession.TryOpen(library, FFmpegLibrary.CodecHevc, "ffmpeg-hevc", log, out var session) || session is null)
+        if (!FFmpegDecodeSession.TryOpen(library, FFmpegLibrary.CodecHevc, "ffmpeg-hevc", log, buffers, out var session) || session is null)
         {
             return false;
         }

@@ -11,6 +11,10 @@
     <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Description>Native AOT host for the AirPlayServer.NET receiver.</Description>
+    <!-- Embedded into the Windows PE (Explorer, taskbar, Alt-Tab).
+         Native AOT win-x64 publish picks this up via ApplicationIcon.
+         linux-x64 output is ELF and does not show an exe icon. -->
+    <ApplicationIcon>Assets/AirPlayServer.ico</ApplicationIcon>
   </PropertyGroup>
 
   <!-- Release publish is the shipping binary. DebugType=none keeps the

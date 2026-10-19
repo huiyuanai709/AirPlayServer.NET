@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="Phone mirroring onto a desktop screen">
+  <title>AirPlayServer</title>
+  <!--
+    Original mark for AirPlayServer.Host: a handset beside a desktop display.
+    Edges sit on a 16px grid so the 16, 32, and 48 sizes stay readable.
+    Not an Apple logo, AirPlay glyph, or other trademark.
+  -->
+  <rect width="256" height="256" rx="48" fill="#123F49"/>
+  <rect x="32" y="32" width="80" height="176" rx="16" fill="#F4F7F6"/>
+  <rect x="48" y="48" width="48" height="112" rx="8" fill="#1C8C96"/>
+  <rect x="64" y="176" width="16" height="16" fill="#123F49"/>
+  <rect x="128" y="64" width="96" height="80" rx="12" fill="#F4F7F6"/>
+  <rect x="144" y="80" width="64" height="48" rx="6" fill="#7EE0D6"/>
+  <rect x="160" y="144" width="32" height="16" fill="#F4F7F6"/>
+  <rect x="144" y="160" width="64" height="16" rx="8" fill="#F4F7F6"/>
+</svg>

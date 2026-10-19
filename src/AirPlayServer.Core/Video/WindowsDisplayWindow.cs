@@ -28,6 +28,9 @@ internal static partial class WindowsDisplayWindow
     private const uint WsVisible = 0x10000000;
     private const int ChipLeft = 8;
     private const int ChipTop = 8;
+    // ~60 Hz. SetTimer resolution is coarse (often ~15.6 ms on older stacks),
+    // so 1000/60 truncates to 16 ms. Presentation stays latest-frame only.
+    private const uint DisplayRefreshMilliseconds = 1000 / 60;
 
     public static IAsyncDisposable Start(
         FrameSlot frames,
@@ -190,7 +193,7 @@ internal static partial class WindowsDisplayWindow
             switch (message)
             {
                 case WmCreate:
-                    SetTimer(hwnd, 1, 33, 0);
+                    SetTimer(hwnd, 1, DisplayRefreshMilliseconds, 0);
                     return 0;
                 case WmTimer:
                 case WmPaint:
@@ -254,8 +257,8 @@ internal static partial class WindowsDisplayWindow
                     return;
                 }
 
-                // Compose off-screen. A full-client FillRect on this window DC at
-                // the 33 ms timer rate flashes black before StretchDIBits lands.
+                // Compose off-screen. A full-client FillRect on this window DC on
+                // each timer tick flashes black before StretchDIBits lands.
                 var compose = TryCreateBackBuffer(dc, clientWidth, clientHeight) ? _backDc : dc;
                 PaintLetterboxBars(compose, clientWidth, clientHeight, destination);
 

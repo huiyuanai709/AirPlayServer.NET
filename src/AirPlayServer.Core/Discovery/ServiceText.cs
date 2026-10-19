@@ -6,7 +6,7 @@ internal static class ServiceText
     [
         "srcvers=" + AirPlayCompatibility.SourceVersion,
         "deviceid=" + advertisement.DeviceId,
-        "features=" + AirPlayCompatibility.FeaturesText,
+        "features=" + advertisement.FeaturesText,
         "model=" + AirPlayCompatibility.Model,
         "flags=0x4",
         "pw=false",
@@ -32,7 +32,7 @@ internal static class ServiceText
         "sm=false",
         "ek=1",
         "sf=0x4",
-        "ft=" + AirPlayCompatibility.FeaturesText,
+        "ft=" + advertisement.FeaturesText,
         "am=" + AirPlayCompatibility.Model,
     ];
 }

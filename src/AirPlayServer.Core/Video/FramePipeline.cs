@@ -165,6 +165,49 @@ public sealed class UnavailableH264Decoder : IH264Decoder
 }
 
 /// <summary>
+/// HEVC access-unit decoder. The mirror pipeline converts AVCC length prefixes to
+/// Annex-B and may prefix VPS, SPS, and PPS onto the next key frame. Windows uses
+/// Media Foundation. Other platforms keep <see cref="UnavailableHevcDecoder"/>.
+/// </summary>
+public interface IHevcDecoder
+{
+    bool IsAvailable { get; }
+
+    string Name { get; }
+
+    void Configure(ReadOnlySpan<byte> videoParameterSet, ReadOnlySpan<byte> sequenceParameterSet, ReadOnlySpan<byte> pictureParameterSet);
+
+    void Reset();
+
+    bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame);
+}
+
+/// <summary>
+/// Fail-closed HEVC decoder. Used off Windows and when the HEVC Media Foundation
+/// transform is not installed. H.264 mirroring is unaffected.
+/// </summary>
+public sealed class UnavailableHevcDecoder : IHevcDecoder
+{
+    public bool IsAvailable => false;
+
+    public string Name => "unavailable";
+
+    public void Configure(ReadOnlySpan<byte> videoParameterSet, ReadOnlySpan<byte> sequenceParameterSet, ReadOnlySpan<byte> pictureParameterSet)
+    {
+    }
+
+    public void Reset()
+    {
+    }
+
+    public bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
+    {
+        frame = default;
+        return false;
+    }
+}
+
+/// <summary>
 /// Synthetic BGRA picture so the window and TapClock export can be exercised
 /// without a paired phone. It is not a mirrored screen.
 /// </summary>

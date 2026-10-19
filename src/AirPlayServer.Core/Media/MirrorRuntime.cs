@@ -23,6 +23,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private readonly Socket _timing;
     private readonly FrameSlot _frames;
     private readonly IH264Decoder _decoder;
+    private readonly IHevcDecoder? _hevc;
+    private readonly bool _acceptHevc;
     private readonly IMediaKeyUnwrapper _unwrapper;
     private readonly byte[]? _labKey;
     private readonly IAirPlayLog _log;
@@ -38,6 +40,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private int _remoteTimingPort;
     private byte[]? _sequence;
     private byte[]? _picture;
+    private byte[]? _vps;
+    private MirrorVideoCodec _codec;
     private byte[]? _wrappedEkey;
     private byte[]? _heldKeyframe;
     private ulong _streamId;
@@ -46,6 +50,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private bool _hasArmedStream;
     private int _pendingBytes;
     private int _loggedDecoder;
+    private int _loggedEmptyCodec;
+    private int _loggedHevcUnavailable;
     private int _loggedHold;
     private int _loggedOverflow;
     private int _loggedHeldKeyframe;
@@ -53,6 +59,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private int _loggedBadAvcc;
     private int _consecutiveBadAvcc;
     private bool _prependParameterSets;
+    private bool _hevcRejected;
     private bool _senderPaused;
     private bool _discardHeld;
     private CancellationTokenSource _clientStop = new();
@@ -74,12 +81,16 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         IH264Decoder decoder,
         IMediaKeyUnwrapper unwrapper,
         byte[]? labKey,
-        IAirPlayLog log)
+        IAirPlayLog log,
+        bool acceptHevc,
+        IHevcDecoder? hevcDecoder)
     {
         _data = data;
         _timing = timing;
         _frames = frames;
         _decoder = decoder;
+        _hevc = hevcDecoder;
+        _acceptHevc = acceptHevc;
         _unwrapper = unwrapper;
         _labKey = labKey;
         _log = log;
@@ -103,7 +114,9 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         IH264Decoder decoder,
         IMediaKeyUnwrapper? unwrapper,
         ReadOnlySpan<byte> labKey,
-        IAirPlayLog log)
+        IAirPlayLog log,
+        bool acceptHevc = false,
+        IHevcDecoder? hevcDecoder = null)
     {
         Socket? data = null;
         Socket? timing = null;
@@ -119,7 +132,9 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 decoder,
                 unwrapper ?? new UnavailableMediaKeyUnwrapper(),
                 labKey.Length == 0 ? null : labKey.ToArray(),
-                log);
+                log,
+                acceptHevc,
+                hevcDecoder);
         }
         catch
         {
@@ -154,6 +169,11 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         if (_decoder is IDisposable disposable)
         {
             disposable.Dispose();
+        }
+
+        if (_hevc is IDisposable hevcDisposable && !ReferenceEquals(hevcDisposable, _decoder))
+        {
+            hevcDisposable.Dispose();
         }
 
         _cancellation.Dispose();
@@ -267,7 +287,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                     _hasArmedStream = false;
                     _senderPaused = false;
                     _discardHeld = true;
-                    _prependParameterSets = _sequence is not null && _picture is not null;
+                    _prependParameterSets = ParameterSetsReadyLocked();
                     _heldKeyframe = null;
                     ClearPendingLocked();
                     ClearStreamHealthLocked();
@@ -285,12 +305,12 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                     _hasArmedStream = false;
                     _senderPaused = false;
                     _prependParameterSets = false;
-                    _sequence = null;
-                    _picture = null;
+                    _hevcRejected = false;
+                    ClearCodecLocked();
                     ClearStreamHealthLocked();
                 }
 
-                _decoder.Reset();
+                ResetDecodersLocked();
             }
 
             DropClient();
@@ -432,14 +452,14 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             _wrappedEkey = wrapped;
             ClearPendingLocked();
             _heldKeyframe = null;
-            _sequence = null;
-            _picture = null;
             _prependParameterSets = false;
+            _hevcRejected = false;
+            ClearCodecLocked();
             _senderPaused = false;
             _hasArmedStream = false;
             _streamIdKnown = false;
             ClearStreamHealthLocked();
-            _decoder.Reset();
+            ResetDecodersLocked();
             if (contentKey is null)
             {
                 _decryptor.SetMaterial([], secret, keepStoredSecret: true);
@@ -582,6 +602,11 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
             if (parsed.PayloadSize == 0)
             {
+                if (parsed.PayloadType == 1 && !_acceptHevc && Interlocked.Exchange(ref _loggedEmptyCodec, 1) == 0)
+                {
+                    _log.Log(AirPlayLogLevel.Warning, "Mirror codec packet was empty. That usually means the sender wanted a codec other than H.264 while Features bit 42 is off. Start the host with --h265 to advertise SupportsScreenMultiCodec.");
+                }
+
                 continue;
             }
 
@@ -628,7 +653,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 // so the next IDR does not blend into the frozen picture.
                 _senderPaused = false;
                 _prependParameterSets = true;
-                _decoder.Reset();
+                ResetDecodersLocked();
             }
 
             if (!_decryptor.MediaKeysReady && !TryFinishArmLocked())
@@ -663,12 +688,22 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
             _consecutiveBadAvcc = 0;
             Activity.AcceptAccessUnit();
+            if (_hevcRejected && _codec != MirrorVideoCodec.Hevc)
+            {
+                if (Interlocked.Exchange(ref _loggedHevcUnavailable, 1) == 0)
+                {
+                    _log.Log(AirPlayLogLevel.Warning, "HEVC access unit was not decoded. The sender offered HEVC and this receiver did not accept it.");
+                }
+
+                return;
+            }
+
             if (PresentAnnexLocked(accessUnit, keyFrame))
             {
                 return;
             }
 
-            if (keyFrame && (_sequence is null || _picture is null))
+            if (keyFrame && !ParameterSetsReadyLocked())
             {
                 _heldKeyframe = accessUnit.ToArray();
                 if (Interlocked.Exchange(ref _loggedHeldKeyframe, 1) == 0)
@@ -679,10 +714,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 return;
             }
 
-            if (Interlocked.Exchange(ref _loggedDecoder, 1) == 0)
-            {
-                _log.Log(AirPlayLogLevel.Information, "H.264 decoder \"" + _decoder.Name + "\" did not return a picture. Ciphertext is not shown as the phone screen. DecodedFrames=" + Activity.DecodedFrames + ".");
-            }
+            LogDecodeMissLocked();
         }
         finally
         {
@@ -697,6 +729,12 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             _log.Log(AirPlayLogLevel.Information, "Mirror geometry " + header.Width + "x" + header.Height + " source " + header.SourceWidth + "x" + header.SourceHeight);
         }
 
+        if (CodecConfig.LooksLikeHevc(payload))
+        {
+            HandleHevcCodec(payload, header);
+            return;
+        }
+
         if (!CodecConfig.TryParse(payload, out var sequence, out var picture))
         {
             Activity.Reject();
@@ -706,16 +744,16 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
         lock (_media)
         {
-            var resume = header.SenderResumed || (_senderPaused && !header.SenderPaused);
-            if (header.SenderPaused)
+            var resume = NoteSenderPauseLocked(header);
+            if (_codec == MirrorVideoCodec.Hevc)
             {
-                _senderPaused = true;
-            }
-            else if (header.SenderResumed)
-            {
-                _senderPaused = false;
+                _log.Log(AirPlayLogLevel.Information, "Mirror codec switched from HEVC to H.264.");
+                _hevc?.Reset();
             }
 
+            _hevcRejected = false;
+            _codec = MirrorVideoCodec.H264;
+            _vps = null;
             var changed = _sequence is null
                 || _picture is null
                 || !_sequence.AsSpan().SequenceEqual(sequence)
@@ -737,20 +775,144 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 _decoder.Reset();
             }
 
-            if (_heldKeyframe is not null)
-            {
-                var held = _heldKeyframe;
-                _heldKeyframe = null;
-                if (!PresentAnnexLocked(held, keyFrame: true) && Interlocked.Exchange(ref _loggedDecoder, 1) == 0)
-                {
-                    _log.Log(AirPlayLogLevel.Information, "H.264 decoder \"" + _decoder.Name + "\" did not return a picture. Ciphertext is not shown as the phone screen. DecodedFrames=" + Activity.DecodedFrames + ".");
-                }
-            }
+            PresentHeldKeyframeLocked();
         }
+    }
+
+    private void HandleHevcCodec(ReadOnlySpan<byte> payload, MirrorHeader header)
+    {
+        if (!_acceptHevc)
+        {
+            Activity.Reject();
+            lock (_media)
+            {
+                _hevcRejected = true;
+                _heldKeyframe = null;
+            }
+
+            _log.Log(AirPlayLogLevel.Warning, "Mirror sender offered HEVC (hvc1) but HEVC is off. Start the host with --h265 to advertise Features bit 42 (SupportsScreenMultiCodec).");
+            return;
+        }
+
+        if (_hevc is null || !_hevc.IsAvailable)
+        {
+            Activity.Reject();
+            lock (_media)
+            {
+                _hevcRejected = true;
+                _heldKeyframe = null;
+            }
+
+            _log.Log(AirPlayLogLevel.Warning, "HEVC was requested (--h265) but no HEVC decoder is available on this machine. Media Foundation HEVC (CLSID_CMSH265DecoderMFT) is a Windows component; this platform will not decode HEVC frames.");
+            return;
+        }
+
+        if (!CodecConfig.TryParseHevc(payload, out var video, out var sequence, out var picture))
+        {
+            Activity.Reject();
+            lock (_media)
+            {
+                _heldKeyframe = null;
+            }
+
+            _log.Log(AirPlayLogLevel.Warning, "Mirror HEVC codec payload was rejected.");
+            return;
+        }
+
+        lock (_media)
+        {
+            var resume = NoteSenderPauseLocked(header);
+            if (_codec == MirrorVideoCodec.H264)
+            {
+                _log.Log(AirPlayLogLevel.Information, "Mirror codec switched from H.264 to HEVC.");
+                _decoder.Reset();
+            }
+
+            _hevcRejected = false;
+            _codec = MirrorVideoCodec.Hevc;
+            var changed = _vps is null
+                || _sequence is null
+                || _picture is null
+                || !_vps.AsSpan().SequenceEqual(video)
+                || !_sequence.AsSpan().SequenceEqual(sequence)
+                || !_picture.AsSpan().SequenceEqual(picture);
+            _vps = video;
+            _sequence = sequence;
+            _picture = picture;
+            _prependParameterSets = true;
+            Activity.ConfigureCodec();
+            if (changed)
+            {
+                _hevc.Configure(video, sequence, picture);
+            }
+            else if (resume)
+            {
+                _hevc.Reset();
+            }
+
+            PresentHeldKeyframeLocked();
+        }
+    }
+
+    private bool NoteSenderPauseLocked(MirrorHeader header)
+    {
+        var resume = header.SenderResumed || (_senderPaused && !header.SenderPaused);
+        if (header.SenderPaused)
+        {
+            _senderPaused = true;
+        }
+        else if (header.SenderResumed)
+        {
+            _senderPaused = false;
+        }
+
+        return resume;
+    }
+
+    private void PresentHeldKeyframeLocked()
+    {
+        if (_heldKeyframe is null)
+        {
+            return;
+        }
+
+        var held = _heldKeyframe;
+        _heldKeyframe = null;
+        if (!PresentAnnexLocked(held, keyFrame: true))
+        {
+            LogDecodeMissLocked();
+        }
+    }
+
+    private void LogDecodeMissLocked()
+    {
+        if (Interlocked.Exchange(ref _loggedDecoder, 1) != 0)
+        {
+            return;
+        }
+
+        if (_codec == MirrorVideoCodec.Hevc)
+        {
+            if (_hevc is null || !_hevc.IsAvailable)
+            {
+                _log.Log(AirPlayLogLevel.Warning, "HEVC was requested (--h265) but no HEVC decoder is available on this machine. Media Foundation HEVC (CLSID_CMSH265DecoderMFT) is a Windows component; this platform will not decode HEVC frames.");
+                return;
+            }
+
+            _log.Log(AirPlayLogLevel.Information, "HEVC decoder \"" + _hevc.Name + "\" did not return a picture. Ciphertext is not shown as the phone screen. DecodedFrames=" + Activity.DecodedFrames + ".");
+            return;
+        }
+
+        _log.Log(AirPlayLogLevel.Information, "H.264 decoder \"" + _decoder.Name + "\" did not return a picture. Ciphertext is not shown as the phone screen. DecodedFrames=" + Activity.DecodedFrames + ".");
     }
 
     private bool PresentAnnexLocked(ReadOnlySpan<byte> annexB, bool keyFrame)
     {
+        if (_codec == MirrorVideoCodec.Hevc)
+        {
+            return PresentHevcLocked(annexB, keyFrame);
+        }
+
         var presented = annexB;
         byte[]? prefixed = null;
         if (_prependParameterSets && keyFrame && _sequence is not null && _picture is not null)
@@ -764,6 +926,34 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         }
 
         if (!_decoder.TryDecode(presented, keyFrame, out var frame))
+        {
+            return false;
+        }
+
+        PublishDecodedLocked(frame);
+        return true;
+    }
+
+    private bool PresentHevcLocked(ReadOnlySpan<byte> annexB, bool keyFrame)
+    {
+        if (_hevc is null)
+        {
+            return false;
+        }
+
+        var presented = annexB;
+        if (_prependParameterSets && keyFrame && _vps is not null && _sequence is not null && _picture is not null)
+        {
+            _prependParameterSets = false;
+            if (!HevcSequence.ContainsNalType(annexB, 32)
+                && !HevcSequence.ContainsNalType(annexB, 33)
+                && !HevcSequence.ContainsNalType(annexB, 34))
+            {
+                presented = PrefixHevcParameterSets(_vps, _sequence, _picture, annexB);
+            }
+        }
+
+        if (!_hevc.TryDecode(presented, keyFrame, out var frame))
         {
             return false;
         }
@@ -838,14 +1028,14 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             ClearPendingLocked();
             _heldKeyframe = null;
             _discardHeld = false;
-            if (discard && _sequence is not null && _picture is not null)
+            if (discard && ParameterSetsReadyLocked())
             {
-                // The phone often does not send SPS/PPS again after unlock.
-                // Keeping the last parameter sets lets the next IDR decode.
+                // The phone often does not send parameter sets again after unlock.
+                // Keeping the last sets lets the next keyframe decode.
                 _prependParameterSets = true;
             }
 
-            _decoder.Reset();
+            ResetDecodersLocked();
         }
         else
         {
@@ -1009,6 +1199,35 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         BinaryPrimitives.WriteUInt32BigEndian(destination[4..], (uint)fraction);
     }
 
+    private static byte[] PrefixHevcParameterSets(byte[] video, byte[] sequence, byte[] picture, ReadOnlySpan<byte> accessUnit)
+    {
+        var output = new byte[12 + video.Length + sequence.Length + picture.Length + accessUnit.Length];
+        var offset = WriteStartCode(output.AsSpan(0), video);
+        offset += WriteStartCode(output.AsSpan(offset), sequence);
+        offset += WriteStartCode(output.AsSpan(offset), picture);
+        accessUnit.CopyTo(output.AsSpan(offset));
+        return output;
+    }
+
+    private bool ParameterSetsReadyLocked()
+        => _codec == MirrorVideoCodec.Hevc
+            ? _vps is not null && _sequence is not null && _picture is not null
+            : _sequence is not null && _picture is not null;
+
+    private void ClearCodecLocked()
+    {
+        _vps = null;
+        _sequence = null;
+        _picture = null;
+        _codec = MirrorVideoCodec.Unknown;
+    }
+
+    private void ResetDecodersLocked()
+    {
+        _decoder.Reset();
+        _hevc?.Reset();
+    }
+
     private static byte[] PrefixParameterSets(byte[] sequence, byte[] picture, ReadOnlySpan<byte> accessUnit)
     {
         var output = new byte[8 + sequence.Length + picture.Length + accessUnit.Length];
@@ -1018,13 +1237,14 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         return output;
     }
 
-    private static void WriteStartCode(Span<byte> destination, ReadOnlySpan<byte> nal)
+    private static int WriteStartCode(Span<byte> destination, ReadOnlySpan<byte> nal)
     {
         destination[0] = 0;
         destination[1] = 0;
         destination[2] = 0;
         destination[3] = 1;
         nal.CopyTo(destination[4..]);
+        return 4 + nal.Length;
     }
 
     private void DropClient()

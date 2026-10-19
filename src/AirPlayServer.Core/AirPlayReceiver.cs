@@ -112,9 +112,23 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 DisplayWidth = options.DisplayWidth,
                 DisplayHeight = options.DisplayHeight,
                 MaxFramesPerSecond = options.MaxFramesPerSecond,
+                AcceptHevc = options.AcceptHevc,
             };
             var frames = new FrameSlot();
             var decoder = options.Decoder ?? H264Decoders.CreatePlatformDefault(log);
+            IHevcDecoder? hevc = null;
+            if (options.AcceptHevc)
+            {
+                hevc = options.HevcDecoder ?? HevcDecoders.CreatePlatformDefault(log);
+                if (hevc.IsAvailable)
+                {
+                    log.Log(AirPlayLogLevel.Information, "HEVC mirror is enabled. Features bit 42 (SupportsScreenMultiCodec) is advertised. Decoder: " + hevc.Name + ".");
+                }
+                else
+                {
+                    log.Log(AirPlayLogLevel.Warning, "HEVC was requested (--h265 / --hevc) but Media Foundation HEVC (CLSID_CMSH265DecoderMFT) is not available on this machine. H.264 mirroring still works. HEVC frames will not be shown.");
+                }
+            }
             if (!string.IsNullOrWhiteSpace(options.MediaKeyPluginPath))
             {
                 if (!NativeMediaKeyModule.TryLoad(options.MediaKeyPluginPath, out plugin, out var pluginError))
@@ -133,7 +147,9 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 decoder,
                 unwrapper,
                 labKey,
-                log);
+                log,
+                options.AcceptHevc,
+                hevc);
             if (options.PublishDemoFrame)
             {
                 DemoFrame.Publish(frames, options.DisplayWidth, options.DisplayHeight);

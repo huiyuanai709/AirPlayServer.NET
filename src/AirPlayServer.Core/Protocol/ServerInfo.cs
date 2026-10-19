@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using AirPlayServer.Core.Discovery;
@@ -12,7 +13,7 @@ internal static class ServerInfo
             "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n" +
             "<plist version=\"1.0\">\n<dict>\n" +
             "<key>deviceid</key>\n<string>" + advertisement.DeviceId + "</string>\n" +
-            "<key>features</key>\n<integer>" + AirPlayCompatibility.FeaturesLow + "</integer>\n" +
+            "<key>features</key>\n<integer>" + advertisement.FeaturesInteger.ToString(CultureInfo.InvariantCulture) + "</integer>\n" +
             "<key>model</key>\n<string>" + AirPlayCompatibility.Model + "</string>\n" +
             "<key>protovers</key>\n<string>1.0</string>\n" +
             "<key>srcvers</key>\n<string>" + AirPlayCompatibility.SourceVersion + "</string>\n" +
@@ -47,7 +48,7 @@ internal static class ServerInfo
 
         var root = new PlistDictionary();
         root.Add("deviceID", new PlistString(advertisement.DeviceId));
-        root.Add("features", new PlistInteger(AirPlayCompatibility.FeaturesLow));
+        root.Add("features", new PlistInteger(advertisement.FeaturesInteger));
         root.Add("model", new PlistString(AirPlayCompatibility.Model));
         root.Add("name", new PlistString(advertisement.InstanceName));
         root.Add("sourceVersion", new PlistString(AirPlayCompatibility.SourceVersion));
@@ -69,6 +70,11 @@ internal static class ServerInfo
         builder.AppendLine(fairPlay
             ? "media: mirror; FairPlay fp-setup and 72-byte ekey unwrap configured; H.264 decoder pluggable"
             : "media: mirror; FairPlay not configured; H.264 decoder pluggable");
+        if (advertisement.AcceptHevc)
+        {
+            builder.AppendLine("hevc: advertised; Features bit 42 SupportsScreenMultiCodec");
+        }
+
         return builder.ToString();
     }
 

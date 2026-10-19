@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using AirPlayServer.Core.Discovery;
 using AirPlayServer.Core.Export;
 using AirPlayServer.Core.Media;
+using AirPlayServer.Core.Notify;
 using AirPlayServer.Core.Pairing;
 using AirPlayServer.Core.Protocol;
 using AirPlayServer.Core.Video;
@@ -80,6 +81,12 @@ public sealed class AirPlayReceiver : IAsyncDisposable
     public FrameSlot Frames { get; }
 
     public MirrorActivity Mirror => _mirror.Activity;
+
+    /// <summary>
+    /// Mirror data session. <see cref="MirrorSessionTracker.GetSnapshot"/> stays
+    /// connected through the disconnect debounce. Shutdown does not emit disconnected.
+    /// </summary>
+    public MirrorSessionTracker Sessions => _mirror.Sessions;
 
     public event EventHandler<AirPlaySessionEstablishedEventArgs>? SessionEstablished;
 

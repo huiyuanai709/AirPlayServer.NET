@@ -19,6 +19,14 @@ AirPlayServer.NET Native AOT 宿主
        AirPlayServer.Host.exe --screen 480x1040 --model iphone-15-pro --tapclock 127.0.0.1:42125
   3. iPhone 在同一局域网里发现接收端并开始镜像。
 
+镜像连上或断开时可以通知 TapClock（不在这里点击控制中心）：
+
+  浏览器打开 http://127.0.0.1:7099/ ，打开「向 TapClock 发送镜像事件」。
+  默认 POST http://127.0.0.1:5088/api/integrations/airplay/events
+  断连先等 3 秒。这 3 秒里又连上就不会发 disconnected。
+  可选请求头 X-TapClock-Token。状态可查 GET /api/status。
+  --no-notify 关闭页面。--tapclock-events 直接打开事件。配置在 session-notify.json。
+
 --screen 是 /info 里的广告分辨率，宿主默认 480x1040。
 --model 是 TapClock 点击对齐的竖屏 UIKit 逻辑点（iphone-15-pro 为 393x852），不改广告。
 --list-models 打印全部 slug。两个参数可以只写其中一个。

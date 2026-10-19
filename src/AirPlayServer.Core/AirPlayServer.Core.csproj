@@ -4,7 +4,7 @@
     <RootNamespace>AirPlayServer.Core</RootNamespace>
     <AssemblyName>AirPlayServer.Core</AssemblyName>
     <IsAotCompatible>true</IsAotCompatible>
-    <Description>AirPlay receive core: IPv4 mDNS advertisement, transient pairing, in-process FairPlay, mirror receive, and TapClock frame export.</Description>
+    <Description>AirPlay receive core: IPv4 mDNS advertisement, transient pairing, in-process FairPlay, mirror receive, TapClock frame export, and mirror session notify.</Description>
   </PropertyGroup>
 
   <PropertyGroup>

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using AirPlayServer.Core;
 using AirPlayServer.Core.Export;
+using AirPlayServer.Host.Notify;
 
 namespace AirPlayServer.Host;
 
@@ -26,6 +27,8 @@ internal sealed class HostArgs
 
     public AirPlayReceiverOptions Options { get; private set; } = new();
 
+    public NotifyLaunch Notify { get; private set; } = new();
+
     public const int DefaultAdvertisedWidth = 480;
 
     public const int DefaultAdvertisedHeight = 1040;
@@ -38,6 +41,8 @@ internal sealed class HostArgs
                              [--screen 480x1040] [--model iphone-15-pro] [--list-models] [--h265]
                              [--no-discovery] [--no-window] [--demo-frame]
                              [--tapclock 主机:42125] [--tapclock-dir 目录] [--tapclock-fps 2]
+                             [--tapclock-events] [--tapclock-base http://127.0.0.1:5088] [--notify-debounce-ms 3000]
+                             [--notify-listen 127.0.0.1] [--notify-port 7099] [--notify-config 路径] [--no-notify]
                              [--lab-key 32位十六进制] [--media-key-plugin 路径] [--seed 64位十六进制]
                              [--no-update] [--auto-update]
           AirPlayServer.Host --self-check
@@ -83,6 +88,21 @@ internal sealed class HostArgs
                          目录不可写或 mirror.jpg 被占用时，日志会写出完整路径。
                          同时指定了 --tapclock 时，目录失败不会拆掉 TCP 42125。
         --tapclock-fps   导出节拍，默认约 2，上限 30。
+        --tapclock-events
+                         这次启动向 TapClock POST 镜像连接和断连。默认关闭，也可以在配置页打开。
+                         重试和点击归 TapClock。本程序不操作控制中心，也不发送 HID。
+        --tapclock-base  TapClock 根地址，默认 http://127.0.0.1:5088。
+                         事件固定 POST 到 {基址}/api/integrations/airplay/events。
+                         可选请求头 X-TapClock-Token 在配置页填写。
+        --notify-debounce-ms
+                         断连后等待多少毫秒再发出 disconnected。默认 3000。这段时间内数据又连上就不发。
+                         connected 不等待。进程退出不补发断连。
+        --notify-listen  配置页监听地址，默认 127.0.0.1。只接受 IPv4。
+        --notify-port    配置页端口，默认 7099。0 表示不打开页面。
+        --notify-config  配置 JSON 路径。默认是程序旁边的 session-notify.json。
+        --no-notify      不打开配置页。文件里已经启用的 Webhook 和 TapClock 事件仍会发送。
+        镜像「已连接」是指数据端口解析到了合法的 128 字节镜像包，不是只完成了 RTSP SETUP。
+        配置页提供 GET /api/status，返回 connected、since、name、session_id、disconnect_pending。
         --lab-key        实验用 16 字节内容密钥。SETUP 用这把密钥。/fp-setup 仍由进程内 FairPlay 回答。
                          pair-verify 完成后，加密的 type 0 会解密。
         --media-key-plugin
@@ -110,6 +130,7 @@ internal sealed class HostArgs
     public static HostArgs Parse(string[] args)
     {
         var parsed = new HostArgs();
+        var notify = new NotifyLaunch();
         HostUpdateMode? updateMode = null;
         var options = new AirPlayReceiverOptions
         {
@@ -192,6 +213,27 @@ internal sealed class HostArgs
                     tapClock ??= new TapClockExportOptions();
                     tapClock.FramesPerSecond = double.Parse(Next(args, ref i, token), CultureInfo.InvariantCulture);
                     break;
+                case "--tapclock-events":
+                    notify.TapClockEvents = true;
+                    break;
+                case "--tapclock-base":
+                    notify.TapClockBaseUrl = Next(args, ref i, token);
+                    break;
+                case "--notify-debounce-ms":
+                    notify.DebounceMs = int.Parse(Next(args, ref i, token), CultureInfo.InvariantCulture);
+                    break;
+                case "--notify-listen":
+                    notify.Listen = IPAddress.Parse(Next(args, ref i, token)).ToString();
+                    break;
+                case "--notify-port":
+                    notify.Port = int.Parse(Next(args, ref i, token), CultureInfo.InvariantCulture);
+                    break;
+                case "--notify-config":
+                    notify.ConfigPath = Next(args, ref i, token);
+                    break;
+                case "--no-notify":
+                    notify.DisablePage = true;
+                    break;
                 case "--lab-key":
                     options.LabContentKey = Convert.FromHexString(Next(args, ref i, token));
                     break;
@@ -213,6 +255,7 @@ internal sealed class HostArgs
         options.EnableInProcessFairPlay();
         parsed.UpdateMode = updateMode ?? HostUpdateMode.Disabled;
         parsed.Options = options;
+        parsed.Notify = notify;
         return parsed;
     }
 

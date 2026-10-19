@@ -1,8 +1,10 @@
 using System.Globalization;
+using System.Net.Sockets;
 using AirPlayServer.Core;
 using AirPlayServer.Core.Export;
 using AirPlayServer.Core.Protocol;
 using AirPlayServer.Host;
+using AirPlayServer.Host.Notify;
 using AirPlayServer.Host.Update;
 
 HostArgs arguments;
@@ -71,18 +73,42 @@ if (arguments.UpdateMode == HostUpdateMode.Automatic && !HostUpdate.WasJustUpdat
     }
 }
 
+SessionNotifyPlan notifyPlan;
+try
+{
+    notifyPlan = SessionNotifyService.Load(arguments.Notify);
+}
+catch (Exception ex) when (ex is InvalidDataException or ArgumentException or IOException)
+{
+    Console.Error.WriteLine("通知配置无效: " + ex.Message);
+    return 1;
+}
+
 AirPlayReceiver receiver;
 try
 {
     receiver = await AirPlayReceiver.StartAsync(arguments.Options, shutdown.Token).ConfigureAwait(false);
 }
-catch (Exception ex) when (ex is ArgumentException or IOException or System.Net.Sockets.SocketException)
+catch (Exception ex) when (ex is ArgumentException or IOException or SocketException)
 {
     Console.Error.WriteLine("启动失败: " + ex.Message);
     return 1;
 }
 
+SessionNotifyService notify;
+try
+{
+    notify = SessionNotifyService.Start(notifyPlan, receiver);
+}
+catch (Exception ex) when (ex is ArgumentException or IOException or SocketException or InvalidDataException)
+{
+    await receiver.DisposeAsync().ConfigureAwait(false);
+    Console.Error.WriteLine("通知页面启动失败: " + ex.Message);
+    return 1;
+}
+
 await using (receiver)
+await using (notify)
 {
     Console.WriteLine("AirPlayServer.NET 接收端已启动");
     Console.WriteLine("名称: " + receiver.Name);
@@ -144,6 +170,11 @@ await using (receiver)
     {
         Console.WriteLine("内容密钥：SETUP 使用 --lab-key 的 16 字节实验密钥。");
     }
+    foreach (var line in notify.StartupLines())
+    {
+        Console.WriteLine(line);
+    }
+
     Console.WriteLine("H.264 解码器: " + receiver.Mirror.DecoderName + "。点击仍由 TapClock 走 TCP 42123，坐标是板上的 HID 计数。");
     if (receiver.AdvertisesHevc)
     {

@@ -35,7 +35,9 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         string name,
         bool discoveryReceiving,
         int displayWidth,
-        int displayHeight)
+        int displayHeight,
+        bool advertisesHevc,
+        string hevcDecoderName)
     {
         _identity = identity;
         _control = control;
@@ -50,8 +52,18 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         DiscoveryReceiving = discoveryReceiving;
         _displayWidth = displayWidth;
         _displayHeight = displayHeight;
+        AdvertisesHevc = advertisesHevc;
+        HevcDecoderName = hevcDecoderName;
         _control.SessionEstablished += OnSessionEstablished;
     }
+
+    /// <summary>
+    /// True when mDNS and <c>/info</c> include Features bit 42. This stays false
+    /// when <c>--h265</c> was set but no HEVC decoder opened.
+    /// </summary>
+    public bool AdvertisesHevc { get; }
+
+    public string HevcDecoderName { get; }
 
     public string Name { get; }
 
@@ -88,6 +100,8 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         TapClockExporter? tapClock = null;
         IAsyncDisposable? window = null;
         NativeMediaKeyModule? plugin = null;
+        IH264Decoder? decoder = null;
+        IHevcDecoder? hevc = null;
         try
         {
             airPlay = ControlServer.Bind(options.ListenAddress, options.AirPlayPort);
@@ -98,6 +112,14 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 LocalNetwork.SelectAdvertisementAddress(options.ListenAddress),
                 options.Name);
             var instance = ReceiverNames.InstanceLabel(options.Name);
+            var frames = new FrameSlot();
+            decoder = options.Decoder ?? H264Decoders.CreatePlatformDefault(log);
+            if (options.AcceptHevc)
+            {
+                hevc = options.HevcDecoder ?? HevcDecoders.CreatePlatformDefault(log);
+            }
+
+            var advertisesHevc = HevcDecoders.ShouldAdvertise(options.AcceptHevc, hevc, log);
             var advertisement = new ReceiverAdvertisement
             {
                 InstanceName = instance,
@@ -112,23 +134,8 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 DisplayWidth = options.DisplayWidth,
                 DisplayHeight = options.DisplayHeight,
                 MaxFramesPerSecond = options.MaxFramesPerSecond,
-                AcceptHevc = options.AcceptHevc,
+                AcceptHevc = advertisesHevc,
             };
-            var frames = new FrameSlot();
-            var decoder = options.Decoder ?? H264Decoders.CreatePlatformDefault(log);
-            IHevcDecoder? hevc = null;
-            if (options.AcceptHevc)
-            {
-                hevc = options.HevcDecoder ?? HevcDecoders.CreatePlatformDefault(log);
-                if (hevc.IsAvailable)
-                {
-                    log.Log(AirPlayLogLevel.Information, "HEVC mirror is enabled. Features bit 42 (SupportsScreenMultiCodec) is advertised. Decoder: " + hevc.Name + ".");
-                }
-                else
-                {
-                    log.Log(AirPlayLogLevel.Warning, "HEVC was requested (--h265 / --hevc) but Media Foundation HEVC (CLSID_CMSH265DecoderMFT) is not available on this machine. H.264 mirroring still works. HEVC frames will not be shown.");
-                }
-            }
             if (!string.IsNullOrWhiteSpace(options.MediaKeyPluginPath))
             {
                 if (!NativeMediaKeyModule.TryLoad(options.MediaKeyPluginPath, out plugin, out var pluginError))
@@ -140,6 +147,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
             var unwrapper = options.MediaKeyUnwrapper ?? (plugin is { HasUnwrap: true } ? plugin : null);
             var fairPlay = options.FairPlaySetup ?? (plugin is { HasFairPlay: true } ? plugin : null);
             ReadOnlySpan<byte> labKey = options.LabContentKey is null ? [] : options.LabContentKey;
+            ArgumentNullException.ThrowIfNull(decoder);
             mirror = MirrorRuntime.Start(
                 options.ListenAddress,
                 raopPort,
@@ -148,7 +156,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 unwrapper,
                 labKey,
                 log,
-                options.AcceptHevc,
+                advertisesHevc,
                 hevc);
             if (options.PublishDemoFrame)
             {
@@ -212,7 +220,9 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 instance,
                 receiving,
                 options.DisplayWidth,
-                options.DisplayHeight);
+                options.DisplayHeight,
+                advertisesHevc,
+                hevc?.Name ?? "unavailable");
             mirror = null;
             tapClock = null;
             window = null;
@@ -221,6 +231,15 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         }
         catch
         {
+            if (mirror is null)
+            {
+                (decoder as IDisposable)?.Dispose();
+                if (hevc is IDisposable hevcDisposable && !ReferenceEquals(hevcDisposable, decoder))
+                {
+                    hevcDisposable.Dispose();
+                }
+            }
+
             if (window is not null)
             {
                 await window.DisposeAsync().ConfigureAwait(false);

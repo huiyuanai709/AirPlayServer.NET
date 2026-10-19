@@ -145,9 +145,13 @@ await using (receiver)
         Console.WriteLine("内容密钥：SETUP 使用 --lab-key 的 16 字节实验密钥。");
     }
     Console.WriteLine("H.264 解码器: " + receiver.Mirror.DecoderName + "。点击仍由 TapClock 走 TCP 42123，坐标是板上的 HID 计数。");
-    if (arguments.Options.AcceptHevc)
+    if (receiver.AdvertisesHevc)
     {
-        Console.WriteLine("HEVC：已打开。mDNS 和 /info 的 features 置上第 42 位（SupportsScreenMultiCodec）。手机仍可能选择 H.264。");
+        Console.WriteLine("HEVC：已打开。解码器: " + receiver.HevcDecoderName + "。mDNS 和 /info 的 features 置上第 42 位（SupportsScreenMultiCodec）。手机仍可能选择 H.264。");
+    }
+    else if (arguments.Options.AcceptHevc)
+    {
+        Console.WriteLine("HEVC：--h265 已忽略。没有可用的解码器，features 第 42 位不会置上，手机继续发送 H.264。");
     }
     Console.WriteLine("按 Ctrl+C 停止。");
     try

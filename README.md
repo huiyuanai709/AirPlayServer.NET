@@ -16,7 +16,7 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 - `ANNOUNCE`、镜像 `SETUP`（会话 + type 110）、`RECORD`、`GET_PARAMETER`（volume）、`SET_PARAMETER`、`PAUSE`、`FLUSH`、`TEARDOWN` 已接通。音频 type 96 仍返回 501。
 - 镜像画面走 TCP，不是 UDP RTP。每个包是 128 字节小端头加负载。Type 0 是 AES-128-CTR 的 AVCC；type 1 是明文 SPS/PPS 和几何信息。
 - 宿主默认用进程内 `FairPlayKeys` 回答 `POST /fp-setup`，并在握手之后解开 72 字节 `ekey`。同一次 `FairPlaySession` 同时服务这两步。没有完成握手时，SETUP 仍然 200，随后的加密包只计数、不解码。`/pair-setup-pin`、`/play` 仍返回 501。`--media-key-plugin` 是可选的原生覆盖，FairPlay 不再依赖它。
-- Windows 上用 Media Foundation 把 H.264 解成 BGRA，GDI 窗口显示最新一帧。Linux 上不创建窗口，也不把 `mfplat` / `user32` 编进 linux-x64 的 AOT 二进制。没有解码器时可以用 `--demo-frame`。
+- Windows 上用 Media Foundation 把 H.264 解成 BGRA，GDI 窗口显示最新一帧。HEVC 先试 Media Foundation，打不开时用程序旁边的 FFmpeg。Linux 上不创建窗口，也不把 `mfplat` / `user32` 编进 linux-x64 的 AOT 二进制；H.264 / HEVC 在运行时加载 FFmpeg（`libavcodec` / `libavutil`）。没有解码器时可以用 `--demo-frame`。`--h265` 只有在 HEVC 解码器真能打开时才宣告 features 第 42 位。
 - 可选地把最新帧编码成 JPEG，按 TapClock ATBF type 3 推到 `host:42125`，或原子写入监视目录。默认关闭。
 
 ## 架构
@@ -38,8 +38,9 @@ mDNS announcer                         control listeners :7001 and :5001
                     |                         +-- Windows GDI window
                     |                         +-- ATBF type 3 JPEG -> TapClock :42125
                     |                         +-- temp file -> mirror.jpg
-                    +-- Windows: Media Foundation H.264 -> BGRA
-                    +-- other OS: unavailable unless a decoder is supplied
+                    +-- Windows: Media Foundation H.264 / HEVC -> BGRA
+                    +-- FFmpeg libavcodec when MF HEVC is missing, and for Linux H.264 / HEVC
+                    +-- no library: unavailable, and --h265 is not advertised
 ```
 
 | 项目 | 职责 |
@@ -160,7 +161,7 @@ git push origin v0.1.0
 | `fairplay_playfair.c` / `POST /fp-setup` | 已接入。进程内 [AirPlayFairPlay](https://github.com/huiyuanai709/AirPlayFairPlayPlugin)（GPL-3.0-only），源自 PlayFair / xenos1337。宿主默认启用。`--media-key-plugin` 只是可选的原生覆盖。 |
 | `raop_rtp_mirror.c` 的镜像数据 | 已实现骨架：TCP 128 字节头、type 0/1、UDP 计时探测。不是经典 UDP 视频 RTP。 |
 | `raop_rtp.c` 音频 | 未实现。type 96 的 SETUP 返回 501。 |
-| FFmpeg H.264 / AAC-ELD、YUV、SDL、ImGui | Windows 的 `IH264Decoder` 是 Media Foundation（能锁住输出缓冲的同步硬件变换优先，否则用系统自带的 H.264 软件解码器），输出 BGRA。其它平台默认不产出画面。不链接 FFmpeg。 |
+| FFmpeg H.264 / AAC-ELD、YUV、SDL、ImGui | H.264 / HEVC 画面：Windows 优先 Media Foundation。HEVC 的 MFT 打不开时，以及 Linux 上，运行时加载 FFmpeg 的 `libavcodec` / `libavutil`（不链进 AOT 二进制）。NV12 / YUV420P 在进程内转成 BGRA。没有这些库就不产出画面，并且不宣告 `--h265`。AAC 仍未实现。 |
 | `MirrorSimAdapter` JSONL | 未实现。TapClock 走 ATBF，不走这条。 |
 | URL / HLS `/play` | 与上游一样不提供。这里直接 501。 |
 
@@ -188,7 +189,7 @@ int AirPlay_FairPlaySetup(const uint8_t* request, int requestLength,
 
 ## 画面与 TapClock
 
-Windows 上 Media Foundation 把 Annex-B 访问单元变成 BGRA，写入 `FrameSlot`（只保留最新一帧）。同步硬件变换如果还能锁定 NV12、RGB32 或 ARGB32 缓冲就优先用它。变换列出 RGB 时，由 Media Foundation 做 YUV 转换，输出类型上写着解析出来的矩阵和范围。微软 H.264 解码器本身只出 NV12 这一类 YUV，那种帧在进程内转换：SPS 的 VUI 优先，其次是媒体类型上的矩阵和 nominal range，都没有时按 iPhone 镜像的 BT.709 全范围。硬件变换的输出如果是 DXGI 表面，或者只有异步硬件变换时，退回系统自带的软件解码器。其它操作系统默认不解码。没有画面时，访问单元仍然计数，但不会冒充成手机屏幕。Linux 上继续可以用 `--demo-frame` 检查窗口标志和 TapClock。
+Windows 上 Media Foundation 把 Annex-B 访问单元变成 BGRA，写入 `FrameSlot`（只保留最新一帧）。同步硬件变换如果还能锁定 NV12、RGB32 或 ARGB32 缓冲就优先用它。变换列出 RGB 时，由 Media Foundation 做 YUV 转换，输出类型上写着解析出来的矩阵和范围。微软 H.264 解码器本身只出 NV12 这一类 YUV，那种帧在进程内转换：SPS 的 VUI 优先，其次是媒体类型上的矩阵和 nominal range，都没有时按 iPhone 镜像的 BT.709 全范围。硬件变换的输出如果是 DXGI 表面，或者只有异步硬件变换时，退回系统自带的软件解码器。HEVC 同样先走 Media Foundation。`CLSID_CMSH265DecoderMFT` 不在时改用 FFmpeg。Linux 上 H.264 和 HEVC 都只走 FFmpeg。没有画面时，访问单元仍然计数，但不会冒充成手机屏幕。Linux 上继续可以用 `--demo-frame` 检查导出。
 
 Windows 宿主默认打开 GDI 窗口，把最新一帧按比例放进客户区（比例不同时留黑边，不拉变形）。目标尺寸和帧不一样时用 HALFTONE。`--no-window` 关掉它。鼠标悬停时，标题和左上角显示 TapClock 绝对屏幕坐标，和 TapClock 日志里的「屏幕坐标」用同一套整数除法：客户区上的点先换成解码帧像素（画面按比例居中，黑边和画面矩形之外不算），再 `screen = 帧像素 * --model 宽高 / 帧宽高`，X 和 Y 各算各的。例如 `--model iphone-15-pro-max` 是 430×932；480×1040 的帧上，像素 (323, 850) 读成 `TapClock 289, 761`。没写 `--model` 时，图像尺寸就是屏幕，标签退回 `像素 x, y`。悬停不读 `--screen`。窗口里的鼠标点击不会发给手机，也不改 HID。
 
@@ -235,7 +236,41 @@ Windows 上的顺序：
   --tapclock 127.0.0.1:42125 --tapclock-dir /tmp/tapclock-frames
 ```
 
-`--demo-frame` 只推一张合成图，用来检查窗口和导出。真正的手机画面来自 H.264 解码。若必须换用 FFmpeg，请放在 `IH264Decoder` 后面并单独遵守 LGPL，不要链进这个仓库。
+`--demo-frame` 只推一张合成图，用来检查窗口和导出。真正的手机画面来自 H.264 或 HEVC 解码。FFmpeg 是可选的运行时动态库，不链进这个仓库。放法和许可见下一节。
+
+## FFmpeg（可选，运行时加载）
+
+发布包和 Native AOT 二进制都不包含 FFmpeg。宿主用 `NativeLibrary.TryLoad` 加载 `libavcodec` 和 `libavutil`（`libavcodec` 还会依赖 `libswresample`）。找不到库时程序照常启动。Linux 上这时没有手机画面。`--h265` 如果同时也没有 Media Foundation HEVC，不会宣告 features 第 42 位，手机继续发 H.264。日志用中文和英文写明原因。
+
+选择顺序：
+
+| 平台 | H.264 | HEVC（`--h265`） |
+| --- | --- | --- |
+| Windows | Media Foundation。打不开才试 FFmpeg。 | 先 Media Foundation（同步硬件 MFT，否则 `CLSID_CMSH265DecoderMFT`）。打不开再试 FFmpeg。 |
+| Linux | FFmpeg。 | FFmpeg。 |
+
+认这些共享库主版本：FFmpeg 4.4 到 8（libavcodec 58–62，libavutil 56–60）。软件解码输出 NV12、NV21 或 YUV420P（含 10-bit LE）时，进程内转成 BGRA。SPS 里的矩阵和范围优先；都没写时按 AirPlay 的 BT.709 全范围。自更新只替换发布包里的文件，不会删掉你另外拷进去的这些库。
+
+### Windows（没有商店 HEVC 扩展）
+
+从 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds/releases) 下载 `win64-lgpl-shared`（`win64-gpl-shared` 也可以，宿主本身是 GPL-3.0-only）。不要用 `*-static`。把 zip 里 `bin` 目录下的 DLL 全部拷到 `AirPlayServer.Host.exe` 旁边。至少要有同一版本的 `avcodec-*.dll`、`avutil-*.dll` 和 `swresample-*.dll`。
+
+```powershell
+.\AirPlayServer.Host.exe --h265 --screen 1290x2796 --model iphone-15-pro-max
+```
+
+日志里应出现 `Decoder: ffmpeg-hevc`，并且 features 第 42 位被宣告。DLL 不在时，`--h265` 被忽略，手机仍走 H.264。H.264 在 Windows 上仍然用 Media Foundation，不依赖这些 DLL。
+
+### Linux
+
+```bash
+sudo apt-get install ffmpeg
+./AirPlayServer.Host --h265 --screen 1290x2796 --no-window
+```
+
+也可以把 `libavcodec.so.N`、`libavutil.so.N`、`libswresample.so.N` 放在二进制旁边。`ffmpeg` 包带上的 SONAME 会被系统加载器找到。
+
+分发这些 DLL / SO 时要遵守该构建的许可证。LGPL-2.1-or-later 的构建必须允许替换库；带 GPL 组件的构建按 GPL 分发。本仓库不附带 FFmpeg 源码或二进制。见 [NOTICE.md](NOTICE.md)。
 
 ## 许可与致谢
 

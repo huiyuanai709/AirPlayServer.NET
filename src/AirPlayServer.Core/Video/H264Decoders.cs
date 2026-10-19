@@ -1,22 +1,39 @@
 namespace AirPlayServer.Core.Video;
 
 /// <summary>
-/// Picks the H.264 decoder for this process. Windows uses Media Foundation.
-/// Every other publish target keeps <see cref="UnavailableH264Decoder"/>, so a
-/// linux-x64 Native AOT binary does not reference mfplat or user32.
+/// Picks the H.264 decoder for this process. Windows uses Media Foundation when
+/// it opens. Linux, and Windows if Media Foundation cannot open, use FFmpeg
+/// when libavcodec and libavutil load. Otherwise the decoder is
+/// <see cref="UnavailableH264Decoder"/>.
 /// </summary>
 public static class H264Decoders
 {
     public static IH264Decoder CreatePlatformDefault(IAirPlayLog? log = null)
+        => Create(log, load: null);
+
+    internal static IH264Decoder Create(IAirPlayLog? log, Func<IAirPlayLog?, FFmpegLibrary?>? load)
     {
 #if WINDOWS_HOST
         if (OperatingSystem.IsWindows())
         {
-            return new MediaFoundationH264Decoder(log);
+            var mediaFoundation = new MediaFoundationH264Decoder(log);
+            if (mediaFoundation.IsAvailable)
+            {
+                return mediaFoundation;
+            }
+
+            mediaFoundation.Dispose();
+            log?.Log(
+                AirPlayLogLevel.Information,
+                "Media Foundation H.264 打不开，改试 FFmpeg（libavcodec）。Media Foundation H.264 is not available. Trying FFmpeg (libavcodec).");
         }
-#else
-        _ = log;
 #endif
+        var library = load is not null ? load(log) : FFmpegLibrary.TryLoad(log);
+        if (library is not null && FFmpegH264Decoder.TryCreate(library, log, out var ffmpeg) && ffmpeg is not null)
+        {
+            return ffmpeg;
+        }
+
         return new UnavailableH264Decoder();
     }
 

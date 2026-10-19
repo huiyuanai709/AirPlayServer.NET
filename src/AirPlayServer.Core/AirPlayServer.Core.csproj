@@ -8,8 +8,8 @@
   </PropertyGroup>
 
   <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <DefineConstants Condition="$([MSBuild]::IsOSPlatform('Windows')) Or '$(ForceWindowsHost)' == 'true'">$(DefineConstants);WINDOWS_HOST</DefineConstants>
-    <AllowUnsafeBlocks Condition="$([MSBuild]::IsOSPlatform('Windows')) Or '$(ForceWindowsHost)' == 'true'">true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>

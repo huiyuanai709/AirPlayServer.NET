@@ -86,26 +86,28 @@ Windows（需要 Visual Studio 的 C++ 生成工具，AOT 用它做链接）：
 
 `--self-check` 在发布出的原生二进制里重跑 RFC 7748、RFC 8032、一次 pair-verify，以及一张 JPEG 的 ATBF 封装，用来确认 AOT 之后这些路径还在。`--seed` 是 32 字节十六进制，只留在内存里，仓库和单元文件都不写种子。宿主默认 `--screen 480x1040`（这是 `/info` 里的广告分辨率），并打开窗口标志；在 Linux 上窗口不会创建。`--model` 另选 TapClock 点击对齐的 UIKit 逻辑点，不改这个广告尺寸。`--list-models` 打印 slug。
 
-## 自动更新
+## 更新
 
-发布包启动时会请求 `https://api.github.com/repos/huiyuanai709/AirPlayServer.NET/releases/latest`，只看最新稳定版，跳过预发布。本地版本优先读可执行文件旁边的 `VERSION.txt`（`tag=`）。没有这个文件时，用编译进去的版本号。`dotnet run` 和本地 `publish.sh` 的默认版本是 `1.0.0`，高于目前的 `v0.1.x` 标签，所以不会把编译输出目录换掉。GitHub Release 的 zip 里带有 `VERSION.txt`，那才是安装包的版本。
+默认不检查更新；用 `--update` 手动更新。普通启动不访问 GitHub，开机自启和常驻进程不打更新日志。
 
-找到较新的 `vX.Y.Z` 时，下载当前平台的 zip（`AirPlayServer.Host-<tag>-win-x64.zip` 或 `linux-x64.zip`）。Release 里有 `SHA256SUMS.txt` 就先校验，GitHub 资源上的 `sha256:` 摘要也会对一下。通过后替换同目录里的程序、`VERSION.txt`、`LICENSE`、`NOTICE.md`、`RUN.txt`，以及 linux 包里的 `airplayserver.service`。不会把 `.pdb` / `.dbg` 写进目录。然后用原来的参数重新启动。Linux 上用 `exec` 换进程，systemd 的 PID 保持不变。Windows 上如果正在运行的 exe 不能直接覆盖，会在退出后由一个短 PowerShell 脚本替换并重启。
-
-网络失败、404、校验不一致或没有写入权限时，只把原因打到日志里，继续跑当前这个程序。自动检查的 API 等待大约 12 秒，下载最多大约 3 分钟，不会一直卡在启动。
-
-关掉自动检查：
-
-```bash
-./AirPlayServer.Host --no-update --name 客厅
-```
-
-手动检查。已经是最新稳定版时只打印版本并退出，不下载，也不启动接收端。这是对当前最新 Release 的干跑：
+手动更新。已经是最新稳定版时只打印版本并退出，不下载，也不启动接收端：
 
 ```bash
 ./AirPlayServer.Host --check-update
 ./AirPlayServer.Host --update
 ```
+
+`--update` 会请求 `https://api.github.com/repos/huiyuanai709/AirPlayServer.NET/releases/latest`，只看最新稳定版，跳过预发布。本地版本优先读可执行文件旁边的 `VERSION.txt`（`tag=`）。没有这个文件时，用编译进去的版本号。`dotnet run` 和本地 `publish.sh` 的默认版本是 `1.0.0`，高于目前的 `v0.1.x` 标签，所以不会把编译输出目录换掉。GitHub Release 的 zip 里带有 `VERSION.txt`，那才是安装包的版本。
+
+找到较新的 `vX.Y.Z` 时，下载当前平台的 zip（`AirPlayServer.Host-<tag>-win-x64.zip` 或 `linux-x64.zip`）。Release 里有 `SHA256SUMS.txt` 就先校验，GitHub 资源上的 `sha256:` 摘要也会对一下。通过后替换同目录里的程序、`VERSION.txt`、`LICENSE`、`NOTICE.md`、`RUN.txt`，以及 linux 包里的 `airplayserver.service`。不会把 `.pdb` / `.dbg` 写进目录。然后用原来的参数重新启动，并去掉 `--update` / `--check-update`。Linux 上用 `exec` 换进程，systemd 的 PID 保持不变。Windows 上如果正在运行的 exe 不能直接覆盖，会在退出后由一个短 PowerShell 脚本替换并重启。显式更新失败时进程退出，不启动接收端。
+
+`--auto-update` 恢复启动时检查。网络失败、404、GitHub 速率限制、校验不一致或没有写入权限时，只把原因打到日志里，继续跑当前这个程序。这次检查的 API 等待大约 12 秒，下载最多大约 3 分钟，不会一直卡在启动。
+
+```bash
+./AirPlayServer.Host --auto-update --name 客厅
+```
+
+`--no-update` 仍然接受，效果和默认一样，可以和其他参数一起写。它不能和 `--update` 或 `--auto-update` 一起用。
 
 `--version` 只打印程序内版本和 `VERSION.txt`，不访问网络。`--help`、`--self-check`、`--list-models` 也不检查更新。
 

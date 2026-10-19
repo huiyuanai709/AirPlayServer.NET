@@ -62,7 +62,7 @@ internal static class HostUpdate
             return;
         }
 
-        Console.WriteLine("VERSION.txt: 未找到。自动更新会改用程序内版本。");
+        Console.WriteLine("VERSION.txt: 未找到。检查更新时会改用程序内版本。");
     }
 
     public static void CleanupStaleFiles()

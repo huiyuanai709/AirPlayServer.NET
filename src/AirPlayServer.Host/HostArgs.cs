@@ -22,7 +22,7 @@ internal sealed class HostArgs
 
     public bool SelfCheck { get; private set; }
 
-    public HostUpdateMode UpdateMode { get; private set; } = HostUpdateMode.Automatic;
+    public HostUpdateMode UpdateMode { get; private set; } = HostUpdateMode.Disabled;
 
     public AirPlayReceiverOptions Options { get; private set; } = new();
 
@@ -39,7 +39,7 @@ internal sealed class HostArgs
                              [--no-discovery] [--no-window] [--demo-frame]
                              [--tapclock 主机:42125] [--tapclock-dir 目录] [--tapclock-fps 2]
                              [--lab-key 32位十六进制] [--media-key-plugin 路径] [--seed 64位十六进制]
-                             [--no-update]
+                             [--no-update] [--auto-update]
           AirPlayServer.Host --self-check
           AirPlayServer.Host --update
           AirPlayServer.Host --check-update
@@ -91,13 +91,14 @@ internal sealed class HostArgs
         窗口把画面拉伸到客户区。点先换成解码帧像素（整数截断，画面外的黑边不算），再按 TapClock 的算法换成屏幕点：screen = 帧像素 * --model 宽高 / 帧宽高（整数除法，X 和 Y 分开算）。
         例如 --model iphone-15-pro-max 是 430×932。480×1040 的帧上，像素 (323, 850) 读成 TapClock 289, 761，和 TapClock 日志里的「屏幕坐标」是同一套点。
         没写 --model 时，图像尺寸就是屏幕，标签退回「像素 x, y」。悬停不使用 --screen 的广告分辨率。点击仍然不发给手机。
-        启动时会检查 GitHub 上 huiyuanai709/AirPlayServer.NET 的最新稳定版（不含预发布）。
+        默认不检查更新；用 --update 手动更新。普通启动不访问 GitHub。
         版本优先读可执行文件旁边的 VERSION.txt；没有这个文件时用编译进去的版本。
         有较新的 vX.Y.Z 时，下载 win-x64 或 linux-x64 的 zip。Release 里有 SHA256SUMS.txt 就先校验，再替换本目录里的程序并重新启动。
-        网络失败、校验失败或目录不可写时只记日志，继续跑当前程序。检查有超时，不会一直卡住。
-        --no-update      这次启动不检查更新。
+        检查有超时，不会一直卡住。--update 失败时退出，不启动接收端。--auto-update 失败时只记日志，继续跑当前程序。
+        --no-update      不检查更新。这是默认行为，可以和其他参数一起写。
         --update         检查并安装更新，然后重新启动。已经是最新则退出，不启动接收端。
         --check-update   与 --update 相同。
+        --auto-update    这次启动检查更新。失败时继续跑当前程序。不能和 --update 或 --no-update 一起用。
         --version        打印程序内版本和 VERSION.txt，然后退出。不访问网络。
         公开的 Release 不需要令牌。私有仓库请设置环境变量 GITHUB_TOKEN 或 GH_TOKEN。
         """;
@@ -105,6 +106,7 @@ internal sealed class HostArgs
     public static HostArgs Parse(string[] args)
     {
         var parsed = new HostArgs();
+        HostUpdateMode? updateMode = null;
         var options = new AirPlayReceiverOptions
         {
             DisplayWidth = DefaultAdvertisedWidth,
@@ -136,20 +138,13 @@ internal sealed class HostArgs
                     break;
                 case "--update":
                 case "--check-update":
-                    if (parsed.UpdateMode == HostUpdateMode.Disabled)
-                    {
-                        throw new ArgumentException("--update and --no-update cannot be combined.");
-                    }
-
-                    parsed.UpdateMode = HostUpdateMode.Explicit;
+                    updateMode = CombineUpdateMode(updateMode, HostUpdateMode.Explicit);
+                    break;
+                case "--auto-update":
+                    updateMode = CombineUpdateMode(updateMode, HostUpdateMode.Automatic);
                     break;
                 case "--no-update":
-                    if (parsed.UpdateMode == HostUpdateMode.Explicit)
-                    {
-                        throw new ArgumentException("--update and --no-update cannot be combined.");
-                    }
-
-                    parsed.UpdateMode = HostUpdateMode.Disabled;
+                    updateMode = CombineUpdateMode(updateMode, HostUpdateMode.Disabled);
                     break;
                 case "--no-discovery":
                     options.EnableDiscovery = false;
@@ -212,8 +207,36 @@ internal sealed class HostArgs
         options.TapClock = tapClock;
         options.Log ??= ConsoleAirPlayLog.Instance;
         options.EnableInProcessFairPlay();
+        parsed.UpdateMode = updateMode ?? HostUpdateMode.Disabled;
         parsed.Options = options;
         return parsed;
+    }
+
+    private static HostUpdateMode CombineUpdateMode(HostUpdateMode? current, HostUpdateMode next)
+    {
+        if (current is null || current == next)
+        {
+            return next;
+        }
+
+        throw new ArgumentException(UpdateModeConflict(current.Value, next));
+    }
+
+    private static string UpdateModeConflict(HostUpdateMode left, HostUpdateMode right)
+    {
+        var hasExplicit = left == HostUpdateMode.Explicit || right == HostUpdateMode.Explicit;
+        var hasDisabled = left == HostUpdateMode.Disabled || right == HostUpdateMode.Disabled;
+        if (hasExplicit && hasDisabled)
+        {
+            return "--update and --no-update cannot be combined.";
+        }
+
+        if (hasDisabled)
+        {
+            return "--auto-update and --no-update cannot be combined.";
+        }
+
+        return "--update and --auto-update cannot be combined.";
     }
 
     private static void ParseScreen(string text, AirPlayReceiverOptions options)

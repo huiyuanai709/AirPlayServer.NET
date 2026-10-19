@@ -158,6 +158,48 @@ public sealed class MultiMirrorTests
     }
 
     [Fact]
+    public async Task Configured_max_above_eight_accepts_that_many_and_refuses_the_next()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => MirrorRuntime.Start(
+            IPAddress.Loopback,
+            9,
+            new FrameSlot(),
+            new MarkDecoder(1),
+            null,
+            ReadOnlySpan<byte>.Empty,
+            NullAirPlayLog.Instance,
+            maxMirrors: 0));
+
+        var log = new ListLog();
+        await using var mirror = MirrorRuntime.Start(
+            IPAddress.Loopback,
+            9,
+            new FrameSlot(),
+            new MarkDecoder(1),
+            null,
+            ReadOnlySpan<byte>.Empty,
+            log,
+            maxMirrors: 20);
+        using var pairing = new PairingSession(PairingIdentity.Generate());
+        for (var n = 1; n <= 20; n++)
+        {
+            var remote = new IPEndPoint(IPAddress.Parse("10.20.0." + n.ToString(System.Globalization.CultureInfo.InvariantCulture)), 7000);
+            var response = mirror.HandleMedia(Request("SETUP", SessionBody("Phone " + n.ToString(System.Globalization.CultureInfo.InvariantCulture))), pairing, remote);
+            Assert.Equal(200, response.Status);
+        }
+
+        Assert.Equal(20, mirror.Snapshot().Length);
+        var refused = mirror.HandleMedia(
+            Request("SETUP", SessionBody("Extra")),
+            pairing,
+            new IPEndPoint(IPAddress.Parse("10.20.0.21"), 7000));
+        Assert.Equal(503, refused.Status);
+        Assert.Equal(20, mirror.Snapshot().Length);
+        Assert.Contains("上限 20", log.Text, StringComparison.Ordinal);
+        Assert.Contains("Concurrent mirror limit 20 reached", log.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Mirror_limit_refuses_the_new_address_and_keeps_the_first()
     {
         var lab = new byte[16];

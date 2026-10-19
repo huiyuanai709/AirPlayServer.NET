@@ -19,7 +19,7 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 - Windows 上用 Media Foundation 把 H.264 解成 BGRA，GDI 窗口显示最新一帧。HEVC 先试 Media Foundation，打不开时用程序旁边的 FFmpeg。Linux 上不创建窗口，也不把 `mfplat` / `user32` 编进 linux-x64 的 AOT 二进制；H.264 / HEVC 在运行时加载 FFmpeg（`libavcodec` / `libavutil`）。没有解码器时可以用 `--demo-frame`。`--h265` 只有在 HEVC 解码器真能打开时才宣告 features 第 42 位。
 - 可选地把最新帧编码成 JPEG，按 TapClock ATBF type 3 推到 `host:42125`，或原子写入监视目录。默认关闭。
 - 镜像数据连上或断开时，可以 POST Webhook，并按 TapClock 的集成接口通知它重连。配置页默认开在 `127.0.0.1:7099`。本程序不点击控制中心。
-- 多台手机可以同时镜像。默认最多 4 路（`--max-mirrors`，1 到 8）。每一路有自己的数据端口、计时端口、解密、解码器、画面、`session_id`，Windows 上还有自己的窗口。新手机不会断开已经连上的那一路。同一 IPv4 再次 `SETUP` 仍是原来那一路（锁屏后重连）。进程内 FairPlay 每路一次握手。`--media-key-plugin` 的原生库在各路之间共用。
+- 多台手机可以同时镜像。默认最多 4 路（`--max-mirrors`，任意正整数，没有硬上限；内存和 CPU 才是限制）。每一路有自己的数据端口、计时端口、解密、解码器、画面、`session_id`，Windows 上还有自己的窗口。新手机不会断开已经连上的那一路。同一 IPv4 再次 `SETUP` 仍是原来那一路（锁屏后重连）。进程内 FairPlay 每路一次握手。`--media-key-plugin` 的原生库在各路之间共用。
 
 ## 多设备镜像
 
@@ -31,7 +31,7 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 
 `GET /api/status` 的顶层字段仍是第一路的快照。多路时多一个 `sessions` 数组，每项仍是 `connected`、`since`、`name`、`session_id`、`disconnect_pending`。每一路各自 POST `POST {base}/api/integrations/airplay/events`，`session_id` 不同。断连防抖按路计算。
 
-Several phones can mirror at once (default 4, `--max-mirrors`). Each IPv4 gets its own data port, decoder, frame slot, `session_id`, and Windows window. The same address reconnects that session instead of opening another. JPEG files are `mirror-<data-peer-ip>.jpg`. ATBF stays a type-3 flags-0 JPEG; the log records the data peer because the header has no source field.
+Several phones can mirror at once (default 4, `--max-mirrors`, any positive count). Memory and CPU are the limit. Each IPv4 gets its own data port, decoder, frame slot, `session_id`, and Windows window. The same address reconnects that session instead of opening another. JPEG files are `mirror-<data-peer-ip>.jpg`. ATBF stays a type-3 flags-0 JPEG; the log records the data peer because the header has no source field.
 
 ## 镜像连接通知
 

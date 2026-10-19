@@ -18,8 +18,6 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 {
     public const int DefaultMaxMirrors = 4;
 
-    public const int MaxMirrorLimit = 8;
-
     private readonly object _gate = new();
     private readonly List<MirrorPipe> _pipes = [];
     private readonly MirrorPipe _primary;
@@ -103,9 +101,9 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(frames);
         ArgumentNullException.ThrowIfNull(decoder);
         ArgumentNullException.ThrowIfNull(log);
-        if (maxMirrors is < 1 or > MaxMirrorLimit)
+        if (maxMirrors < 1)
         {
-            throw new ArgumentOutOfRangeException(nameof(maxMirrors), "Max mirrors must be from 1 to " + MaxMirrorLimit + ".");
+            throw new ArgumentOutOfRangeException(nameof(maxMirrors), "Max mirrors must be a positive integer.");
         }
 
         var keys = unwrapper ?? new UnavailableMediaKeyUnwrapper();

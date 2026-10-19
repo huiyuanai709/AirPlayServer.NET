@@ -84,7 +84,8 @@ internal sealed class HostArgs
                          Linux 上 H.264 和 HEVC 都只走 FFmpeg。库怎么放见 packaging/RUN.txt。
                          --model 仍只决定 UIKit 点击点，不决定广告分辨率。
         --tapclock       把最新解码帧按 ATBF type 3 JPEG 推到 host:42125。不发送 H.264。
-        --max-mirrors    同时镜像的手机数量，默认 4，范围 1 到 8。
+        --max-mirrors    同时镜像的手机数量，默认 4。必须是正整数，没有硬上限。
+                         内存和 CPU 不够时会先撑不住。
                          每一路有自己的数据端口、解密、解码、画面和 session_id。
                          新手机不会踢掉已经连上的那一路。同一 IPv4 再次 SETUP 仍算同一路（锁屏重连）。
                          Windows 上每一路一个窗口，标题是设备名。

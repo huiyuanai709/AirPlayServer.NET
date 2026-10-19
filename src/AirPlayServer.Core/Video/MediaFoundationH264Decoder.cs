@@ -6,8 +6,12 @@ namespace AirPlayServer.Core.Video;
 /// <summary>
 /// Windows H.264 decoder. Synchronous hardware Media Foundation transforms are
 /// preferred when they still expose a lockable NV12, RGB32, or ARGB32 buffer.
-/// Otherwise the Microsoft software decoder (CLSID_CMSH264DecoderMFT) is used.
-/// That decoder's documented outputs are NV12, YUY2, and planar 4:2:0, not RGB.
+/// A hardware transform that accepts input and then stops producing pictures is
+/// released once and replaced by the Microsoft software decoder
+/// (CLSID_CMSH264DecoderMFT). Draining the hardware transform to force the
+/// first picture is not used: that flush drops reference frames and the DXGI
+/// worker threads keep spinning while the window stays on the last picture.
+/// The software decoder's documented outputs are NV12, YUY2, and planar 4:2:0, not RGB.
 /// RGB32/ARGB32 are taken when a transform lists them, and the output type is
 /// stamped with the resolved matrix and range so Media Foundation converts.
 /// NV12 is converted here: SPS VUI, then the media-type attributes, then
@@ -48,6 +52,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
     private static readonly Guid CleanPoint = Guid.Parse("9cdf01d8-a0f0-43ba-b077-eaa06cbd728a");
     private static readonly Guid TransformAsync = Guid.Parse("f81a699a-649a-497d-8c73-29f8fed6ad7a");
     private static readonly Guid LowLatency = Guid.Parse("9c27891a-ed7a-40e1-88e8-b22727a024ee");
+    private static readonly Guid D3DAware = Guid.Parse("eaa35c29-775e-488e-9b61-b3283e49583b");
     private static readonly Guid VideoDecoderCategory = Guid.Parse("d6c02d4b-6833-45b4-971a-05a4b04bab91");
     private static readonly Guid SoftwareDecoder = Guid.Parse("62ce7e72-4c71-4d20-b15d-452831a87d9d");
     private static readonly Guid TransformInterface = Guid.Parse("bf94c121-5b05-4e6f-8000-ba598961414d");
@@ -80,6 +85,10 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
     private long _sampleTime;
     private int _probed;
     private int _disposed;
+    private int _pictures;
+    private int _consecutiveMisses;
+    private byte[]? _lastKeyframe;
+    private const int MaxKeyframeBytes = 4 * 1024 * 1024;
 
     public MediaFoundationH264Decoder(IAirPlayLog? log)
     {
@@ -159,6 +168,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
 
             _sps = sequenceParameterSet.ToArray();
             _pps = pictureParameterSet.ToArray();
+            _lastKeyframe = null;
             _visibleWidth = 0;
             _visibleHeight = 0;
             _spsCodedWidth = 0;
@@ -221,6 +231,11 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
 
             try
             {
+                if (keyFrame && annexB.Length <= MaxKeyframeBytes)
+                {
+                    _lastKeyframe = annexB.ToArray();
+                }
+
                 return DecodeLocked(annexB, keyFrame, out frame, allowHardwareFallback: true);
             }
             catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
@@ -246,7 +261,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
         }
     }
 
-    private bool DecodeLocked(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame, bool allowHardwareFallback)
+    private bool DecodeLocked(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame, bool allowHardwareFallback, bool allowDrain = true)
     {
         frame = default;
         if (!EnsureTransform() || !_typesReady && !ApplyTypes())
@@ -270,7 +285,22 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
 
             if (hr < 0)
             {
-                return frame.Width != 0;
+                if (frame.Width != 0)
+                {
+                    NotePicture();
+                    return true;
+                }
+
+                if (_hardware && allowHardwareFallback)
+                {
+                    return AbandonHardware(
+                        annexB,
+                        keyFrame,
+                        "硬件 H.264 拒绝了输入（0x" + hr.ToString("X8") + "），已释放该变换并改用软件解码器，避免驱动线程空转。Hardware H.264 rejected input (0x" + hr.ToString("X8") + "). Released it and switched to the software decoder.",
+                        out frame);
+                }
+
+                return false;
             }
         }
         finally
@@ -279,24 +309,80 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
         }
 
         var produced = Pull(ref frame);
-        if (produced != PullResult.Unsupported && frame.Width == 0 && keyFrame)
+        if (allowDrain && produced != PullResult.Unsupported && frame.Width == 0 && keyFrame && _pictures == 0 && !_hardware)
         {
-            // A single IDR can sit inside the transform until it is told the stream paused.
+            // A single IDR can sit inside the software transform until it is told
+            // the stream paused. Hardware transforms are not drained: the flush
+            // drops reference pictures and later access units never paint.
             Slots.ProcessMessage(_transform, MessageDrain, 0);
             produced = Pull(ref frame);
             Slots.ProcessMessage(_transform, MessageStartOfStream, 0);
         }
+
         if (produced == PullResult.Unsupported && _hardware && allowHardwareFallback)
         {
-            _log.Log(AirPlayLogLevel.Warning, "Hardware Media Foundation output could not be locked. Falling back to the software H.264 decoder.");
-            ReleaseTransform();
-            _rejectHardware = true;
-            _hardware = false;
-            _typesReady = false;
-            return DecodeLocked(annexB, keyFrame, out frame, allowHardwareFallback: false);
+            return AbandonHardware(
+                annexB,
+                keyFrame,
+                "硬件 H.264 的输出缓冲无法锁定，已改用软件解码器。Hardware H.264 output could not be locked. Switched to the software decoder.",
+                out frame);
         }
 
-        return frame.Width != 0;
+        if (frame.Width != 0)
+        {
+            NotePicture();
+            return true;
+        }
+
+        if (_hardware && allowHardwareFallback)
+        {
+            _consecutiveMisses++;
+            if (HardwareDecodeStall.ShouldAbandon(_pictures, _consecutiveMisses))
+            {
+                return AbandonHardware(
+                    annexB,
+                    keyFrame,
+                    "硬件 H.264 连续没有画面（已出画 " + _pictures + "，连续空帧 " + _consecutiveMisses + "），已释放硬件变换并改用软件解码器，避免驱动线程空转。Hardware H.264 produced no picture (pictures=" + _pictures + ", consecutive misses=" + _consecutiveMisses + "). Released the hardware transform and switched to the software decoder.",
+                    out frame);
+            }
+        }
+
+        return false;
+    }
+
+    private bool AbandonHardware(ReadOnlySpan<byte> annexB, bool keyFrame, string reason, out DecodedFrame frame)
+    {
+        frame = default;
+        var replay = _lastKeyframe;
+        var replayDifferent = replay is not null && (replay.Length != annexB.Length || !annexB.SequenceEqual(replay));
+        _rejectHardware = true;
+        ReleaseTransform();
+        _log.Log(AirPlayLogLevel.Warning, reason);
+        DecodedFrame latest = default;
+        if (replayDifferent && replay is not null)
+        {
+            // Keep the IDR in the new decoder. Draining between the two units
+            // would flush the reference the following slice still needs.
+            if (DecodeLocked(replay, true, out var keyed, allowHardwareFallback: false, allowDrain: false) && keyed.Width != 0)
+            {
+                latest = keyed;
+            }
+        }
+
+        var drainSingleKeyframe = !replayDifferent;
+        if (DecodeLocked(annexB, keyFrame, out var current, allowHardwareFallback: false, allowDrain: drainSingleKeyframe) && current.Width != 0)
+        {
+            latest = current;
+        }
+
+        frame = latest;
+        return latest.Width != 0;
+    }
+
+    private void NotePicture()
+    {
+        _pictures++;
+        _consecutiveMisses = 0;
     }
 
     private PullResult Pull(ref DecodedFrame frame)
@@ -706,6 +792,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
                 }
 
                 IgnoreLowLatency(created);
+                PreferSystemMemory(created);
                 chosen = created;
             }
         }
@@ -754,6 +841,25 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
         try
         {
             Slots.SetUInt32(attributes, LowLatency, 1);
+        }
+        finally
+        {
+            Slots.Release(attributes);
+        }
+    }
+
+    private static void PreferSystemMemory(nint transform)
+    {
+        // MF_SA_D3D_AWARE = 0 asks for a lockable system-memory buffer. A DXGI
+        // surface path is what stops returning pictures after the first frame.
+        if (Slots.GetAttributes(transform, out var attributes) < 0 || attributes == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            Slots.SetUInt32(attributes, D3DAware, 0);
         }
         finally
         {
@@ -1081,6 +1187,8 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
 
         _typesReady = false;
         _hardware = false;
+        _pictures = 0;
+        _consecutiveMisses = 0;
     }
 
     private enum PullResult

@@ -86,10 +86,7 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
             return false;
         }
 
-        library.TrySetInt(context, "threads", 1);
-        library.TrySet(context, "thread_type", "slice");
-        library.TrySet(context, "flags", "+low_delay");
-        var opened = library.Open(context, codec);
+        var opened = library.OpenCapped(context, codec);
         if (opened < 0)
         {
             log?.Log(
@@ -97,6 +94,20 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
                 "avcodec_open2 failed for " + name + " (" + library.DescribeError(opened) + ").");
             library.FreeContext(&context);
             return false;
+        }
+
+        if (library.TryReadThreads(context, out var threads))
+        {
+            log?.Log(
+                AirPlayLogLevel.Information,
+                name + " 解码线程 " + threads.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + "。Decode threads: " + threads.ToString(System.Globalization.CultureInfo.InvariantCulture) + ".");
+            if (threads != 1)
+            {
+                log?.Log(
+                    AirPlayLogLevel.Warning,
+                    name + " 没能把解码线程限制为 1，高分辨率镜像可能占满 CPU。Could not keep decode threads at 1; a large mirror may use every core.");
+            }
         }
 
         var frame = library.FrameAlloc();
@@ -277,6 +288,23 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
     {
         frame = default;
         if (!_library.TryReadPicture(picture, out var width, out var height, out var format, out var y, out var u, out var v, out var yStride, out var uStride, out var vStride))
+        {
+            return false;
+        }
+
+        // av_frame_apply_cropping can leave a one-pixel edge. The planar copy
+        // requires even 4:2:0 dimensions; dropping the frame paints nothing.
+        if ((width & 1) != 0)
+        {
+            width--;
+        }
+
+        if ((height & 1) != 0)
+        {
+            height--;
+        }
+
+        if (width < 2 || height < 2)
         {
             return false;
         }

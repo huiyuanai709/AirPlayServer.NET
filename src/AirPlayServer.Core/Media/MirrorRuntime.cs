@@ -50,6 +50,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private bool _hasArmedStream;
     private int _pendingBytes;
     private int _loggedDecoder;
+    private int _consecutiveDecodeMisses;
     private int _loggedEmptyCodec;
     private int _loggedHevcUnavailable;
     private int _loggedHold;
@@ -714,7 +715,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 return;
             }
 
-            LogDecodeMissLocked();
+            NoteDecodeMissLocked();
         }
         finally
         {
@@ -880,6 +881,17 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         _heldKeyframe = null;
         if (!PresentAnnexLocked(held, keyFrame: true))
         {
+            NoteDecodeMissLocked();
+        }
+    }
+
+    private void NoteDecodeMissLocked()
+    {
+        // One access unit with no picture is normal hardware latency. Logging
+        // it immediately looks like the stuck-black failure the phone just hit.
+        _consecutiveDecodeMisses++;
+        if (_consecutiveDecodeMisses >= HardwareDecodeStall.MissesWithNoPicture)
+        {
             LogDecodeMissLocked();
         }
     }
@@ -965,6 +977,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private void PublishDecodedLocked(DecodedFrame frame)
     {
         _frames.Publish(frame.Width, frame.Height, frame.Bgra.Span, frame.Stride);
+        _consecutiveDecodeMisses = 0;
         Activity.DecodeFrame();
         if (Interlocked.Exchange(ref _loggedDecoded, 1) == 0)
         {

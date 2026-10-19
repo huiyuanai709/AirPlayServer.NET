@@ -52,6 +52,9 @@ internal sealed unsafe class FFmpegLibrary
     private readonly delegate* unmanaged[Cdecl]<nint, nint, int, int> _packetFromData;
     private readonly delegate* unmanaged[Cdecl]<nint> _versionInfo;
     private readonly delegate* unmanaged[Cdecl]<int, nint, nuint, int> _strerror;
+    private readonly delegate* unmanaged[Cdecl]<nint*, nint, nint, int, int> _dictSet;
+    private readonly delegate* unmanaged[Cdecl]<nint*, void> _dictFree;
+    private readonly delegate* unmanaged[Cdecl]<nint, nint, int, long*, int> _optGetInt;
 
     private FFmpegLibrary(
         string description,
@@ -75,7 +78,10 @@ internal sealed unsafe class FFmpegLibrary
         delegate* unmanaged[Cdecl]<nint*, void> packetFree,
         delegate* unmanaged[Cdecl]<nint, nint, int, int> packetFromData,
         delegate* unmanaged[Cdecl]<nint> versionInfo,
-        delegate* unmanaged[Cdecl]<int, nint, nuint, int> strerror)
+        delegate* unmanaged[Cdecl]<int, nint, nuint, int> strerror,
+        delegate* unmanaged[Cdecl]<nint*, nint, nint, int, int> dictSet,
+        delegate* unmanaged[Cdecl]<nint*, void> dictFree,
+        delegate* unmanaged[Cdecl]<nint, nint, int, long*, int> optGetInt)
     {
         Description = description;
         _malloc = malloc;
@@ -99,6 +105,9 @@ internal sealed unsafe class FFmpegLibrary
         _packetFromData = packetFromData;
         _versionInfo = versionInfo;
         _strerror = strerror;
+        _dictSet = dictSet;
+        _dictFree = dictFree;
+        _optGetInt = optGetInt;
     }
 
     internal string Description { get; }
@@ -146,6 +155,65 @@ internal sealed unsafe class FFmpegLibrary
     internal void FreeContext(nint* context) => _freeContext(context);
 
     internal int Open(nint context, nint codec) => _open(context, codec, 0);
+
+    /// <summary>
+    /// Opens the codec with one decode thread. FFmpeg treats a thread count of 0
+    /// as "one thread per core", which pegs a 1290x2794 HEVC mirror. The count is
+    /// also passed in the <c>avcodec_open2</c> dictionary so a private default
+    /// cannot put it back.
+    /// </summary>
+    internal unsafe int OpenCapped(nint context, nint codec)
+    {
+        TrySetInt(context, "threads", 1);
+        TrySet(context, "thread_type", "slice");
+        TrySet(context, "flags", "+low_delay");
+        if (_dictSet == null)
+        {
+            return _open(context, codec, 0);
+        }
+
+        var key = Utf8("threads");
+        var value = Utf8("1");
+        nint dict = 0;
+        fixed (byte* keyPointer = key)
+        fixed (byte* valuePointer = value)
+        {
+            if (_dictSet(&dict, (nint)keyPointer, (nint)valuePointer, 0) < 0)
+            {
+                dict = 0;
+            }
+
+            var opened = _open(context, codec, (nint)(&dict));
+            if (_dictFree != null)
+            {
+                _dictFree(&dict);
+            }
+
+            return opened;
+        }
+    }
+
+    internal unsafe bool TryReadThreads(nint context, out long threads)
+    {
+        threads = 0;
+        if (_optGetInt == null)
+        {
+            return false;
+        }
+
+        var name = Utf8("threads");
+        fixed (byte* text = name)
+        {
+            long value;
+            if (_optGetInt(context, (nint)text, 0, &value) < 0)
+            {
+                return false;
+            }
+
+            threads = value;
+            return true;
+        }
+    }
 
     internal int SendPacket(nint context, nint packet) => _sendPacket(context, packet);
 
@@ -280,6 +348,9 @@ internal sealed unsafe class FFmpegLibrary
 
         TryExport(avutil, "av_version_info", out var versionInfo);
         TryExport(avutil, "av_strerror", out var strerror);
+        TryExport(avutil, "av_dict_set", out var dictSet);
+        TryExport(avutil, "av_dict_free", out var dictFree);
+        TryExport(avutil, "av_opt_get_int", out var optGetInt);
         TryExport(avutil, "av_log_set_level", out var setLevel);
         if (setLevel != 0)
         {
@@ -309,7 +380,10 @@ internal sealed unsafe class FFmpegLibrary
             (delegate* unmanaged[Cdecl]<nint*, void>)packetFree,
             (delegate* unmanaged[Cdecl]<nint, nint, int, int>)packetFromData,
             (delegate* unmanaged[Cdecl]<nint>)versionInfo,
-            (delegate* unmanaged[Cdecl]<int, nint, nuint, int>)strerror);
+            (delegate* unmanaged[Cdecl]<int, nint, nuint, int>)strerror,
+            (delegate* unmanaged[Cdecl]<nint*, nint, nint, int, int>)dictSet,
+            (delegate* unmanaged[Cdecl]<nint*, void>)dictFree,
+            (delegate* unmanaged[Cdecl]<nint, nint, int, long*, int>)optGetInt);
         if (!bound.ProbeFrameLayout())
         {
             return false;

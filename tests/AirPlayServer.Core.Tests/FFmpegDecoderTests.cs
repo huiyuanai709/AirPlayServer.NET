@@ -98,6 +98,22 @@ public sealed class FFmpegDecoderTests
     }
 
     [Fact]
+    public void Probe_order_tries_ffmpeg_9_sonames_before_older_majors()
+    {
+        Assert.Equal(
+            [(63, 61, 7), (62, 60, 6), (61, 59, 5), (60, 58, 4), (59, 57, 4), (58, 56, 3)],
+            FFmpegLibrary.SonameTriples);
+
+        var newest = FFmpegLibrary.SonameTriples[0];
+        Assert.Equal("avcodec-63.dll", FFmpegLibrary.LibraryFileName("avcodec", newest.Avcodec, windows: true));
+        Assert.Equal("avutil-61.dll", FFmpegLibrary.LibraryFileName("avutil", newest.Avutil, windows: true));
+        Assert.Equal("swresample-7.dll", FFmpegLibrary.LibraryFileName("swresample", newest.Swresample, windows: true));
+        Assert.Equal("libavcodec.so.63", FFmpegLibrary.LibraryFileName("avcodec", newest.Avcodec, windows: false));
+        Assert.Equal("libavutil.so.61", FFmpegLibrary.LibraryFileName("avutil", newest.Avutil, windows: false));
+        Assert.Equal("libswresample.so.7", FFmpegLibrary.LibraryFileName("swresample", newest.Swresample, windows: false));
+    }
+
+    [Fact]
     public void Ffmpeg_decodes_annex_b_fixtures_when_the_libraries_are_present()
     {
         var library = FFmpegLibrary.TryLoad(NullAirPlayLog.Instance);

@@ -249,11 +249,11 @@ Windows 上的顺序：
 | Windows | Media Foundation。打不开才试 FFmpeg。 | 先 Media Foundation（同步硬件 MFT，否则 `CLSID_CMSH265DecoderMFT`）。打不开再试 FFmpeg。 |
 | Linux | FFmpeg。 | FFmpeg。 |
 
-认这些共享库主版本：FFmpeg 4.4 到 8（libavcodec 58–62，libavutil 56–60）。软件解码输出 NV12、NV21 或 YUV420P（含 10-bit LE）时，进程内转成 BGRA。SPS 里的矩阵和范围优先；都没写时按 AirPlay 的 BT.709 全范围。自更新只替换发布包里的文件，不会删掉你另外拷进去的这些库。
+认这些共享库主版本：FFmpeg 4.4 到 9（libavcodec 58–63，libavutil 56–61，libswresample 3–7）。BtbN 的 n7、n8，以及当前带 avcodec-63 的构建（n9.0 或 master）都在这个范围内。软件解码输出 NV12、NV21 或 YUV420P（含 10-bit LE）时，进程内转成 BGRA。SPS 里的矩阵和范围优先；都没写时按 AirPlay 的 BT.709 全范围。自更新只替换发布包里的文件，不会删掉你另外拷进去的这些库。
 
 ### Windows（没有商店 HEVC 扩展）
 
-从 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds/releases) 下载 `win64-lgpl-shared`（`win64-gpl-shared` 也可以，宿主本身是 GPL-3.0-only）。不要用 `*-static`。把 zip 里 `bin` 目录下的 DLL 全部拷到 `AirPlayServer.Host.exe` 旁边。至少要有同一版本的 `avcodec-*.dll`、`avutil-*.dll` 和 `swresample-*.dll`。
+从 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds/releases) 下载 `win64-lgpl-shared`（`win64-gpl-shared` 也可以，宿主本身是 GPL-3.0-only）。不要用 `*-static`。n7、n8，以及当前带 `avcodec-63.dll` 的构建（`n9.0` 或 `master`）都可以。把 zip 里 `bin` 目录下的 DLL 全部拷到 `AirPlayServer.Host.exe` 旁边。至少要有同一版本的 `avcodec-*.dll`、`avutil-*.dll` 和 `swresample-*.dll`。当前这组是 `avcodec-63.dll`、`avutil-61.dll`、`swresample-7.dll`。
 
 ```powershell
 .\AirPlayServer.Host.exe --h265 --screen 1290x2796 --model iphone-15-pro-max
@@ -268,7 +268,7 @@ sudo apt-get install ffmpeg
 ./AirPlayServer.Host --h265 --screen 1290x2796 --no-window
 ```
 
-也可以把 `libavcodec.so.N`、`libavutil.so.N`、`libswresample.so.N` 放在二进制旁边。`ffmpeg` 包带上的 SONAME 会被系统加载器找到。
+也可以把 `libavcodec.so.N`、`libavutil.so.N`、`libswresample.so.N` 放在二进制旁边。`ffmpeg` 包带上的 SONAME 会被系统加载器找到。当前主版本是 `libavcodec.so.63`、`libavutil.so.61`、`libswresample.so.7`。
 
 分发这些 DLL / SO 时要遵守该构建的许可证。LGPL-2.1-or-later 的构建必须允许替换库；带 GPL 组件的构建按 GPL 分发。本仓库不附带 FFmpeg 源码或二进制。见 [NOTICE.md](NOTICE.md)。
 

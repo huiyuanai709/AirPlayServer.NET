@@ -5,10 +5,14 @@ namespace AirPlayServer.Core.Video;
 
 /// <summary>
 /// Windows H.264 decoder. Synchronous hardware Media Foundation transforms are
-/// preferred when they still expose a lockable NV12 or RGB32 buffer. Otherwise
-/// the Microsoft software decoder (CLSID_CMSH264DecoderMFT) is used. Output is
-/// BGRA for the existing window and TapClock path. This file is compiled only
-/// into a Windows host; it does not reference FFmpeg.
+/// preferred when they still expose a lockable NV12, RGB32, or ARGB32 buffer.
+/// Otherwise the Microsoft software decoder (CLSID_CMSH264DecoderMFT) is used.
+/// That decoder's documented outputs are NV12, YUY2, and planar 4:2:0, not RGB.
+/// RGB32/ARGB32 are taken when a transform lists them, and the output type is
+/// stamped with the resolved matrix and range so Media Foundation converts.
+/// NV12 is converted here: SPS VUI, then the media-type attributes, then
+/// full-range BT.709. Output is BGRA for the window and TapClock path. This
+/// file is compiled only into a Windows host; it does not reference FFmpeg.
 /// </summary>
 internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposable
 {
@@ -30,6 +34,9 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
     private static readonly Guid H264 = Guid.Parse("34363248-0000-0010-8000-00aa00389b71");
     private static readonly Guid Nv12 = Guid.Parse("3231564e-0000-0010-8000-00aa00389b71");
     private static readonly Guid Rgb32 = Guid.Parse("00000016-0000-0010-8000-00aa00389b71");
+    private static readonly Guid Argb32 = Guid.Parse("00000015-0000-0010-8000-00aa00389b71");
+    private static readonly Guid YuvMatrixAttribute = Guid.Parse("3e23d450-2c75-4d25-a00e-b91670d12327");
+    private static readonly Guid NominalRangeAttribute = Guid.Parse("c21b8ee5-b956-4071-8daf-325edf5cab11");
     private static readonly Guid MajorType = Guid.Parse("48eba18e-f8c9-4687-bf11-0a74c9f96a8f");
     private static readonly Guid Subtype = Guid.Parse("f7e34c9a-42e8-4714-b74b-cb29d72c35e5");
     private static readonly Guid FrameSize = Guid.Parse("1652c33d-d6b2-4012-b834-72030849a37d");
@@ -68,6 +75,8 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
     private int _spsCodedHeight;
     private int _stride;
     private bool _bottomUp;
+    private H264ColorSignals _spsColor;
+    private YuvColorSpace _color = YuvColorSpace.AirPlayMirror;
     private long _sampleTime;
     private int _probed;
     private int _disposed;
@@ -154,12 +163,14 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
             _visibleHeight = 0;
             _spsCodedWidth = 0;
             _spsCodedHeight = 0;
-            if (H264Sequence.TryGetPictureSize(_sps, out var width, out var height, out var codedWidth, out var codedHeight))
+            _spsColor = default;
+            if (H264Sequence.TryGetPictureSize(_sps, out var width, out var height, out var codedWidth, out var codedHeight, out var color))
             {
                 _visibleWidth = width;
                 _visibleHeight = height;
                 _spsCodedWidth = codedWidth;
                 _spsCodedHeight = codedHeight;
+                _spsColor = color;
             }
 
             if (_transform != 0)
@@ -496,7 +507,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
         else
         {
             var stride = _stride == 0 ? InferNv12Stride(pixels.Length, codedWidth, codedHeight) : _stride;
-            if (!CopyNv12(pixels, codedWidth, codedHeight, stride, visibleWidth, visibleHeight, tight))
+            if (!Nv12Color.TryCopy(pixels, codedWidth, codedHeight, stride, visibleWidth, visibleHeight, _color, tight))
             {
                 return false;
             }
@@ -538,40 +549,6 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
         return true;
     }
 
-    private static bool CopyNv12(ReadOnlySpan<byte> source, int codedWidth, int codedHeight, int stride, int width, int height, byte[] destination)
-    {
-        if (stride < codedWidth || (codedHeight & 1) != 0 || (codedWidth & 1) != 0)
-        {
-            return false;
-        }
-
-        var chroma = stride * codedHeight;
-        var needed = chroma + stride * (codedHeight / 2);
-        if (source.Length < needed)
-        {
-            return false;
-        }
-
-        var to = 0;
-        for (var y = 0; y < height; y++)
-        {
-            var yRow = y * stride;
-            var uvRow = chroma + (y / 2) * stride;
-            for (var x = 0; x < width; x++)
-            {
-                var c = source[yRow + x] - 16;
-                var d = source[uvRow + (x & ~1)] - 128;
-                var e = source[uvRow + (x & ~1) + 1] - 128;
-                destination[to++] = Clamp((298 * c + 516 * d + 128) >> 8);
-                destination[to++] = Clamp((298 * c - 100 * d - 208 * e + 128) >> 8);
-                destination[to++] = Clamp((298 * c + 409 * e + 128) >> 8);
-                destination[to++] = 255;
-            }
-        }
-
-        return true;
-    }
-
     private static int InferNv12Stride(int bufferLength, int codedWidth, int codedHeight)
     {
         if (codedWidth <= 0 || codedHeight <= 0)
@@ -593,8 +570,6 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
 
         return stride >= codedWidth ? stride : codedWidth;
     }
-
-    private static byte Clamp(int value) => (byte)Math.Clamp(value, 0, 255);
 
     private bool CreateInputSample(ReadOnlySpan<byte> annexB, bool keyFrame, out nint sample)
     {
@@ -875,7 +850,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
                 continue;
             }
 
-            var rgb = subtype == Rgb32;
+            var rgb = subtype == Rgb32 || subtype == Argb32;
             var nv12 = subtype == Nv12;
             if (!rgb && !nv12)
             {
@@ -927,7 +902,25 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
             Slots.SetUInt64(chosen, FrameRate, ((ulong)30 << 32) | 1);
             Slots.SetUInt64(chosen, PixelAspect, ((ulong)1 << 32) | 1);
             Slots.SetUInt32(chosen, InterlaceMode, 2);
+            ReadColorAttributes(chosen, out var mfMatrix, out var mfRange);
+            var color = YuvColorSpace.Resolve(_spsColor, mfMatrix, mfRange);
+            var stamped = false;
+            if (chosenRgb)
+            {
+                // The transform does the YUV conversion. Stamp the matrix and range
+                // it should use. A type that rejects the attributes is retried bare.
+                StampColorAttributes(chosen, color);
+                stamped = true;
+            }
+
             var hr = Slots.SetOutputType(_transform, chosen);
+            if (hr < 0 && stamped)
+            {
+                Slots.DeleteItem(chosen, YuvMatrixAttribute);
+                Slots.DeleteItem(chosen, NominalRangeAttribute);
+                hr = Slots.SetOutputType(_transform, chosen);
+            }
+
             if (hr < 0)
             {
                 _log.Log(AirPlayLogLevel.Warning, "Media Foundation SetOutputType failed: 0x" + hr.ToString("X8") + ".");
@@ -939,10 +932,15 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
             _codedHeight = height;
             _stride = 0;
             _bottomUp = false;
+            _color = color;
             if (Slots.GetOutputCurrentType(_transform, out var current) >= 0 && current != 0)
             {
                 ReadOutputFormat(current);
                 Slots.Release(current);
+            }
+            else if (!chosenRgb)
+            {
+                LogNv12Color(mfMatrix, mfRange);
             }
 
             return true;
@@ -957,7 +955,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
     {
         if (Slots.GetGuid(type, Subtype, out var subtype) >= 0)
         {
-            _rgb32 = subtype == Rgb32;
+            _rgb32 = subtype == Rgb32 || subtype == Argb32;
         }
 
         if (Slots.GetUInt64(type, FrameSize, out var size) >= 0 && size != 0)
@@ -972,6 +970,42 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
             _bottomUp = stride < 0;
             _stride = Math.Abs(stride);
         }
+
+        ReadColorAttributes(type, out var mfMatrix, out var mfRange);
+        _color = YuvColorSpace.Resolve(_spsColor, mfMatrix, mfRange);
+        if (!_rgb32)
+        {
+            LogNv12Color(mfMatrix, mfRange);
+        }
+    }
+
+    private void LogNv12Color(int? mediaFoundationMatrix, int? mediaFoundationNominalRange)
+    {
+        _log.Log(
+            AirPlayLogLevel.Information,
+            "NV12 to BGRA is " + YuvColorSpace.DescribeChoice(_color, _spsColor, mediaFoundationMatrix, mediaFoundationNominalRange) + ".");
+    }
+
+    private static void ReadColorAttributes(nint type, out int? matrix, out int? range)
+    {
+        matrix = null;
+        range = null;
+        if (Slots.GetUInt32(type, YuvMatrixAttribute, out var matrixValue) >= 0)
+        {
+            matrix = (int)matrixValue;
+        }
+
+        if (Slots.GetUInt32(type, NominalRangeAttribute, out var rangeValue) >= 0)
+        {
+            range = (int)rangeValue;
+        }
+    }
+
+    private static void StampColorAttributes(nint type, YuvColorSpace color)
+    {
+        Slots.SetUInt32(type, YuvMatrixAttribute, color.Matrix == YuvMatrix.Bt709 ? 1u : 2u);
+        // MFNominalRange_0_255 is 1 (full). MFNominalRange_16_235 is 2 (limited).
+        Slots.SetUInt32(type, NominalRangeAttribute, color.Range == YuvRange.Full ? 1u : 2u);
     }
 
     private bool ProbeSoftwareDecoder()
@@ -1149,6 +1183,13 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
             var hr = fn(self, &local, &read);
             value = read;
             return hr;
+        }
+
+        public static int DeleteItem(nint self, Guid key)
+        {
+            var fn = (delegate* unmanaged[Stdcall]<nint, Guid*, int>)Function(self, 19);
+            var local = key;
+            return fn(self, &local);
         }
 
         public static int SetUInt32(nint self, Guid key, uint value)

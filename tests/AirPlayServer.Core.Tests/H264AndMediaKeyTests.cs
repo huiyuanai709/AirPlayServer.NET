@@ -38,6 +38,60 @@ public sealed class H264AndMediaKeyTests
         Assert.Equal(48, height);
     }
 
+    [Fact]
+    public void Sps_vui_keeps_full_range_and_lets_an_unspecified_matrix_stay_bt709()
+    {
+        // AirPlay spec sample (iPad). ffmpeg trace_headers: 864x656 coded, crop bottom 4,
+        // video_full_range_flag 1, matrix_coefficients 2 (unspecified).
+        byte[] apple =
+        [
+            0x67, 0x64, 0xC0, 0x28, 0xAC, 0x56, 0x20, 0x0D, 0x81, 0x4F, 0xE5, 0x9B, 0x81, 0x01, 0x01, 0x01, 0x01,
+        ];
+        Assert.True(H264Sequence.TryGetPictureSize(apple, out var width, out var height, out var codedWidth, out var codedHeight, out var appleColor));
+        Assert.Equal(864, width);
+        Assert.Equal(648, height);
+        Assert.Equal(864, codedWidth);
+        Assert.Equal(656, codedHeight);
+        Assert.True(appleColor.HasRange);
+        Assert.True(appleColor.FullRange);
+        Assert.True(appleColor.HasMatrix);
+        Assert.Equal(2, appleColor.MatrixCoefficients);
+        Assert.Equal(YuvColorSpace.AirPlayMirror, YuvColorSpace.Resolve(appleColor, 2, 2));
+
+        Assert.True(H264Sequence.TryGetColorSignals(MediaFoundationSps, out var plain));
+        Assert.False(plain.HasMatrix);
+        Assert.False(plain.HasRange);
+        Assert.Equal(YuvColorSpace.AirPlayMirror, YuvColorSpace.Resolve(plain, null, null));
+        Assert.Equal(YuvColorSpace.AirPlayMirror, YuvColorSpace.Resolve(default, 0, 0));
+        Assert.Equal(new YuvColorSpace(YuvMatrix.Bt709, YuvRange.Limited), YuvColorSpace.Resolve(default, 1, 2));
+        Assert.Equal(new YuvColorSpace(YuvMatrix.Bt601, YuvRange.Full), YuvColorSpace.Resolve(default, 2, 1));
+        Assert.Equal(YuvRange.Full, YuvColorSpace.Resolve(default, null, 4).Range);
+
+        var full709 = BaselineSpsWithColor(fullRange: true, matrix: 1, includeMatrix: true, extendedSar: false);
+        Assert.True(H264Sequence.TryGetPictureSize(full709, out width, out height, out _, out _, out var full));
+        Assert.Equal(16, width);
+        Assert.Equal(16, height);
+        Assert.True(full.FullRange);
+        Assert.Equal(1, full.MatrixCoefficients);
+        Assert.Equal(new YuvColorSpace(YuvMatrix.Bt709, YuvRange.Full), YuvColorSpace.Resolve(full, 2, 2));
+
+        var limited601 = BaselineSpsWithColor(fullRange: false, matrix: 6, includeMatrix: true, extendedSar: false);
+        Assert.True(H264Sequence.TryGetColorSignals(limited601, out var limited));
+        Assert.False(limited.FullRange);
+        Assert.Equal(6, limited.MatrixCoefficients);
+        Assert.Equal(new YuvColorSpace(YuvMatrix.Bt601, YuvRange.Limited), YuvColorSpace.Resolve(limited, 1, 1));
+
+        var rangeOnly = BaselineSpsWithColor(fullRange: true, matrix: 0, includeMatrix: false, extendedSar: true);
+        Assert.True(H264Sequence.TryGetColorSignals(rangeOnly, out var range));
+        Assert.True(range.HasRange);
+        Assert.True(range.FullRange);
+        Assert.False(range.HasMatrix);
+        Assert.Equal(new YuvColorSpace(YuvMatrix.Bt601, YuvRange.Full), YuvColorSpace.Resolve(range, 2, null));
+        Assert.Contains("sequence parameter set", YuvColorSpace.DescribeChoice(YuvColorSpace.Resolve(full, null, null), full, 2, 2), StringComparison.Ordinal);
+        Assert.Contains("media type", YuvColorSpace.DescribeChoice(YuvColorSpace.Resolve(default, 2, 1), default, 2, 1), StringComparison.Ordinal);
+        Assert.Contains("AirPlay default", YuvColorSpace.DescribeChoice(YuvColorSpace.AirPlayMirror, default, null, null), StringComparison.Ordinal);
+    }
+
     // 16x16 baseline SPS/PPS. Useful for the parser; the Microsoft H.264 decoder rejects it (minimum 48x48).
     private static readonly byte[] BaselineAccessUnitSps = [0x67, 0x42, 0xC0, 0x0A, 0xDD, 0xEC, 0x04, 0x40, 0x00, 0x00, 0x03, 0x00, 0x40, 0x00, 0x00, 0x0F, 0x03, 0xC4, 0x89, 0xE0];
 
@@ -311,6 +365,48 @@ public sealed class H264AndMediaKeyTests
         writer.WriteBit(1);
         writer.WriteBit(1);
         writer.WriteBit(0);
+        return writer.Finish();
+    }
+
+    private static byte[] BaselineSpsWithColor(bool fullRange, int matrix, bool includeMatrix, bool extendedSar)
+    {
+        var writer = new BitWriter();
+        writer.WriteBits(0x67, 8);
+        writer.WriteBits(66, 8);
+        writer.WriteBits(0, 8);
+        writer.WriteBits(30, 8);
+        writer.WriteUe(0);
+        writer.WriteUe(0);
+        writer.WriteUe(0);
+        writer.WriteUe(0);
+        writer.WriteUe(1);
+        writer.WriteBit(0);
+        writer.WriteUe(0);
+        writer.WriteUe(0);
+        writer.WriteBit(1);
+        writer.WriteBit(1);
+        writer.WriteBit(0);
+        writer.WriteBit(1);
+        writer.WriteBit(extendedSar ? 1 : 0);
+        if (extendedSar)
+        {
+            writer.WriteBits(255, 8);
+            writer.WriteBits(1, 16);
+            writer.WriteBits(1, 16);
+        }
+
+        writer.WriteBit(0);
+        writer.WriteBit(1);
+        writer.WriteBits(5, 3);
+        writer.WriteBit(fullRange ? 1 : 0);
+        writer.WriteBit(includeMatrix ? 1 : 0);
+        if (includeMatrix)
+        {
+            writer.WriteBits(1, 8);
+            writer.WriteBits(1, 8);
+            writer.WriteBits((uint)matrix, 8);
+        }
+
         return writer.Finish();
     }
 

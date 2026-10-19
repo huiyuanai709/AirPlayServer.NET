@@ -6,11 +6,12 @@ namespace AirPlayServer.Core.Video;
 /// Maps a window client point into the mirrored frame, then into TapClock's
 /// absolute screen. The frame is painted into <see cref="FrameDestination"/>:
 /// stretch uses the whole client, letterbox uses the fitted picture and leaves
-/// bars outside it. A point outside that rectangle is not on the picture.
+/// bars outside it. The mirror window letterboxes. A point outside that
+/// rectangle, including the bars, is not on the picture.
 /// A point inside maps with
 /// <c>frame = (client - origin) * frameSize / destinationSize</c> (integer
-/// truncation, the same sample COLORONCOLOR <c>StretchDIBits</c> paints), then
-/// clamps to <c>[0, frameSize)</c>.
+/// truncation), then clamps to <c>[0, frameSize)</c>. GDI may filter the
+/// pixels when the destination size differs; this map stays the integer sample.
 /// Frame pixels then use TapClock <c>ScreenMap.FromImage</c>:
 /// <c>screen = frame * screenSize / frameSize</c>, also integer truncation, with
 /// X and Y scaled on their own axes. A non-positive screen size means

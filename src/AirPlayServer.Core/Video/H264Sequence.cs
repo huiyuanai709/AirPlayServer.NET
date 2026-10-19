@@ -1,6 +1,13 @@
 namespace AirPlayServer.Core.Video;
 
 /// <summary>
+/// Colour description from the SPS VUI. Absent flags stay false so the caller
+/// can fall through to the media type or the AirPlay default. Matrix coefficient
+/// 2 means unspecified, not BT.601.
+/// </summary>
+internal readonly record struct H264ColorSignals(bool HasMatrix, int MatrixCoefficients, bool HasRange, bool FullRange);
+
+/// <summary>
 /// Reads the visible width and height from an H.264 sequence parameter set.
 /// The buffer is one SPS NAL, including its one-byte header. Emulation-prevention
 /// bytes are removed before the exp-Golomb parse. High profile scaling lists are skipped.
@@ -15,11 +22,23 @@ internal static class H264Sequence
     /// decoder must be given; telling it the cropped size shears the planes into a double image.
     /// </summary>
     internal static bool TryGetPictureSize(ReadOnlySpan<byte> sequenceParameterSet, out int visibleWidth, out int visibleHeight, out int codedWidth, out int codedHeight)
+        => TryGetPictureSize(sequenceParameterSet, out visibleWidth, out visibleHeight, out codedWidth, out codedHeight, out _);
+
+    internal static bool TryGetColorSignals(ReadOnlySpan<byte> sequenceParameterSet, out H264ColorSignals signals)
+        => TryGetPictureSize(sequenceParameterSet, out _, out _, out _, out _, out signals);
+
+    /// <summary>
+    /// Visible size is the cropped picture. <paramref name="color"/> is the VUI
+    /// video-signal description when those bits are present, otherwise empty.
+    /// A truncated VUI does not fail the size parse.
+    /// </summary>
+    internal static bool TryGetPictureSize(ReadOnlySpan<byte> sequenceParameterSet, out int visibleWidth, out int visibleHeight, out int codedWidth, out int codedHeight, out H264ColorSignals color)
     {
         visibleWidth = 0;
         visibleHeight = 0;
         codedWidth = 0;
         codedHeight = 0;
+        color = default;
         if (sequenceParameterSet.Length < 4)
         {
             return false;
@@ -198,6 +217,7 @@ internal static class H264Sequence
             return false;
         }
 
+        color = ReadColorSignals(ref reader);
         return true;
     }
 
@@ -251,6 +271,64 @@ internal static class H264Sequence
         destination[1] = 0;
         destination[2] = 0;
         destination[3] = 1;
+    }
+
+    private static H264ColorSignals ReadColorSignals(ref BitReader reader)
+    {
+        if (!reader.TryReadBit(out var vui) || vui == 0)
+        {
+            return default;
+        }
+
+        if (!reader.TryReadBit(out var aspect))
+        {
+            return default;
+        }
+
+        if (aspect == 1)
+        {
+            if (!reader.TryReadBits(8, out var aspectIdc))
+            {
+                return default;
+            }
+
+            if (aspectIdc == 255 && (!reader.TryReadBits(16, out _) || !reader.TryReadBits(16, out _)))
+            {
+                return default;
+            }
+        }
+
+        if (!reader.TryReadBit(out var overscan))
+        {
+            return default;
+        }
+
+        if (overscan == 1 && !reader.TryReadBit(out _))
+        {
+            return default;
+        }
+
+        if (!reader.TryReadBit(out var signal) || signal == 0)
+        {
+            return default;
+        }
+
+        if (!reader.TryReadBits(3, out _) || !reader.TryReadBit(out var fullRange) || !reader.TryReadBit(out var colour))
+        {
+            return default;
+        }
+
+        if (colour == 0)
+        {
+            return new H264ColorSignals(false, 0, true, fullRange == 1);
+        }
+
+        if (!reader.TryReadBits(8, out _) || !reader.TryReadBits(8, out _) || !reader.TryReadBits(8, out var matrix))
+        {
+            return new H264ColorSignals(false, 0, true, fullRange == 1);
+        }
+
+        return new H264ColorSignals(true, (int)matrix, true, fullRange == 1);
     }
 
     private static bool SkipScalingList(ref BitReader reader, int size)

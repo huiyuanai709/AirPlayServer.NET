@@ -20,6 +20,8 @@ internal static partial class WindowsDisplayWindow
     private const uint TmeLeave = 0x00000002;
     private const int GwlpUserData = -21;
     private const uint SrcCopy = 0x00CC0020;
+    private const int ColorOnColor = 3;
+    private const int Halftone = 4;
     private const uint WsOverlappedWindow = 0x00CF0000;
     private const uint WsVisible = 0x10000000;
     private const int ChipLeft = 8;
@@ -217,7 +219,9 @@ internal static partial class WindowsDisplayWindow
                 return;
             }
 
-            var destination = FrameCoordinateMap.Stretch(rect.Right - rect.Left, rect.Bottom - rect.Top);
+            var clientWidth = rect.Right - rect.Left;
+            var clientHeight = rect.Bottom - rect.Top;
+            var destination = FrameCoordinateMap.Letterbox(clientWidth, clientHeight, width, height);
             if (destination.Width <= 0 || destination.Height <= 0)
             {
                 return;
@@ -238,7 +242,20 @@ internal static partial class WindowsDisplayWindow
                     return;
                 }
 
-                SetStretchBltMode(dc, 3);
+                if (destination.X != 0 || destination.Y != 0
+                    || destination.Width != clientWidth || destination.Height != clientHeight)
+                {
+                    ClearClient(dc, clientWidth, clientHeight);
+                }
+
+                var filtering = destination.Width != width || destination.Height != height;
+                SetStretchBltMode(dc, filtering ? Halftone : ColorOnColor);
+                if (filtering)
+                {
+                    // HALFTONE is misaligned unless the brush origin is set.
+                    SetBrushOrgEx(dc, 0, 0, 0);
+                }
+
                 StretchDIBits(
                     dc,
                     destination.X,
@@ -309,7 +326,20 @@ internal static partial class WindowsDisplayWindow
                 return;
             }
 
-            ApplyHover(hwnd, width, height, FrameCoordinateMap.Stretch(rect.Right - rect.Left, rect.Bottom - rect.Top));
+            ApplyHover(hwnd, width, height, FrameCoordinateMap.Letterbox(rect.Right - rect.Left, rect.Bottom - rect.Top, width, height));
+        }
+
+        private static void ClearClient(nint dc, int width, int height)
+        {
+            var client = new Rect { Left = 0, Top = 0, Right = width, Bottom = height };
+            var brush = CreateSolidBrush(0);
+            if (brush == 0)
+            {
+                return;
+            }
+
+            FillRect(dc, ref client, brush);
+            DeleteObject(brush);
         }
 
         private void ApplyHover(nint hwnd, int frameWidth, int frameHeight, FrameCoordinateMap.FrameDestination destination)
@@ -582,6 +612,9 @@ internal static partial class WindowsDisplayWindow
 
     [LibraryImport("gdi32.dll", EntryPoint = "SetStretchBltMode")]
     private static partial int SetStretchBltMode(nint dc, int mode);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "SetBrushOrgEx")]
+    private static partial int SetBrushOrgEx(nint dc, int x, int y, nint previous);
 
     [LibraryImport("gdi32.dll", EntryPoint = "CreateFontW", StringMarshalling = StringMarshalling.Utf16)]
     private static partial nint CreateFontW(

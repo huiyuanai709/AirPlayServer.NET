@@ -12,7 +12,7 @@ namespace AirPlayServer.Core.Notify;
 /// </summary>
 public sealed class SessionEventDispatcher : IDisposable
 {
-    private readonly MirrorSessionTracker _sessions;
+    private readonly IMirrorSessionEvents _sessions;
     private readonly IAirPlayLog _log;
     private readonly HttpClient _http;
     private readonly object _gate = new();
@@ -20,7 +20,7 @@ public sealed class SessionEventDispatcher : IDisposable
     private Task _lastDelivery = Task.CompletedTask;
     private int _stopped;
 
-    public SessionEventDispatcher(MirrorSessionTracker sessions, SessionNotifyConfig config, IAirPlayLog? log = null, HttpMessageHandler? handler = null)
+    public SessionEventDispatcher(IMirrorSessionEvents sessions, SessionNotifyConfig config, IAirPlayLog? log = null, HttpMessageHandler? handler = null)
     {
         ArgumentNullException.ThrowIfNull(sessions);
         ArgumentNullException.ThrowIfNull(config);

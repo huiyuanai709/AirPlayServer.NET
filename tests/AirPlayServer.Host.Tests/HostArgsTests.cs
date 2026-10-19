@@ -144,6 +144,13 @@ public class HostArgsTests
         Assert.Equal(2796, parsed.Options.DisplayHeight);
         Assert.Equal(480, HostArgs.Parse(["--hevc"]).Options.DisplayWidth);
         Assert.Equal(1040, HostArgs.Parse(["--hevc"]).Options.DisplayHeight);
+        Assert.Equal(AirPlayReceiverOptions.DefaultMaxMirrors, HostArgs.Parse([]).Options.MaxMirrors);
+        Assert.Equal(2, HostArgs.Parse(["--max-mirrors", "2"]).Options.MaxMirrors);
+        Assert.Contains("--max-mirrors", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("mirror-192.168.5.20.jpg", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("mirror-unknown.jpg", HostArgs.HelpText, StringComparison.Ordinal);
+        var tooMany = Assert.Throws<ArgumentException>(() => HostArgs.Parse(["--max-mirrors", "9"]).Options.Validate());
+        Assert.Contains("Max mirrors", tooMany.Message, StringComparison.Ordinal);
         Assert.Contains("--h265", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("--hevc", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("1290x2796", HostArgs.HelpText, StringComparison.Ordinal);

@@ -72,7 +72,7 @@ internal sealed class SessionNotifyService : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(receiver);
-        var dispatcher = new SessionEventDispatcher(receiver.Sessions, plan.Config, ConsoleAirPlayLog.Instance);
+        var dispatcher = new SessionEventDispatcher(receiver.SessionEvents, plan.Config, ConsoleAirPlayLog.Instance);
         var service = new SessionNotifyService(plan, dispatcher);
         if (!plan.ServePage)
         {
@@ -88,7 +88,8 @@ internal sealed class SessionNotifyService : IAsyncDisposable
                 receiver.Name,
                 () => service._config,
                 service.Apply,
-                ConsoleAirPlayLog.Instance);
+                ConsoleAirPlayLog.Instance,
+                () => receiver.SessionEvents.Snapshots());
             return service;
         }
         catch

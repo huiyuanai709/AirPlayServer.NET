@@ -134,14 +134,16 @@ await using (notify)
             + arguments.Options.DisplayWidth + "x" + arguments.Options.DisplayHeight + "。");
     }
     Console.WriteLine("镜像数据端口: " + receiver.Mirror.DataPort + "，计时端口: " + receiver.Mirror.TimingPort);
+    Console.WriteLine("同时镜像: 最多 " + arguments.Options.MaxMirrors
+        + " 路。每路独立数据端口、会话和窗口。导出文件为 mirror-<来源IP>.jpg。");
     var windowLine = "显示: 当前进程没有打开窗口。";
     if (arguments.Options.ShowWindow && OperatingSystem.IsWindows())
     {
         windowLine = arguments.Options.TapClockLogicalScreen is { } hoverModel
-            ? "显示: Windows 窗口只画最新一帧。鼠标悬停显示 TapClock 屏幕坐标 "
+            ? "显示: 每一路镜像一个 Windows 窗口，标题是设备名，只画该路最新一帧。鼠标悬停显示 TapClock 屏幕坐标 "
                 + AppleScreens.FormatPoints(hoverModel)
                 + "。窗口里的点击不会发给手机。"
-            : "显示: Windows 窗口只画最新一帧。未指定 --model，鼠标悬停显示解码帧像素。窗口里的点击不会发给手机。";
+            : "显示: 每一路镜像一个 Windows 窗口，标题是设备名，只画该路最新一帧。未指定 --model，鼠标悬停显示解码帧像素。窗口里的点击不会发给手机。";
     }
 
     Console.WriteLine(windowLine);
@@ -159,11 +161,11 @@ await using (notify)
 
     if (!string.IsNullOrWhiteSpace(arguments.Options.MediaKeyPluginPath))
     {
-        Console.WriteLine("FairPlay：--media-key-plugin 已接上。解包和 /fp-setup 走这个原生库；没有对应导出时那一项失败关闭。");
+        Console.WriteLine("FairPlay：--media-key-plugin 已接上。各路镜像共用这个原生库的握手；没有对应导出时那一项失败关闭。");
     }
     else
     {
-        Console.WriteLine("FairPlay：进程内 AirPlayFairPlay 已启用。/fp-setup 和 72 字节 ekey 共用同一次握手。");
+        Console.WriteLine("FairPlay：进程内 AirPlayFairPlay 已启用。每一路镜像有自己的 /fp-setup 握手，不和另一台手机共用。");
     }
 
     if (arguments.Options.LabContentKey is not null)

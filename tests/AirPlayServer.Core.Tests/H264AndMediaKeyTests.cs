@@ -208,9 +208,10 @@ public sealed class H264AndMediaKeyTests
         Assert.Equal(0x22, pixels[2]);
         Assert.Equal(255, pixels[3]);
         Assert.Equal(new byte[] { 0, 0, 0, 1, 0x65 }, decoder.LastAnnexB);
-        var jpeg = await File.ReadAllBytesAsync(Path.Combine(directory, "mirror.jpg"));
+        var jpeg = await File.ReadAllBytesAsync(Path.Combine(directory, "mirror-unknown.jpg"));
         Assert.Equal(new byte[] { 0xFF, 0xD8 }, jpeg[..2]);
-        Assert.False(File.Exists(Path.Combine(directory, "mirror.jpg.part")));
+        Assert.False(File.Exists(Path.Combine(directory, "mirror.jpg")));
+        Assert.False(File.Exists(Path.Combine(directory, "mirror-unknown.jpg.part")));
         Directory.Delete(directory, recursive: true);
     }
 

@@ -27,6 +27,11 @@ AirPlayServer.NET Native AOT 宿主
   可选请求头 X-TapClock-Token。状态可查 GET /api/status。
   --no-notify 关闭页面。--tapclock-events 直接打开事件。配置在 session-notify.json。
 
+多台手机可以同时镜像。默认最多 4 路，用 --max-mirrors 调整（1 到 8）。
+每一路单独窗口、单独 session_id。新手机不会踢掉已经连上的那一路。
+--tapclock-dir 按镜像数据对端 IP 写文件，例如 mirror-192.168.5.20.jpg。
+还没有对端时写 mirror-unknown.jpg。ATBF 头仍然不含来源地址，日志会写 IP。
+
 --screen 是 /info 里的广告分辨率，宿主默认 480x1040。
 --model 是 TapClock 点击对齐的竖屏 UIKit 逻辑点（iphone-15-pro 为 393x852），不改广告。
 --list-models 打印全部 slug。两个参数可以只写其中一个。

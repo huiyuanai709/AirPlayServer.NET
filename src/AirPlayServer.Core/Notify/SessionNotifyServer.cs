@@ -13,6 +13,7 @@ public sealed class SessionNotifyServer : IAsyncDisposable
     private readonly CancellationTokenSource _cancellation = new();
     private readonly Task _loop;
     private readonly MirrorSessionTracker _sessions;
+    private readonly Func<IReadOnlyList<MirrorSessionSnapshot>>? _listSessions;
     private readonly string _receiverName;
     private readonly Func<SessionNotifyConfig> _current;
     private readonly Func<SessionNotifyConfig, SessionNotifyConfig> _apply;
@@ -22,6 +23,7 @@ public sealed class SessionNotifyServer : IAsyncDisposable
     private SessionNotifyServer(
         Socket listen,
         MirrorSessionTracker sessions,
+        Func<IReadOnlyList<MirrorSessionSnapshot>>? listSessions,
         string receiverName,
         Func<SessionNotifyConfig> current,
         Func<SessionNotifyConfig, SessionNotifyConfig> apply,
@@ -29,6 +31,7 @@ public sealed class SessionNotifyServer : IAsyncDisposable
     {
         _listen = listen;
         _sessions = sessions;
+        _listSessions = listSessions;
         _receiverName = receiverName;
         _current = current;
         _apply = apply;
@@ -45,7 +48,8 @@ public sealed class SessionNotifyServer : IAsyncDisposable
         string receiverName,
         Func<SessionNotifyConfig> current,
         Func<SessionNotifyConfig, SessionNotifyConfig> apply,
-        IAirPlayLog? log = null)
+        IAirPlayLog? log = null,
+        Func<IReadOnlyList<MirrorSessionSnapshot>>? listSessions = null)
     {
         ArgumentNullException.ThrowIfNull(address);
         ArgumentNullException.ThrowIfNull(sessions);
@@ -66,7 +70,7 @@ public sealed class SessionNotifyServer : IAsyncDisposable
         {
             socket.Bind(new IPEndPoint(address, port));
             socket.Listen(8);
-            return new SessionNotifyServer(socket, sessions, receiverName ?? "", current, apply, log ?? NullAirPlayLog.Instance);
+            return new SessionNotifyServer(socket, sessions, listSessions, receiverName ?? "", current, apply, log ?? NullAirPlayLog.Instance);
         }
         catch
         {
@@ -143,16 +147,19 @@ public sealed class SessionNotifyServer : IAsyncDisposable
 
         if (request.Method == "GET" && request.Path == "/api/status")
         {
-            var snapshot = _sessions.GetSnapshot();
-            var name = string.IsNullOrWhiteSpace(snapshot.DeviceName) ? _receiverName : snapshot.DeviceName;
-            var body = new MirrorStatusBody
+            var body = ToBody(_sessions.GetSnapshot(), _receiverName);
+            if (_listSessions is not null)
             {
-                Connected = snapshot.Connected,
-                Since = snapshot.Since is { } since ? SessionNotifyConfig.FormatTimestamp(since) : null,
-                Name = name ?? "",
-                SessionId = snapshot.SessionId,
-                DisconnectPending = snapshot.DisconnectPending,
-            };
+                var snapshots = _listSessions();
+                var sessions = new MirrorStatusBody[snapshots.Count];
+                for (var i = 0; i < snapshots.Count; i++)
+                {
+                    sessions[i] = ToBody(snapshots[i], _receiverName);
+                }
+
+                body.Sessions = sessions;
+            }
+
             return Json(200, "OK", JsonSerializer.Serialize(body, SessionNotifyJsonContext.Default.MirrorStatusBody));
         }
 
@@ -167,6 +174,19 @@ public sealed class SessionNotifyServer : IAsyncDisposable
         }
 
         return Response(404, "Not Found", "text/plain; charset=utf-8", "未找到。"u8.ToArray());
+    }
+
+    private static MirrorStatusBody ToBody(MirrorSessionSnapshot snapshot, string receiverName)
+    {
+        var name = string.IsNullOrWhiteSpace(snapshot.DeviceName) ? receiverName : snapshot.DeviceName;
+        return new MirrorStatusBody
+        {
+            Connected = snapshot.Connected,
+            Since = snapshot.Since is { } since ? SessionNotifyConfig.FormatTimestamp(since) : null,
+            Name = name ?? "",
+            SessionId = snapshot.SessionId,
+            DisconnectPending = snapshot.DisconnectPending,
+        };
     }
 
     private byte[] Save(byte[] body)

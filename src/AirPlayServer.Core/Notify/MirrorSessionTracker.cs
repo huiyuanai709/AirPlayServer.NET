@@ -11,7 +11,7 @@ namespace AirPlayServer.Core.Notify;
 /// A gap shorter than the debounce does not emit and keeps <see cref="MirrorSessionSnapshot.SessionId"/>.
 /// Process shutdown disposes this tracker first so the exit does not emit disconnected.
 /// </summary>
-public sealed class MirrorSessionTracker : IDisposable
+public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
 {
     public const int DefaultDisconnectDebounceMs = 3000;
 

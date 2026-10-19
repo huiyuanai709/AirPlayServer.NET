@@ -33,7 +33,7 @@ internal static partial class WindowsDisplayWindow
     // so 1000/60 truncates to 16 ms. Presentation stays latest-frame only.
     private const uint DisplayRefreshMilliseconds = 1000 / 60;
 
-    public static IAsyncDisposable Start(
+    public static IMirrorWindow Start(
         FrameSlot frames,
         string title,
         IAirPlayLog log,
@@ -46,10 +46,10 @@ internal static partial class WindowsDisplayWindow
         return window;
     }
 
-    private sealed class Window : IAsyncDisposable
+    private sealed class Window : IMirrorWindow
     {
         private readonly FrameSlot _frames;
-        private readonly string _windowTitle;
+        private string _windowTitle;
         private readonly IAirPlayLog _log;
         private readonly CancellationToken _cancellation;
         private readonly byte[] _header = new byte[40];
@@ -100,6 +100,17 @@ internal static partial class WindowsDisplayWindow
             _tapClockScreenWidth = _tapClockScreen ? tapClockScreenWidth : 0;
             _tapClockScreenHeight = _tapClockScreen ? tapClockScreenHeight : 0;
             _cancellation = cancellationToken;
+        }
+
+        public void SetDeviceName(string? deviceName)
+        {
+            var title = string.IsNullOrWhiteSpace(deviceName) ? "mirror" : deviceName.Trim();
+            _windowTitle = "AirPlayServer.NET — " + title;
+            var hwnd = Volatile.Read(ref _hwnd);
+            if (hwnd != 0 && !_hoverVisible)
+            {
+                SetWindowTextW(hwnd, _windowTitle);
+            }
         }
 
         public void Start()

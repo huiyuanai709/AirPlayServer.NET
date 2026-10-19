@@ -44,6 +44,14 @@ public sealed class AirPlayReceiverOptions
 
     public int MaxConnections { get; set; } = 8;
 
+    /// <summary>
+    /// How many phones may mirror at once. Each one gets its own data port,
+    /// frame slot, session id, and on Windows its own window. Default is 4.
+    /// </summary>
+    public const int DefaultMaxMirrors = 4;
+
+    public int MaxMirrors { get; set; } = DefaultMaxMirrors;
+
     public IAirPlayLog? Log { get; set; }
 
     /// <summary>
@@ -161,6 +169,11 @@ public sealed class AirPlayReceiverOptions
         if (MaxConnections is < 1 or > 64)
         {
             throw new ArgumentException("Max connections is outside the supported range.", nameof(MaxConnections));
+        }
+
+        if (MaxMirrors is < 1 or > MirrorRuntime.MaxMirrorLimit)
+        {
+            throw new ArgumentException("Max mirrors must be from 1 to " + MirrorRuntime.MaxMirrorLimit + ".", nameof(MaxMirrors));
         }
 
         if (LabContentKey is not null && LabContentKey.Length != 16)

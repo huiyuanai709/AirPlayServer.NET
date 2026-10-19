@@ -7,6 +7,8 @@ namespace AirPlayServer.Core.Video;
 /// <summary>
 /// Latest-frame window via user32/gdi32. Compiled only for a Windows host build
 /// (or -p:ForceWindowsHost=true). Linux Native AOT does not link user32.
+/// Letterbox bars and the scaled frame are drawn into a memory DIB, then one
+/// BitBlt presents them. Filling the window itself every frame flashes black.
 /// </summary>
 internal static partial class WindowsDisplayWindow
 {
@@ -64,6 +66,11 @@ internal static partial class WindowsDisplayWindow
         private string? _hoverLabel;
         private nint _hoverFont;
         private bool _hoverFontOwned;
+        private nint _backDc;
+        private nint _backBitmap;
+        private nint _backPrevious;
+        private int _backWidth;
+        private int _backHeight;
 
         public Window(
             FrameSlot frames,
@@ -172,6 +179,10 @@ internal static partial class WindowsDisplayWindow
             {
                 _log.Log(AirPlayLogLevel.Warning, "Display window stopped: " + ex.Message);
             }
+            finally
+            {
+                ReleaseBackBuffer();
+            }
         }
 
         private nint OnMessage(nint hwnd, uint message, nint wParam, nint lParam)
@@ -199,6 +210,7 @@ internal static partial class WindowsDisplayWindow
                     return 0;
                 case WmDestroy:
                     ReleaseHoverFont();
+                    ReleaseBackBuffer();
                     PostQuitMessage(0);
                     return 0;
                 default:
@@ -242,22 +254,21 @@ internal static partial class WindowsDisplayWindow
                     return;
                 }
 
-                if (destination.X != 0 || destination.Y != 0
-                    || destination.Width != clientWidth || destination.Height != clientHeight)
-                {
-                    ClearClient(dc, clientWidth, clientHeight);
-                }
+                // Compose off-screen. A full-client FillRect on this window DC at
+                // the 33 ms timer rate flashes black before StretchDIBits lands.
+                var compose = TryCreateBackBuffer(dc, clientWidth, clientHeight) ? _backDc : dc;
+                PaintLetterboxBars(compose, clientWidth, clientHeight, destination);
 
                 var filtering = destination.Width != width || destination.Height != height;
-                SetStretchBltMode(dc, filtering ? Halftone : ColorOnColor);
+                SetStretchBltMode(compose, filtering ? Halftone : ColorOnColor);
                 if (filtering)
                 {
                     // HALFTONE is misaligned unless the brush origin is set.
-                    SetBrushOrgEx(dc, 0, 0, 0);
+                    SetBrushOrgEx(compose, 0, 0, 0);
                 }
 
                 StretchDIBits(
-                    dc,
+                    compose,
                     destination.X,
                     destination.Y,
                     destination.Width,
@@ -273,7 +284,12 @@ internal static partial class WindowsDisplayWindow
                 // Hover uses this same rectangle, then TapClock's image→screen scale.
                 // A client point outside the painted picture stays unmapped.
                 ApplyHover(hwnd, width, height, destination);
-                DrawHoverChip(dc);
+                DrawHoverChip(compose);
+                if (compose != dc)
+                {
+                    // 1:1 present. HALFTONE already ran on the back buffer.
+                    BitBlt(dc, 0, 0, clientWidth, clientHeight, compose, 0, 0, SrcCopy);
+                }
             }
             finally
             {
@@ -329,7 +345,130 @@ internal static partial class WindowsDisplayWindow
             ApplyHover(hwnd, width, height, FrameCoordinateMap.Letterbox(rect.Right - rect.Left, rect.Bottom - rect.Top, width, height));
         }
 
-        private static void ClearClient(nint dc, int width, int height)
+        private bool TryCreateBackBuffer(nint windowDc, int width, int height)
+        {
+            if (_backDc != 0 && _backWidth == width && _backHeight == height)
+            {
+                return true;
+            }
+
+            ReleaseBackBuffer();
+            var memoryDc = CreateCompatibleDC(windowDc);
+            if (memoryDc == 0)
+            {
+                return false;
+            }
+
+            // Bottom-up 32-bit DIB. GDI still draws from the top-left of the DC.
+            // HALFTONE StretchDIBits into a device-dependent bitmap is unreliable,
+            // so the scale stays on this DIB and the window only receives BitBlt.
+            var info = new byte[40];
+            BinaryPrimitives.WriteInt32LittleEndian(info.AsSpan(0), 40);
+            BinaryPrimitives.WriteInt32LittleEndian(info.AsSpan(4), width);
+            BinaryPrimitives.WriteInt32LittleEndian(info.AsSpan(8), height);
+            BinaryPrimitives.WriteInt16LittleEndian(info.AsSpan(12), 1);
+            BinaryPrimitives.WriteInt16LittleEndian(info.AsSpan(14), 32);
+            var infoPin = GCHandle.Alloc(info, GCHandleType.Pinned);
+            nint bitmap;
+            try
+            {
+                bitmap = CreateDIBSection(windowDc, infoPin.AddrOfPinnedObject(), 0, out _, 0, 0);
+            }
+            finally
+            {
+                infoPin.Free();
+            }
+
+            if (bitmap == 0)
+            {
+                DeleteDC(memoryDc);
+                return false;
+            }
+
+            var previous = SelectObject(memoryDc, bitmap);
+            if (previous == 0)
+            {
+                DeleteObject(bitmap);
+                DeleteDC(memoryDc);
+                return false;
+            }
+
+            _backDc = memoryDc;
+            _backBitmap = bitmap;
+            _backPrevious = previous;
+            _backWidth = width;
+            _backHeight = height;
+            // Uninitialized DIB bits stay off-screen. The window is not cleared.
+            ClearOffscreen(memoryDc, width, height);
+            return true;
+        }
+
+        private void ReleaseBackBuffer()
+        {
+            if (_backDc != 0 && _backPrevious != 0)
+            {
+                SelectObject(_backDc, _backPrevious);
+            }
+
+            if (_backBitmap != 0)
+            {
+                DeleteObject(_backBitmap);
+            }
+
+            if (_backDc != 0)
+            {
+                DeleteDC(_backDc);
+            }
+
+            _backDc = 0;
+            _backBitmap = 0;
+            _backPrevious = 0;
+            _backWidth = 0;
+            _backHeight = 0;
+        }
+
+        private static void PaintLetterboxBars(
+            nint dc,
+            int clientWidth,
+            int clientHeight,
+            FrameCoordinateMap.FrameDestination picture)
+        {
+            Span<FrameCoordinateMap.FrameDestination> bars = stackalloc FrameCoordinateMap.FrameDestination[4];
+            var count = FrameCoordinateMap.LetterboxBars(clientWidth, clientHeight, picture, bars);
+            if (count == 0)
+            {
+                return;
+            }
+
+            var brush = CreateSolidBrush(0);
+            if (brush == 0)
+            {
+                return;
+            }
+
+            try
+            {
+                for (var i = 0; i < count; i++)
+                {
+                    var bar = bars[i];
+                    var rect = new Rect
+                    {
+                        Left = bar.X,
+                        Top = bar.Y,
+                        Right = bar.X + bar.Width,
+                        Bottom = bar.Y + bar.Height,
+                    };
+                    FillRect(dc, ref rect, brush);
+                }
+            }
+            finally
+            {
+                DeleteObject(brush);
+            }
+        }
+
+        // Off-screen only. A full-client fill on the window DC is the flicker.
+        private static void ClearOffscreen(nint dc, int width, int height)
         {
             var client = new Rect { Left = 0, Top = 0, Right = width, Bottom = height };
             var brush = CreateSolidBrush(0);
@@ -656,6 +795,33 @@ internal static partial class WindowsDisplayWindow
 
     [LibraryImport("gdi32.dll", EntryPoint = "TextOutW", StringMarshalling = StringMarshalling.Utf16)]
     private static partial int TextOutW(nint dc, int x, int y, string text, int length);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "CreateCompatibleDC")]
+    private static partial nint CreateCompatibleDC(nint hdc);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "DeleteDC")]
+    private static partial int DeleteDC(nint hdc);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "CreateDIBSection")]
+    private static partial nint CreateDIBSection(
+        nint hdc,
+        nint bitmapInfo,
+        uint usage,
+        out nint bits,
+        nint section,
+        uint offset);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "BitBlt")]
+    private static partial int BitBlt(
+        nint hdcDest,
+        int x,
+        int y,
+        int width,
+        int height,
+        nint hdcSrc,
+        int xSrc,
+        int ySrc,
+        uint rop);
 
     [LibraryImport("gdi32.dll", EntryPoint = "StretchDIBits")]
     private static partial int StretchDIBits(

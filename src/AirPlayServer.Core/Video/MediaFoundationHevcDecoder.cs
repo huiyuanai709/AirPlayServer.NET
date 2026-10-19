@@ -5,10 +5,13 @@ namespace AirPlayServer.Core.Video;
 
 /// <summary>
 /// Windows HEVC decoder. Synchronous hardware Media Foundation transforms are
-/// preferred when they expose a lockable RGB32 or NV12 buffer. Otherwise the
-/// Microsoft software decoder (CLSID_CMSH265DecoderMFT) is used. Output is BGRA
-/// for the existing window and TapClock path. This file is compiled only into
-/// a Windows host.
+/// preferred when they expose a lockable RGB32 or NV12 buffer. A hardware
+/// transform that accepts input and then stops producing pictures is released
+/// once and replaced by the Microsoft software decoder
+/// (CLSID_CMSH265DecoderMFT). Hardware transforms are not drained: that flush
+/// drops reference frames and leaves the window on the last picture. Output is
+/// BGRA for the existing window and TapClock path. This file is compiled only
+/// into a Windows host.
 /// </summary>
 internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposable
 {
@@ -40,6 +43,7 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
     private static readonly Guid CleanPoint = Guid.Parse("9cdf01d8-a0f0-43ba-b077-eaa06cbd728a");
     private static readonly Guid TransformAsync = Guid.Parse("f81a699a-649a-497d-8c73-29f8fed6ad7a");
     private static readonly Guid LowLatency = Guid.Parse("9c27891a-ed7a-40e1-88e8-b22727a024ee");
+    private static readonly Guid D3DAware = Guid.Parse("eaa35c29-775e-488e-9b61-b3283e49583b");
     private static readonly Guid VideoDecoderCategory = Guid.Parse("d6c02d4b-6833-45b4-971a-05a4b04bab91");
     private static readonly Guid SoftwareDecoder = Guid.Parse("420A51A3-D605-430C-B4FC-45274FA6C562");
     private static readonly Guid TransformInterface = Guid.Parse("bf94c121-5b05-4e6f-8000-ba598961414d");
@@ -75,6 +79,10 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
     private long _sampleTime;
     private volatile int _probed;
     private int _disposed;
+    private int _pictures;
+    private int _consecutiveMisses;
+    private byte[]? _lastKeyframe;
+    private const int MaxKeyframeBytes = 4 * 1024 * 1024;
 
     public MediaFoundationHevcDecoder(IAirPlayLog? log)
     {
@@ -155,6 +163,7 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
             _vps = videoParameterSet.ToArray();
             _sps = sequenceParameterSet.ToArray();
             _pps = pictureParameterSet.ToArray();
+            _lastKeyframe = null;
             _visibleWidth = 0;
             _visibleHeight = 0;
             _spsCodedWidth = 0;
@@ -213,6 +222,11 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
 
             try
             {
+                if (keyFrame && annexB.Length <= MaxKeyframeBytes)
+                {
+                    _lastKeyframe = annexB.ToArray();
+                }
+
                 return DecodeLocked(annexB, keyFrame, out frame, allowHardwareFallback: true);
             }
             catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
@@ -238,7 +252,7 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
         }
     }
 
-    private bool DecodeLocked(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame, bool allowHardwareFallback)
+    private bool DecodeLocked(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame, bool allowHardwareFallback, bool allowDrain = true)
     {
         frame = default;
         if (!EnsureTransform() || !_typesReady && !ApplyTypes())
@@ -262,7 +276,22 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
 
             if (hr < 0)
             {
-                return frame.Width != 0;
+                if (frame.Width != 0)
+                {
+                    NotePicture();
+                    return true;
+                }
+
+                if (_hardware && allowHardwareFallback)
+                {
+                    return AbandonHardware(
+                        annexB,
+                        keyFrame,
+                        "硬件 HEVC 拒绝了输入（0x" + hr.ToString("X8") + "），已释放该变换并改用软件解码器，避免驱动线程空转。Hardware HEVC rejected input (0x" + hr.ToString("X8") + "). Released it and switched to the software decoder.",
+                        out frame);
+                }
+
+                return false;
             }
         }
         finally
@@ -271,7 +300,7 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
         }
 
         var produced = Pull(ref frame);
-        if (produced != PullResult.Unsupported && frame.Width == 0 && keyFrame)
+        if (allowDrain && produced != PullResult.Unsupported && frame.Width == 0 && keyFrame && _pictures == 0 && !_hardware)
         {
             Slots.ProcessMessage(_transform, MessageDrain, 0);
             produced = Pull(ref frame);
@@ -280,15 +309,66 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
 
         if (produced == PullResult.Unsupported && _hardware && allowHardwareFallback)
         {
-            _log.Log(AirPlayLogLevel.Warning, "Hardware Media Foundation HEVC output could not be locked. Falling back to the software HEVC decoder.");
-            ReleaseTransform();
-            _rejectHardware = true;
-            _hardware = false;
-            _typesReady = false;
-            return DecodeLocked(annexB, keyFrame, out frame, allowHardwareFallback: false);
+            return AbandonHardware(
+                annexB,
+                keyFrame,
+                "硬件 HEVC 的输出缓冲无法锁定，已改用软件解码器。Hardware HEVC output could not be locked. Switched to the software decoder.",
+                out frame);
         }
 
-        return frame.Width != 0;
+        if (frame.Width != 0)
+        {
+            NotePicture();
+            return true;
+        }
+
+        if (_hardware && allowHardwareFallback)
+        {
+            _consecutiveMisses++;
+            if (HardwareDecodeStall.ShouldAbandon(_pictures, _consecutiveMisses))
+            {
+                return AbandonHardware(
+                    annexB,
+                    keyFrame,
+                    "硬件 HEVC 连续没有画面（已出画 " + _pictures + "，连续空帧 " + _consecutiveMisses + "），已释放硬件变换并改用软件解码器，避免驱动线程空转。Hardware HEVC produced no picture (pictures=" + _pictures + ", consecutive misses=" + _consecutiveMisses + "). Released the hardware transform and switched to the software decoder.",
+                    out frame);
+            }
+        }
+
+        return false;
+    }
+
+    private bool AbandonHardware(ReadOnlySpan<byte> annexB, bool keyFrame, string reason, out DecodedFrame frame)
+    {
+        frame = default;
+        var replay = _lastKeyframe;
+        var replayDifferent = replay is not null && (replay.Length != annexB.Length || !annexB.SequenceEqual(replay));
+        _rejectHardware = true;
+        ReleaseTransform();
+        _log.Log(AirPlayLogLevel.Warning, reason);
+        DecodedFrame latest = default;
+        if (replayDifferent && replay is not null)
+        {
+            if (DecodeLocked(replay, true, out var keyed, allowHardwareFallback: false, allowDrain: false) && keyed.Width != 0)
+            {
+                latest = keyed;
+            }
+        }
+
+        var drainSingleKeyframe = !replayDifferent;
+        if (DecodeLocked(annexB, keyFrame, out var current, allowHardwareFallback: false, allowDrain: drainSingleKeyframe) && current.Width != 0)
+        {
+            latest = current;
+        }
+
+        frame = latest;
+        return latest.Width != 0;
+    }
+
+    private void NotePicture()
+    {
+        _pictures++;
+        _consecutiveMisses = 0;
     }
 
     private PullResult Pull(ref DecodedFrame frame)
@@ -729,6 +809,7 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
                 }
 
                 IgnoreLowLatency(created);
+                PreferSystemMemory(created);
                 chosen = created;
             }
         }
@@ -777,6 +858,23 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
         try
         {
             Slots.SetUInt32(attributes, LowLatency, 1);
+        }
+        finally
+        {
+            Slots.Release(attributes);
+        }
+    }
+
+    private static void PreferSystemMemory(nint transform)
+    {
+        if (Slots.GetAttributes(transform, out var attributes) < 0 || attributes == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            Slots.SetUInt32(attributes, D3DAware, 0);
         }
         finally
         {
@@ -1081,6 +1179,8 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
 
         _typesReady = false;
         _hardware = false;
+        _pictures = 0;
+        _consecutiveMisses = 0;
     }
 
     private enum PullResult

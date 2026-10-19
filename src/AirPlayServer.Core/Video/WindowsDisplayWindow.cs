@@ -9,6 +9,8 @@ namespace AirPlayServer.Core.Video;
 /// (or -p:ForceWindowsHost=true). Linux Native AOT does not link user32.
 /// Letterbox bars and the scaled frame are drawn into a memory DIB, then one
 /// BitBlt presents them. Filling the window itself every frame flashes black.
+/// The picture is copied into that DIB in software. HALFTONE StretchDIBits of
+/// 32-bit BGRA paints the client white.
 /// </summary>
 internal static partial class WindowsDisplayWindow
 {
@@ -23,7 +25,6 @@ internal static partial class WindowsDisplayWindow
     private const int GwlpUserData = -21;
     private const uint SrcCopy = 0x00CC0020;
     private const int ColorOnColor = 3;
-    private const int Halftone = 4;
     private const uint WsOverlappedWindow = 0x00CF0000;
     private const uint WsVisible = 0x10000000;
     private const int ChipLeft = 8;
@@ -71,9 +72,11 @@ internal static partial class WindowsDisplayWindow
         private bool _hoverFontOwned;
         private nint _backDc;
         private nint _backBitmap;
+        private nint _backBits;
         private nint _backPrevious;
         private int _backWidth;
         private int _backHeight;
+        private int _loggedPresent;
 
         public Window(
             FrameSlot frames,
@@ -135,7 +138,9 @@ internal static partial class WindowsDisplayWindow
                     Style = 0x0003,
                     WndProc = WindowProcedurePointer(),
                     Instance = GetModuleHandleW(0),
-                    Background = 6,
+                    // Stock BLACK_BRUSH. COLOR_WINDOW (6) is white, so a mirror that
+                    // has not published a picture looks like a white screen.
+                    Background = GetStockObject(4),
                     Cursor = LoadCursorW(0, 32512),
                     ClassName = className,
                 };
@@ -221,9 +226,9 @@ internal static partial class WindowsDisplayWindow
             }
         }
 
-        private void Blit(nint hwnd)
+        private unsafe void Blit(nint hwnd)
         {
-            if (!_frames.TryRead(out var width, out var height, out _, out var pixels, out _))
+            if (!_frames.TryRead(out var width, out var height, out var stride, out var pixels, out _))
             {
                 ClearHover(hwnd);
                 return;
@@ -242,13 +247,6 @@ internal static partial class WindowsDisplayWindow
                 return;
             }
 
-            BinaryPrimitives.WriteInt32LittleEndian(_header.AsSpan(0), 40);
-            BinaryPrimitives.WriteInt32LittleEndian(_header.AsSpan(4), width);
-            BinaryPrimitives.WriteInt32LittleEndian(_header.AsSpan(8), -height);
-            BinaryPrimitives.WriteInt16LittleEndian(_header.AsSpan(12), 1);
-            BinaryPrimitives.WriteInt16LittleEndian(_header.AsSpan(14), 32);
-            var pixelsPin = GCHandle.Alloc(pixels, GCHandleType.Pinned);
-            var headerPin = GCHandle.Alloc(_header, GCHandleType.Pinned);
             var dc = GetDC(hwnd);
             try
             {
@@ -258,20 +256,90 @@ internal static partial class WindowsDisplayWindow
                 }
 
                 // Compose off-screen. A full-client FillRect on this window DC on
-                // each timer tick flashes black before StretchDIBits lands.
-                var compose = TryCreateBackBuffer(dc, clientWidth, clientHeight) ? _backDc : dc;
-                PaintLetterboxBars(compose, clientWidth, clientHeight, destination);
-
-                var filtering = destination.Width != width || destination.Height != height;
-                SetStretchBltMode(compose, filtering ? Halftone : ColorOnColor);
-                if (filtering)
+                // each timer tick flashes black before the picture lands.
+                // HALFTONE StretchDIBits of 32-bit BGRA paints the client white,
+                // so the phone picture is written straight into the DIB.
+                if (TryCreateBackBuffer(dc, clientWidth, clientHeight) && TryPaintBackBuffer(pixels, width, height, stride, destination))
                 {
-                    // HALFTONE is misaligned unless the brush origin is set.
-                    SetBrushOrgEx(compose, 0, 0, 0);
+                    ApplyHover(hwnd, width, height, destination);
+                    DrawHoverChip(_backDc);
+                    BitBlt(dc, 0, 0, clientWidth, clientHeight, _backDc, 0, 0, SrcCopy);
+                    return;
                 }
 
-                StretchDIBits(
-                    compose,
+                PaintLetterboxBars(dc, clientWidth, clientHeight, destination);
+                if (!TryStretch(dc, pixels, width, height, destination))
+                {
+                    NotePresentFailure(width, height);
+                }
+
+                ApplyHover(hwnd, width, height, destination);
+                DrawHoverChip(dc);
+            }
+            finally
+            {
+                if (dc != 0)
+                {
+                    ReleaseDC(hwnd, dc);
+                }
+            }
+        }
+
+        private unsafe bool TryPaintBackBuffer(byte[] pixels, int width, int height, int stride, FrameCoordinateMap.FrameDestination destination)
+        {
+            var rowBytes = _backWidth * 4;
+            var bytes = (long)rowBytes * _backHeight;
+            if (_backBits == 0 || _backWidth < 1 || _backHeight < 1 || rowBytes < 4 || bytes <= 0 || bytes > int.MaxValue)
+            {
+                return false;
+            }
+
+            var buffer = new Span<byte>((void*)_backBits, (int)bytes);
+            buffer.Clear();
+            if (BgraScale.PaintLetterbox(
+                pixels,
+                width,
+                height,
+                stride,
+                buffer,
+                _backWidth,
+                _backHeight,
+                rowBytes,
+                destination.X,
+                destination.Y,
+                destination.Width,
+                destination.Height,
+                bottomUp: true))
+            {
+                return true;
+            }
+
+            NotePresentFailure(width, height);
+            return false;
+        }
+
+        private bool TryStretch(nint dc, byte[] pixels, int width, int height, FrameCoordinateMap.FrameDestination destination)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(_header.AsSpan(0), 40);
+            BinaryPrimitives.WriteInt32LittleEndian(_header.AsSpan(4), width);
+            BinaryPrimitives.WriteInt32LittleEndian(_header.AsSpan(8), -height);
+            BinaryPrimitives.WriteInt16LittleEndian(_header.AsSpan(12), 1);
+            BinaryPrimitives.WriteInt16LittleEndian(_header.AsSpan(14), 32);
+            var imageBytes = (long)width * height * 4;
+            if (imageBytes <= 0 || imageBytes > int.MaxValue)
+            {
+                return false;
+            }
+
+            BinaryPrimitives.WriteInt32LittleEndian(_header.AsSpan(20), (int)imageBytes);
+            var pixelsPin = GCHandle.Alloc(pixels, GCHandleType.Pinned);
+            var headerPin = GCHandle.Alloc(_header, GCHandleType.Pinned);
+            try
+            {
+                // COLORONCOLOR. HALFTONE on a 32-bit top-down DIB returns white.
+                SetStretchBltMode(dc, ColorOnColor);
+                var written = StretchDIBits(
+                    dc,
                     destination.X,
                     destination.Y,
                     destination.Width,
@@ -284,26 +352,25 @@ internal static partial class WindowsDisplayWindow
                     headerPin.AddrOfPinnedObject(),
                     0,
                     SrcCopy);
-                // Hover uses this same rectangle, then TapClock's image→screen scale.
-                // A client point outside the painted picture stays unmapped.
-                ApplyHover(hwnd, width, height, destination);
-                DrawHoverChip(compose);
-                if (compose != dc)
-                {
-                    // 1:1 present. HALFTONE already ran on the back buffer.
-                    BitBlt(dc, 0, 0, clientWidth, clientHeight, compose, 0, 0, SrcCopy);
-                }
+                return written != 0;
             }
             finally
             {
-                if (dc != 0)
-                {
-                    ReleaseDC(hwnd, dc);
-                }
-
                 headerPin.Free();
                 pixelsPin.Free();
             }
+        }
+
+        private void NotePresentFailure(int width, int height)
+        {
+            if (Interlocked.Exchange(ref _loggedPresent, 1) != 0)
+            {
+                return;
+            }
+
+            _log.Log(
+                AirPlayLogLevel.Warning,
+                "窗口没能画上 " + width + "x" + height + " 的镜像帧，客户区保持空白。The mirror window could not paint a " + width + "x" + height + " frame, so the client stays blank.");
         }
 
         private void OnPointerMove(nint hwnd, nint lParam)
@@ -363,8 +430,7 @@ internal static partial class WindowsDisplayWindow
             }
 
             // Bottom-up 32-bit DIB. GDI still draws from the top-left of the DC.
-            // HALFTONE StretchDIBits into a device-dependent bitmap is unreliable,
-            // so the scale stays on this DIB and the window only receives BitBlt.
+            // The phone picture is written into these bits; the window only BitBlts.
             var info = new byte[40];
             BinaryPrimitives.WriteInt32LittleEndian(info.AsSpan(0), 40);
             BinaryPrimitives.WriteInt32LittleEndian(info.AsSpan(4), width);
@@ -373,9 +439,10 @@ internal static partial class WindowsDisplayWindow
             BinaryPrimitives.WriteInt16LittleEndian(info.AsSpan(14), 32);
             var infoPin = GCHandle.Alloc(info, GCHandleType.Pinned);
             nint bitmap;
+            nint bits;
             try
             {
-                bitmap = CreateDIBSection(windowDc, infoPin.AddrOfPinnedObject(), 0, out _, 0, 0);
+                bitmap = CreateDIBSection(windowDc, infoPin.AddrOfPinnedObject(), 0, out bits, 0, 0);
             }
             finally
             {
@@ -398,6 +465,7 @@ internal static partial class WindowsDisplayWindow
 
             _backDc = memoryDc;
             _backBitmap = bitmap;
+            _backBits = bits;
             _backPrevious = previous;
             _backWidth = width;
             _backHeight = height;
@@ -425,6 +493,7 @@ internal static partial class WindowsDisplayWindow
 
             _backDc = 0;
             _backBitmap = 0;
+            _backBits = 0;
             _backPrevious = 0;
             _backWidth = 0;
             _backHeight = 0;
@@ -754,9 +823,6 @@ internal static partial class WindowsDisplayWindow
 
     [LibraryImport("gdi32.dll", EntryPoint = "SetStretchBltMode")]
     private static partial int SetStretchBltMode(nint dc, int mode);
-
-    [LibraryImport("gdi32.dll", EntryPoint = "SetBrushOrgEx")]
-    private static partial int SetBrushOrgEx(nint dc, int x, int y, nint previous);
 
     [LibraryImport("gdi32.dll", EntryPoint = "CreateFontW", StringMarshalling = StringMarshalling.Utf16)]
     private static partial nint CreateFontW(

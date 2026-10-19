@@ -152,7 +152,16 @@ public sealed class H264AndMediaKeyTests
         Assert.Equal(48, parsedWidth);
         Assert.Equal(48, parsedHeight);
         decoder.Configure(MediaFoundationSps, MediaFoundationPps);
-        Assert.True(decoder.TryDecode(MediaFoundationAccessUnit, true, out var frame));
+        // Hardware may need a second access unit before it produces a picture, or
+        // it may hand the same unit to the software decoder. Either way one IDR
+        // must become a frame without staying on a transform that has stalled.
+        var produced = decoder.TryDecode(MediaFoundationAccessUnit, true, out var frame);
+        if (!produced)
+        {
+            produced = decoder.TryDecode(MediaFoundationAccessUnit, true, out frame);
+        }
+
+        Assert.True(produced);
         Assert.True(H264Decoders.NegotiatedOutput(decoder));
         Assert.Equal(48, frame.Width);
         Assert.Equal(48, frame.Height);

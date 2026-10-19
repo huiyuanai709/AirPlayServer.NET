@@ -163,9 +163,9 @@ int AirPlay_FairPlaySetup(const uint8_t* request, int requestLength,
 
 ## 画面与 TapClock
 
-Windows 上 Media Foundation 把 Annex-B 访问单元变成 BGRA，写入 `FrameSlot`（只保留最新一帧）。同步硬件变换如果还能锁定 NV12 或 RGB32 缓冲就优先用它；输出是 DXGI 表面、或者只有异步硬件变换时，退回系统自带的软件解码器。其它操作系统默认不解码。没有画面时，访问单元仍然计数，但不会冒充成手机屏幕。Linux 上继续可以用 `--demo-frame` 检查窗口标志和 TapClock。
+Windows 上 Media Foundation 把 Annex-B 访问单元变成 BGRA，写入 `FrameSlot`（只保留最新一帧）。同步硬件变换如果还能锁定 NV12、RGB32 或 ARGB32 缓冲就优先用它。变换列出 RGB 时，由 Media Foundation 做 YUV 转换，输出类型上写着解析出来的矩阵和范围。微软 H.264 解码器本身只出 NV12 这一类 YUV，那种帧在进程内转换：SPS 的 VUI 优先，其次是媒体类型上的矩阵和 nominal range，都没有时按 iPhone 镜像的 BT.709 全范围。硬件变换的输出如果是 DXGI 表面，或者只有异步硬件变换时，退回系统自带的软件解码器。其它操作系统默认不解码。没有画面时，访问单元仍然计数，但不会冒充成手机屏幕。Linux 上继续可以用 `--demo-frame` 检查窗口标志和 TapClock。
 
-Windows 宿主默认打开 GDI 窗口，把最新一帧拉伸进去。`--no-window` 关掉它。鼠标悬停时，标题和左上角显示 TapClock 绝对屏幕坐标，和 TapClock 日志里的「屏幕坐标」用同一套整数除法：客户区上的点先换成解码帧像素（拉伸铺满客户区；画出来的画面矩形之外不算），再 `screen = 帧像素 * --model 宽高 / 帧宽高`，X 和 Y 各算各的。例如 `--model iphone-15-pro-max` 是 430×932；480×1040 的帧上，像素 (323, 850) 读成 `TapClock 289, 761`。没写 `--model` 时，图像尺寸就是屏幕，标签退回 `像素 x, y`。悬停不读 `--screen`。窗口里的鼠标点击不会发给手机，也不改 HID。
+Windows 宿主默认打开 GDI 窗口，把最新一帧按比例放进客户区（比例不同时留黑边，不拉变形）。目标尺寸和帧不一样时用 HALFTONE。`--no-window` 关掉它。鼠标悬停时，标题和左上角显示 TapClock 绝对屏幕坐标，和 TapClock 日志里的「屏幕坐标」用同一套整数除法：客户区上的点先换成解码帧像素（画面按比例居中，黑边和画面矩形之外不算），再 `screen = 帧像素 * --model 宽高 / 帧宽高`，X 和 Y 各算各的。例如 `--model iphone-15-pro-max` 是 430×932；480×1040 的帧上，像素 (323, 850) 读成 `TapClock 289, 761`。没写 `--model` 时，图像尺寸就是屏幕，标签退回 `像素 x, y`。悬停不读 `--screen`。窗口里的鼠标点击不会发给手机，也不改 HID。
 
 TapClock 的点击留在它自己的主机 TCP `42123`（ATB/1）。坐标是板上的 HID 计数（AssistiveTouch），不是这台电脑窗口里的像素。点击对齐和镜像广告是两套尺寸，写在不同的参数上：
 

@@ -803,7 +803,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 _heldKeyframe = null;
             }
 
-            _log.Log(AirPlayLogLevel.Warning, "HEVC was requested (--h265) but no HEVC decoder is available on this machine. Media Foundation HEVC (CLSID_CMSH265DecoderMFT) is a Windows component; this platform will not decode HEVC frames.");
+            _log.Log(AirPlayLogLevel.Warning, "HEVC was requested (--h265) but no HEVC decoder is available on this machine (Media Foundation CLSID_CMSH265DecoderMFT or FFmpeg libavcodec). This platform will not decode HEVC frames.");
             return;
         }
 
@@ -895,7 +895,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         {
             if (_hevc is null || !_hevc.IsAvailable)
             {
-                _log.Log(AirPlayLogLevel.Warning, "HEVC was requested (--h265) but no HEVC decoder is available on this machine. Media Foundation HEVC (CLSID_CMSH265DecoderMFT) is a Windows component; this platform will not decode HEVC frames.");
+                _log.Log(AirPlayLogLevel.Warning, "HEVC was requested (--h265) but no HEVC decoder is available on this machine (Media Foundation CLSID_CMSH265DecoderMFT or FFmpeg libavcodec). This platform will not decode HEVC frames.");
                 return;
             }
 

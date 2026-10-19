@@ -118,9 +118,9 @@ public sealed class FrameSlot
 /// <summary>
 /// H.264 access-unit decoder. The mirror pipeline converts AVCC length prefixes to
 /// Annex-B before calling <see cref="TryDecode"/>. The first key frame after a new
-/// SPS/PPS may be prefixed with those parameter sets. Windows uses Media Foundation.
-/// Other platforms keep <see cref="UnavailableH264Decoder"/> unless the process
-/// supplies its own decoder.
+/// SPS/PPS may be prefixed with those parameter sets. Windows prefers Media
+/// Foundation. FFmpeg is used when its shared libraries load and Media Foundation
+/// does not. Otherwise the decoder is <see cref="UnavailableH264Decoder"/>.
 /// </summary>
 public interface IH264Decoder
 {
@@ -166,8 +166,9 @@ public sealed class UnavailableH264Decoder : IH264Decoder
 
 /// <summary>
 /// HEVC access-unit decoder. The mirror pipeline converts AVCC length prefixes to
-/// Annex-B and may prefix VPS, SPS, and PPS onto the next key frame. Windows uses
-/// Media Foundation. Other platforms keep <see cref="UnavailableHevcDecoder"/>.
+/// Annex-B and may prefix VPS, SPS, and PPS onto the next key frame. Windows
+/// prefers Media Foundation. FFmpeg is used when those libraries load and Media
+/// Foundation HEVC does not. Otherwise the decoder is <see cref="UnavailableHevcDecoder"/>.
 /// </summary>
 public interface IHevcDecoder
 {
@@ -183,8 +184,8 @@ public interface IHevcDecoder
 }
 
 /// <summary>
-/// Fail-closed HEVC decoder. Used off Windows and when the HEVC Media Foundation
-/// transform is not installed. H.264 mirroring is unaffected.
+/// Fail-closed HEVC decoder. Used when neither Media Foundation HEVC nor FFmpeg
+/// can be opened. H.264 mirroring is unaffected.
 /// </summary>
 public sealed class UnavailableHevcDecoder : IHevcDecoder
 {

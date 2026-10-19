@@ -172,13 +172,15 @@ public sealed class HevcMirrorTests
         {
             if (!OperatingSystem.IsWindows())
             {
-                Assert.False(decoder.IsAvailable);
-                Assert.Equal("unavailable", decoder.Name);
+                Assert.True(decoder.Name is "unavailable" or "ffmpeg-hevc");
+                Assert.Equal(decoder.Name == "ffmpeg-hevc", decoder.IsAvailable);
                 return;
             }
 
             _ = decoder.IsAvailable;
-            Assert.True(decoder.Name == "unavailable" || decoder.Name.StartsWith("media-foundation-hevc", StringComparison.Ordinal));
+            Assert.True(decoder.Name == "unavailable"
+                || decoder.Name.StartsWith("media-foundation-hevc", StringComparison.Ordinal)
+                || decoder.Name == "ffmpeg-hevc");
         }
         finally
         {

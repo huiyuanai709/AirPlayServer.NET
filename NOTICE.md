@@ -49,7 +49,7 @@ the setup replies, handshake layout, and decrypt results of that snapshot.
 
 This repository does not contain, link, or translate:
 
-- FFmpeg binaries or sources (upstream uses LGPL-2.1-or-later builds)
+- FFmpeg binaries or sources
 - libplist, SDL, ImGui, or the vendored Bonjour/mDNSResponder `dnssd` sources
 - Any prebuilt `.dll`, `.lib`, or `.exe` from the upstream `external/` directory
 
@@ -63,8 +63,26 @@ is an optional native override and is not required for FairPlay.
 
 Windows H.264 decode uses Media Foundation (`mfplat` / the system H.264 MFT),
 compiled only into the Windows host. The linux-x64 publish does not link
-`mfplat` or `user32`. FFmpeg is not linked. JPEG stills for TapClock are
-encoded in-process; ImageSharp is not linked.
+`mfplat` or `user32`. JPEG stills for TapClock are encoded in-process;
+ImageSharp is not linked.
+
+## FFmpeg
+
+FFmpeg is an optional runtime dependency. The host loads `libavcodec` and
+`libavutil` (and `libswresample`, which `libavcodec` imports) with
+`NativeLibrary.TryLoad` from the directory of the executable or the system
+library path. Nothing in this repository is statically linked against FFmpeg,
+and the release zips do not ship those libraries.
+
+FFmpeg is LGPL-2.1-or-later. Builds that enable GPL-only components are GPL.
+The AirPlayServer.NET host is already GPL-3.0-only, so either build can be
+placed next to it by the operator. Redistributors of those shared libraries
+must follow that build's license. An LGPL build must stay replaceable; this
+process does not absorb FFmpeg into the Native AOT image.
+
+Copyright (c) the FFmpeg developers. <https://ffmpeg.org/>
+Upstream receiver builds used LGPL-2.1-or-later FFmpeg. See the README section
+"FFmpeg（可选，运行时加载）" for which SONAMEs are probed and where to put the files.
 
 ## TapClock screen catalog
 

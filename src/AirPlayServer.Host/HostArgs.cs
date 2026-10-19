@@ -66,12 +66,14 @@ internal sealed class HostArgs
                          只写入点击对齐尺寸。/info 宣告仍是 --screen（默认 480x1040）。
         --list-models    打印 slug 和竖屏 UIKit 逻辑点，然后退出。
         --h265 / --hevc  可选。默认关闭，只收 H.264。
-                         打开后，mDNS 和 /info 的 features 置上第 42 位（SupportsScreenMultiCodec），手机可以协商 HEVC。
+                         只有本机真能打开 HEVC 解码器时，mDNS 和 /info 的 features 才置上第 42 位（SupportsScreenMultiCodec）。
+                         没有解码器时忽略这个开关，中英文日志会写明，手机继续发送 H.264。
                          不改变 --screen。宿主默认仍是 480x1040。较新的苹果设备只有在宣告的分辨率够高时才会改发 HEVC。
                          例如：AirPlayServer.Host --h265 --screen 1290x2796 --model iphone-15-pro-max
-                         Windows 用 Media Foundation 的 HEVC 解码器（同步硬件 MFT 能锁住输出时优先，否则 CLSID_CMSH265DecoderMFT）。
-                         这台机器没有 HEVC 解码器时，日志会写明，H.264 仍然可用。
-                         Linux 包不解码 HEVC。--model 仍只决定 UIKit 点击点，不决定广告分辨率。
+                         Windows 先用 Media Foundation（同步硬件 MFT 能锁住输出时优先，否则 CLSID_CMSH265DecoderMFT）。
+                         打不开时改用程序旁边或系统路径里的 FFmpeg（libavcodec / libavutil）。
+                         Linux 上 H.264 和 HEVC 都只走 FFmpeg。库怎么放见 packaging/RUN.txt。
+                         --model 仍只决定 UIKit 点击点，不决定广告分辨率。
         --tapclock       把最新解码帧按 ATBF type 3 JPEG 推到 host:42125。不发送 H.264。
         --tapclock-dir   备用：把 JPEG 写进该目录的临时文件，再替换 mirror.jpg。
                          目录不可写或 mirror.jpg 被占用时，日志会写出完整路径。

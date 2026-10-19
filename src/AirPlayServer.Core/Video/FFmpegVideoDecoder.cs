@@ -1,0 +1,412 @@
+namespace AirPlayServer.Core.Video;
+
+/// <summary>
+/// Maps FFmpeg color metadata onto the AirPlay default. An unspecified matrix or
+/// range is not a decision, so a decoder tag of "unspecified" stays BT.709 full
+/// range. An H.264 SPS VUI wins when it is present.
+/// </summary>
+internal static class FFmpegColor
+{
+    internal static YuvColorSpace Resolve(H264ColorSignals bitstream, int pixelFormat, int colorSpace, int colorRange)
+    {
+        var matrix = YuvMatrix.Bt709;
+        if (bitstream.HasMatrix && YuvColorSpace.TryMapMatrixCoefficient(bitstream.MatrixCoefficients, out var fromBitstream))
+        {
+            matrix = fromBitstream;
+        }
+        else if (YuvColorSpace.TryMapMatrixCoefficient(colorSpace, out var fromFrame))
+        {
+            matrix = fromFrame;
+        }
+
+        var range = YuvRange.Full;
+        if (bitstream.HasRange)
+        {
+            range = bitstream.FullRange ? YuvRange.Full : YuvRange.Limited;
+        }
+        else if (pixelFormat == FFmpegLibrary.PixelYuvJ420P || colorRange == 2)
+        {
+            range = YuvRange.Full;
+        }
+        else if (colorRange == 1)
+        {
+            range = YuvRange.Limited;
+        }
+
+        return new YuvColorSpace(matrix, range);
+    }
+}
+
+/// <summary>
+/// One libavcodec decode context. Annex-B access units go in; BGRA comes out
+/// through <see cref="Nv12Color"/> when the picture is NV12, NV21, or YUV 4:2:0.
+/// </summary>
+internal sealed unsafe class FFmpegDecodeSession : IDisposable
+{
+    private readonly FFmpegLibrary _library;
+    private readonly IAirPlayLog _log;
+    private readonly object _gate = new();
+    private readonly nint _frame;
+    private nint _context;
+    private H264ColorSignals _bitstream;
+    private int _disposed;
+    private int _loggedColor;
+    private int _loggedFormat;
+    private int _loggedSend;
+
+    private FFmpegDecodeSession(FFmpegLibrary library, nint context, nint frame, IAirPlayLog? log, string name)
+    {
+        _library = library;
+        _context = context;
+        _frame = frame;
+        _log = log ?? NullAirPlayLog.Instance;
+        Name = name;
+    }
+
+    internal bool IsOpen => Volatile.Read(ref _disposed) == 0 && _context != 0;
+
+    internal string Name { get; }
+
+    internal static bool TryOpen(FFmpegLibrary library, int codecId, string name, IAirPlayLog? log, out FFmpegDecodeSession? session)
+    {
+        session = null;
+        var codec = library.FindDecoder(codecId);
+        if (codec == 0)
+        {
+            log?.Log(
+                AirPlayLogLevel.Warning,
+                "已加载 FFmpeg，但这份 libavcodec 没有 " + name + " 解码器。This libavcodec build has no " + name + " decoder.");
+            return false;
+        }
+
+        var context = library.AllocContext(codec);
+        if (context == 0)
+        {
+            log?.Log(AirPlayLogLevel.Warning, "avcodec_alloc_context3 failed for " + name + ".");
+            return false;
+        }
+
+        library.TrySetInt(context, "threads", 1);
+        library.TrySet(context, "thread_type", "slice");
+        library.TrySet(context, "flags", "+low_delay");
+        var opened = library.Open(context, codec);
+        if (opened < 0)
+        {
+            log?.Log(
+                AirPlayLogLevel.Warning,
+                "avcodec_open2 failed for " + name + " (" + library.DescribeError(opened) + ").");
+            library.FreeContext(&context);
+            return false;
+        }
+
+        var frame = library.FrameAlloc();
+        if (frame == 0)
+        {
+            library.FreeContext(&context);
+            log?.Log(AirPlayLogLevel.Warning, "av_frame_alloc failed for " + name + ".");
+            return false;
+        }
+
+        session = new FFmpegDecodeSession(library, context, frame, log, name);
+        return true;
+    }
+
+    internal void SetBitstreamColor(H264ColorSignals color)
+    {
+        lock (_gate)
+        {
+            _bitstream = color;
+        }
+    }
+
+    internal void Reset()
+    {
+        if (!IsOpen)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_context != 0)
+            {
+                _library.Flush(_context);
+            }
+        }
+    }
+
+    internal bool TryDecode(ReadOnlySpan<byte> annexB, out DecodedFrame frame)
+    {
+        frame = default;
+        if (!IsOpen || annexB.IsEmpty)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (_context == 0 || !Send(annexB, out var drained))
+            {
+                return false;
+            }
+
+            if (Receive(out frame))
+            {
+                return true;
+            }
+
+            // The decoder was full, so one picture was pulled out to make room.
+            // If the new packet does not produce its own picture yet, that
+            // drained picture is still the latest frame.
+            frame = drained;
+            return drained.Width > 0;
+        }
+    }
+
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            var frame = _frame;
+            if (frame != 0)
+            {
+                _library.FrameFree(&frame);
+            }
+
+            var context = _context;
+            _context = 0;
+            if (context != 0)
+            {
+                _library.FreeContext(&context);
+            }
+        }
+    }
+
+    private bool Send(ReadOnlySpan<byte> annexB, out DecodedFrame drained)
+    {
+        drained = default;
+        if (annexB.Length <= 0 || annexB.Length > 8 * 1024 * 1024)
+        {
+            return false;
+        }
+
+        var size = annexB.Length;
+        var memory = _library.Malloc((nuint)(size + FFmpegLibrary.InputPadding));
+        if (memory == 0)
+        {
+            return false;
+        }
+
+        annexB.CopyTo(new Span<byte>((void*)memory, size));
+        new Span<byte>((void*)(memory + size), FFmpegLibrary.InputPadding).Clear();
+        var packet = _library.PacketAlloc();
+        if (packet == 0)
+        {
+            _library.Free(memory);
+            return false;
+        }
+
+        if (_library.PacketFromData(packet, memory, size) < 0)
+        {
+            _library.Free(memory);
+            _library.PacketFree(&packet);
+            return false;
+        }
+
+        var result = _library.SendPacket(_context, packet);
+        if (result == FFmpegLibrary.ErrorAgain)
+        {
+            Receive(out drained);
+            result = _library.SendPacket(_context, packet);
+        }
+
+        _library.PacketFree(&packet);
+        if (result < 0)
+        {
+            if (Interlocked.Exchange(ref _loggedSend, 1) == 0)
+            {
+                _log.Log(AirPlayLogLevel.Warning, Name + " send failed (" + _library.DescribeError(result) + ").");
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool Receive(out DecodedFrame frame)
+    {
+        frame = default;
+        var produced = false;
+        while (_context != 0)
+        {
+            _library.FrameUnref(_frame);
+            var result = _library.ReceiveFrame(_context, _frame);
+            if (result == FFmpegLibrary.ErrorAgain)
+            {
+                break;
+            }
+
+            if (result < 0)
+            {
+                if (Interlocked.Exchange(ref _loggedSend, 1) == 0)
+                {
+                    _log.Log(AirPlayLogLevel.Warning, Name + " receive failed (" + _library.DescribeError(result) + ").");
+                }
+
+                break;
+            }
+
+            _library.ApplyCropping(_frame);
+            if (TryConvert(_frame, out var decoded))
+            {
+                frame = decoded;
+                produced = true;
+            }
+        }
+
+        return produced;
+    }
+
+    private bool TryConvert(nint picture, out DecodedFrame frame)
+    {
+        frame = default;
+        if (!_library.TryReadPicture(picture, out var width, out var height, out var format, out var y, out var u, out var v, out var yStride, out var uStride, out var vStride))
+        {
+            return false;
+        }
+
+        // colorspace and color_range sit past the stable AVFrame prefix and move
+        // between FFmpeg majors. Unspecified (2, 0) keeps the AirPlay default
+        // unless the SPS or a JPEG pixel format says otherwise.
+        var color = FFmpegColor.Resolve(_bitstream, format, colorSpace: 2, colorRange: 0);
+        if (Interlocked.Exchange(ref _loggedColor, 1) == 0)
+        {
+            _log.Log(AirPlayLogLevel.Information, Name + " YUV to BGRA is " + color.Describe() + ".");
+        }
+
+        var pixels = new byte[width * height * 4];
+        var copied = format switch
+        {
+            FFmpegLibrary.PixelYuv420P or FFmpegLibrary.PixelYuvJ420P => YuvPlanarColor.TryCopyPlanes(
+                y, yStride, u, uStride, v, vStride, width, height, color, 1, 0, false, false, pixels),
+            FFmpegLibrary.PixelYuv420P10Le => YuvPlanarColor.TryCopyPlanes(
+                y, yStride, u, uStride, v, vStride, width, height, color, 2, 2, false, false, pixels),
+            FFmpegLibrary.PixelNv12 => YuvPlanarColor.TryCopyPlanes(
+                y, yStride, u, uStride, 0, 0, width, height, color, 1, 0, true, false, pixels),
+            FFmpegLibrary.PixelNv21 => YuvPlanarColor.TryCopyPlanes(
+                y, yStride, u, uStride, 0, 0, width, height, color, 1, 0, true, true, pixels),
+            _ => false,
+        };
+        if (!copied)
+        {
+            if (Interlocked.Exchange(ref _loggedFormat, 1) == 0)
+            {
+                _log.Log(
+                    AirPlayLogLevel.Warning,
+                    Name + " picture format " + format.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    + " is not NV12 or YUV420P, so the frame was not shown.");
+            }
+
+            return false;
+        }
+
+        frame = new DecodedFrame(width, height, pixels, width * 4);
+        return true;
+    }
+}
+
+internal sealed class FFmpegH264Decoder : IH264Decoder, IDisposable
+{
+    private readonly FFmpegDecodeSession _session;
+
+    private FFmpegH264Decoder(FFmpegDecodeSession session)
+    {
+        _session = session;
+    }
+
+    public bool IsAvailable => _session.IsOpen;
+
+    public string Name => _session.Name;
+
+    public void Configure(ReadOnlySpan<byte> sequenceParameterSet, ReadOnlySpan<byte> pictureParameterSet)
+    {
+        _ = pictureParameterSet;
+        if (H264Sequence.TryGetColorSignals(sequenceParameterSet, out var color))
+        {
+            _session.SetBitstreamColor(color);
+        }
+    }
+
+    public void Reset() => _session.Reset();
+
+    public bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
+    {
+        _ = keyFrame;
+        return _session.TryDecode(annexB, out frame);
+    }
+
+    public void Dispose() => _session.Dispose();
+
+    internal static bool TryCreate(FFmpegLibrary library, IAirPlayLog? log, out FFmpegH264Decoder? decoder)
+    {
+        decoder = null;
+        if (!FFmpegDecodeSession.TryOpen(library, FFmpegLibrary.CodecH264, "ffmpeg-h264", log, out var session) || session is null)
+        {
+            return false;
+        }
+
+        decoder = new FFmpegH264Decoder(session);
+        return true;
+    }
+}
+
+internal sealed class FFmpegHevcDecoder : IHevcDecoder, IDisposable
+{
+    private readonly FFmpegDecodeSession _session;
+
+    private FFmpegHevcDecoder(FFmpegDecodeSession session)
+    {
+        _session = session;
+    }
+
+    public bool IsAvailable => _session.IsOpen;
+
+    public string Name => _session.Name;
+
+    public void Configure(ReadOnlySpan<byte> videoParameterSet, ReadOnlySpan<byte> sequenceParameterSet, ReadOnlySpan<byte> pictureParameterSet)
+    {
+        // The mirror pipeline prefixes VPS/SPS/PPS onto the next key frame.
+        // libavcodec reads those NAL units from the Annex-B access unit.
+        _ = videoParameterSet;
+        _ = sequenceParameterSet;
+        _ = pictureParameterSet;
+    }
+
+    public void Reset() => _session.Reset();
+
+    public bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
+    {
+        _ = keyFrame;
+        return _session.TryDecode(annexB, out frame);
+    }
+
+    public void Dispose() => _session.Dispose();
+
+    internal static bool TryCreate(FFmpegLibrary library, IAirPlayLog? log, out FFmpegHevcDecoder? decoder)
+    {
+        decoder = null;
+        if (!FFmpegDecodeSession.TryOpen(library, FFmpegLibrary.CodecHevc, "ffmpeg-hevc", log, out var session) || session is null)
+        {
+            return false;
+        }
+
+        decoder = new FFmpegHevcDecoder(session);
+        return true;
+    }
+}

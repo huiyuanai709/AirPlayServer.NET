@@ -99,14 +99,16 @@ public sealed class AirPlayReceiverOptions
     public IH264Decoder? Decoder { get; set; }
 
     /// <summary>
-    /// Advertise Features bit 42 and accept an HEVC mirror. Off by default, so a
-    /// sender that only speaks H.264 keeps the previous advertisement.
+    /// Ask to advertise Features bit 42 and accept an HEVC mirror. Off by default.
+    /// The receiver clears the advertisement when no HEVC decoder opens, so the
+    /// phone stays on H.264.
     /// </summary>
     public bool AcceptHevc { get; set; }
 
     /// <summary>
     /// Optional HEVC decoder used when <see cref="AcceptHevc"/> is set.
-    /// Null selects the platform default, which is unavailable off Windows.
+    /// Null selects the platform default: Media Foundation on Windows when it
+    /// opens, otherwise FFmpeg when libavcodec and libavutil load.
     /// </summary>
     public IHevcDecoder? HevcDecoder { get; set; }
 

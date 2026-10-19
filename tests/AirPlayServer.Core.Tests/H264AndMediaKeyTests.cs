@@ -141,8 +141,8 @@ public sealed class H264AndMediaKeyTests
         using var owned = decoder as IDisposable;
         if (!OperatingSystem.IsWindows())
         {
-            Assert.Equal("unavailable", decoder.Name);
-            Assert.False(decoder.IsAvailable);
+            Assert.True(decoder.Name is "unavailable" or "ffmpeg-h264");
+            Assert.Equal(decoder.Name == "ffmpeg-h264", decoder.IsAvailable);
             return;
         }
 

@@ -18,4 +18,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\AirPlayServer.Core\AirPlayServer.Core.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Fixtures\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

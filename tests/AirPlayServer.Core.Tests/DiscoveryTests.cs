@@ -28,6 +28,43 @@ public sealed class DiscoveryTests
     }
 
     [Fact]
+    public void Hevc_announcement_sets_features_bit_42_and_stays_in_one_datagram()
+    {
+        var advertisement = new ReceiverAdvertisement
+        {
+            InstanceName = "客厅",
+            HostLabel = "living-room",
+            DeviceId = "aa:bb:cc:dd:ee:ff",
+            RaopInstance = "AABBCCDDEEFF@客厅",
+            AirPlayPort = 7001,
+            RaopPort = 5001,
+            Address = IPAddress.Parse("10.1.2.3"),
+            PublicKeyBase64 = "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo=",
+            AcceptHevc = true,
+        };
+        var packet = MdnsMessages.BuildAnnouncement(advertisement);
+        var text = Encoding.UTF8.GetString(packet);
+
+        Assert.InRange(packet.Length, 12, 1400);
+        Assert.Contains("0x5A7FFEE6,0x400", text, StringComparison.Ordinal);
+        Assert.Equal(2, Count(text, "0x5A7FFEE6,0x400"));
+        Assert.DoesNotContain("0x5A7FFEE6,0x0", text, StringComparison.Ordinal);
+    }
+
+    private static int Count(string text, string value)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = text.IndexOf(value, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += value.Length;
+        }
+
+        return count;
+    }
+
+    [Fact]
     public void Query_for_airplay_is_answered_and_unrelated_names_are_ignored()
     {
         var advertisement = Sample();

@@ -35,7 +35,7 @@ internal sealed class HostArgs
 
         用法:
           AirPlayServer.Host [--name 名称] [--listen 0.0.0.0] [--airplay-port 7001] [--raop-port 5001]
-                             [--screen 480x1040] [--model iphone-15-pro] [--list-models]
+                             [--screen 480x1040] [--model iphone-15-pro] [--list-models] [--h265]
                              [--no-discovery] [--no-window] [--demo-frame]
                              [--tapclock 主机:42125] [--tapclock-dir 目录] [--tapclock-fps 2]
                              [--lab-key 32位十六进制] [--media-key-plugin 路径] [--seed 64位十六进制]
@@ -65,6 +65,13 @@ internal sealed class HostArgs
                          例如 iphone-15-pro 是 393×852 point，不是 1179×2556 物理像素。
                          只写入点击对齐尺寸。/info 宣告仍是 --screen（默认 480x1040）。
         --list-models    打印 slug 和竖屏 UIKit 逻辑点，然后退出。
+        --h265 / --hevc  可选。默认关闭，只收 H.264。
+                         打开后，mDNS 和 /info 的 features 置上第 42 位（SupportsScreenMultiCodec），手机可以协商 HEVC。
+                         不改变 --screen。宿主默认仍是 480x1040。较新的苹果设备只有在宣告的分辨率够高时才会改发 HEVC。
+                         例如：AirPlayServer.Host --h265 --screen 1290x2796 --model iphone-15-pro-max
+                         Windows 用 Media Foundation 的 HEVC 解码器（同步硬件 MFT 能锁住输出时优先，否则 CLSID_CMSH265DecoderMFT）。
+                         这台机器没有 HEVC 解码器时，日志会写明，H.264 仍然可用。
+                         Linux 包不解码 HEVC。--model 仍只决定 UIKit 点击点，不决定广告分辨率。
         --tapclock       把最新解码帧按 ATBF type 3 JPEG 推到 host:42125。不发送 H.264。
         --tapclock-dir   备用：把 JPEG 写进该目录的临时文件，再替换 mirror.jpg。
                          目录不可写或 mirror.jpg 被占用时，日志会写出完整路径。
@@ -114,6 +121,10 @@ internal sealed class HostArgs
                     break;
                 case "--list-models":
                     parsed.ListModels = true;
+                    break;
+                case "--h265":
+                case "--hevc":
+                    options.AcceptHevc = true;
                     break;
                 case "--self-check":
                     parsed.SelfCheck = true;

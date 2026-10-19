@@ -21,9 +21,9 @@ internal readonly record struct MirrorHeader(
 {
     public bool IsKeyframe => Flags == 0x10;
 
-    public bool SenderPaused => PayloadType == 1 && (Option & 0xFF) == 0x56;
+    public bool SenderPaused => PayloadType == 1 && (Option & 0xFF) is 0x56 or 0x5E;
 
-    public bool SenderResumed => PayloadType == 1 && (Option & 0xFF) == 0x16;
+    public bool SenderResumed => PayloadType == 1 && (Option & 0xFF) is 0x16 or 0x1E;
 
     public static bool TryParse(ReadOnlySpan<byte> header, out MirrorHeader value)
     {
@@ -115,6 +115,13 @@ internal static class AvccAnnexB
     }
 }
 
+internal enum MirrorVideoCodec
+{
+    Unknown = 0,
+    H264 = 1,
+    Hevc = 2,
+}
+
 internal static class CodecConfig
 {
     public static bool TryParse(ReadOnlySpan<byte> payload, out byte[] sequence, out byte[] picture)
@@ -144,5 +151,120 @@ internal static class CodecConfig
         sequence = payload.Slice(8, spsLength).ToArray();
         picture = payload.Slice(ppsOffset, ppsLength).ToArray();
         return true;
+    }
+
+    public static bool LooksLikeHevc(ReadOnlySpan<byte> payload)
+        => payload.Length >= 8
+            && payload[4] == (byte)'h'
+            && payload[5] == (byte)'v'
+            && payload[6] == (byte)'c'
+            && payload[7] == (byte)'1';
+
+    public static bool TryParseHevc(ReadOnlySpan<byte> payload, out byte[] video, out byte[] sequence, out byte[] picture)
+    {
+        video = [];
+        sequence = [];
+        picture = [];
+        if (!LooksLikeHevc(payload))
+        {
+            return false;
+        }
+
+        if (TryFindHvccArrays(payload, out var arrays, out var arrayCount)
+            && TryReadArrays(payload[arrays..], arrayCount, out video, out sequence, out picture))
+        {
+            return true;
+        }
+
+        return payload.Length > 0x75
+            && TryReadArrays(payload[0x75..], 8, out video, out sequence, out picture);
+    }
+
+    private static bool TryFindHvccArrays(ReadOnlySpan<byte> payload, out int arrays, out int arrayCount)
+    {
+        arrays = 0;
+        arrayCount = 0;
+        for (var i = 0; i + 26 < payload.Length; i++)
+        {
+            if (payload[i] != (byte)'h'
+                || payload[i + 1] != (byte)'v'
+                || payload[i + 2] != (byte)'c'
+                || payload[i + 3] != (byte)'C'
+                || payload[i + 4] != 1)
+            {
+                continue;
+            }
+
+            var count = payload[i + 4 + 22];
+            if (count is < 1 or > 8)
+            {
+                continue;
+            }
+
+            arrays = i + 4 + 23;
+            arrayCount = count;
+            return arrays < payload.Length;
+        }
+
+        return false;
+    }
+
+    private static bool TryReadArrays(ReadOnlySpan<byte> data, int maxArrays, out byte[] video, out byte[] sequence, out byte[] picture)
+    {
+        video = [];
+        sequence = [];
+        picture = [];
+        var offset = 0;
+        for (var array = 0; array < maxArrays && offset + 3 <= data.Length; array++)
+        {
+            var nalType = data[offset] & 0x3F;
+            var count = (data[offset + 1] << 8) | data[offset + 2];
+            offset += 3;
+            if (count is < 1 or > 16)
+            {
+                return false;
+            }
+
+            for (var nal = 0; nal < count; nal++)
+            {
+                if (offset + 2 > data.Length)
+                {
+                    return false;
+                }
+
+                var length = (data[offset] << 8) | data[offset + 1];
+                offset += 2;
+                if (length <= 0 || length > data.Length - offset)
+                {
+                    return false;
+                }
+
+                if (nal == 0)
+                {
+                    var bytes = data.Slice(offset, length).ToArray();
+                    if (nalType == 32 && video.Length == 0)
+                    {
+                        video = bytes;
+                    }
+                    else if (nalType == 33 && sequence.Length == 0)
+                    {
+                        sequence = bytes;
+                    }
+                    else if (nalType == 34 && picture.Length == 0)
+                    {
+                        picture = bytes;
+                    }
+                }
+
+                offset += length;
+            }
+
+            if (video.Length > 0 && sequence.Length > 0 && picture.Length > 0)
+            {
+                return true;
+            }
+        }
+
+        return video.Length > 0 && sequence.Length > 0 && picture.Length > 0;
     }
 }

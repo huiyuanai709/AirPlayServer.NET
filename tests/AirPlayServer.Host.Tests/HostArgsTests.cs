@@ -113,4 +113,22 @@ public class HostArgsTests
         var skipFirst = Assert.Throws<ArgumentException>(() => HostArgs.Parse(["--no-update", "--check-update"]));
         Assert.Contains("--no-update", skipFirst.Message, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void H265_is_opt_in_and_leaves_the_advertised_screen()
+    {
+        Assert.False(HostArgs.Parse([]).Options.AcceptHevc);
+        Assert.True(HostArgs.Parse(["--h265"]).Options.AcceptHevc);
+        Assert.True(HostArgs.Parse(["--hevc"]).Options.AcceptHevc);
+
+        var parsed = HostArgs.Parse(["--h265", "--screen", "1290x2796", "--model", "iphone-15-pro-max"]);
+        Assert.True(parsed.Options.AcceptHevc);
+        Assert.Equal(1290, parsed.Options.DisplayWidth);
+        Assert.Equal(2796, parsed.Options.DisplayHeight);
+        Assert.Equal(480, HostArgs.Parse(["--hevc"]).Options.DisplayWidth);
+        Assert.Equal(1040, HostArgs.Parse(["--hevc"]).Options.DisplayHeight);
+        Assert.Contains("--h265", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("--hevc", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("1290x2796", HostArgs.HelpText, StringComparison.Ordinal);
+    }
 }

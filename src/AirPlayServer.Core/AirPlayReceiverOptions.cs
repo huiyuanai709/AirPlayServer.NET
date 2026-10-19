@@ -98,6 +98,18 @@ public sealed class AirPlayReceiverOptions
 
     public IH264Decoder? Decoder { get; set; }
 
+    /// <summary>
+    /// Advertise Features bit 42 and accept an HEVC mirror. Off by default, so a
+    /// sender that only speaks H.264 keeps the previous advertisement.
+    /// </summary>
+    public bool AcceptHevc { get; set; }
+
+    /// <summary>
+    /// Optional HEVC decoder used when <see cref="AcceptHevc"/> is set.
+    /// Null selects the platform default, which is unavailable off Windows.
+    /// </summary>
+    public IHevcDecoder? HevcDecoder { get; set; }
+
     /// <summary>TapClock JPEG export. Null or without an endpoint and directory disables it.</summary>
     public TapClockExportOptions? TapClock { get; set; }
 

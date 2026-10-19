@@ -23,6 +23,14 @@ AirPlayServer.NET Native AOT 宿主
 --model 是 TapClock 点击对齐的竖屏 UIKit 逻辑点（iphone-15-pro 为 393x852），不改广告。
 --list-models 打印全部 slug。两个参数可以只写其中一个。
 
+--h265 和 --hevc 是同一个可选开关，默认关闭，只收 H.264。
+打开后，mDNS 和 /info 的 features 置上第 42 位（SupportsScreenMultiCodec），手机可以协商 HEVC。
+这个开关不改默认的 480x1040。较新的苹果设备只有在宣告的分辨率够高时才会改发 HEVC。
+例如：
+  AirPlayServer.Host.exe --h265 --screen 1290x2796 --model iphone-15-pro-max
+Windows 用 Media Foundation 的 HEVC 解码器。机器上没有该解码器时，控制台会写明，H.264 仍然可用。
+Linux 包不解码 HEVC。
+
 Linux 包不创建窗口，也不包含 Media Foundation 解码。可以用 --demo-frame 检查导出。
 linux-x64 包里的 airplayserver.service 是 systemd 草稿，不含 --seed。
 把 AirPlayServer.Host 拷到 /usr/local/bin/ 后再启用。

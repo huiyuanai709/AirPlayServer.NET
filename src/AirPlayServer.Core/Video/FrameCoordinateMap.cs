@@ -6,8 +6,9 @@ namespace AirPlayServer.Core.Video;
 /// Maps a window client point into the mirrored frame, then into TapClock's
 /// absolute screen. The frame is painted into <see cref="FrameDestination"/>:
 /// stretch uses the whole client, letterbox uses the fitted picture and leaves
-/// bars outside it. The mirror window letterboxes. A point outside that
-/// rectangle, including the bars, is not on the picture.
+/// bars outside it. The mirror window letterboxes and fills only those bars.
+/// <see cref="LetterboxBars"/> lists the strips and does not include the picture.
+/// A point outside that rectangle, including the bars, is not on the picture.
 /// A point inside maps with
 /// <c>frame = (client - origin) * frameSize / destinationSize</c> (integer
 /// truncation), then clamps to <c>[0, frameSize)</c>. GDI may filter the
@@ -68,6 +69,120 @@ internal static class FrameCoordinateMap
         }
 
         return new FrameDestination((clientWidth - width) / 2, 0, width, clientHeight);
+    }
+
+    /// <summary>
+    /// Black strips around <paramref name="picture"/> inside the client.
+    /// Writes up to four rectangles, in order: top, bottom, left, right.
+    /// A strip with no area is omitted. The picture rectangle is never written,
+    /// so a blit can fill these and then stretch the frame without wiping it.
+    /// When the picture already fills the client the count is zero.
+    /// Integer centering can make the right or bottom strip one pixel larger
+    /// than the left or top. Left and right sit beside the picture only, so
+    /// they do not overlap the top and bottom strips.
+    /// A non-positive client returns zero. A picture that covers no client
+    /// pixel yields one strip, the whole client. <paramref name="bars"/> must
+    /// have room for four rectangles.
+    /// </summary>
+    public static int LetterboxBars(
+        int clientWidth,
+        int clientHeight,
+        FrameDestination picture,
+        Span<FrameDestination> bars)
+    {
+        if (bars.Length < 4)
+        {
+            throw new ArgumentException("Letterbox bars need room for four rectangles.", nameof(bars));
+        }
+
+        if (clientWidth <= 0 || clientHeight <= 0)
+        {
+            return 0;
+        }
+
+        if (!TryClipPicture(clientWidth, clientHeight, picture, out var left, out var top, out var right, out var bottom))
+        {
+            bars[0] = new FrameDestination(0, 0, clientWidth, clientHeight);
+            return 1;
+        }
+
+        var count = 0;
+        if (top > 0)
+        {
+            bars[count++] = new FrameDestination(0, 0, clientWidth, top);
+        }
+
+        if (bottom < clientHeight)
+        {
+            bars[count++] = new FrameDestination(0, bottom, clientWidth, clientHeight - bottom);
+        }
+
+        var beside = bottom - top;
+        if (left > 0)
+        {
+            bars[count++] = new FrameDestination(0, top, left, beside);
+        }
+
+        if (right < clientWidth)
+        {
+            bars[count++] = new FrameDestination(right, top, clientWidth - right, beside);
+        }
+
+        return count;
+    }
+
+    private static bool TryClipPicture(
+        int clientWidth,
+        int clientHeight,
+        FrameDestination picture,
+        out int left,
+        out int top,
+        out int right,
+        out int bottom)
+    {
+        left = 0;
+        top = 0;
+        right = 0;
+        bottom = 0;
+        if (picture.Width <= 0 || picture.Height <= 0)
+        {
+            return false;
+        }
+
+        var startX = picture.X;
+        var startY = picture.Y;
+        var endX = (long)picture.X + picture.Width;
+        var endY = (long)picture.Y + picture.Height;
+        if (startX < 0)
+        {
+            startX = 0;
+        }
+
+        if (startY < 0)
+        {
+            startY = 0;
+        }
+
+        if (endX > clientWidth)
+        {
+            endX = clientWidth;
+        }
+
+        if (endY > clientHeight)
+        {
+            endY = clientHeight;
+        }
+
+        if (startX >= clientWidth || startY >= clientHeight || endX <= startX || endY <= startY)
+        {
+            return false;
+        }
+
+        left = startX;
+        top = startY;
+        right = (int)endX;
+        bottom = (int)endY;
+        return true;
     }
 
     public static bool TryMapClientToFrame(

@@ -82,6 +82,98 @@ public sealed class FrameCoordinateMapTests
     }
 
     [Fact]
+    public void Letterbox_bars_leave_the_picture_untouched_and_cover_the_margin()
+    {
+        // Wide client: side bars. A one-pixel remainder from integer centering stays on the right.
+        AssertBars(960, 1040, 480, 1040,
+            new FrameCoordinateMap.FrameDestination(0, 0, 240, 1040),
+            new FrameCoordinateMap.FrameDestination(720, 0, 240, 1040));
+        AssertBars(101, 200, 480, 1040,
+            new FrameCoordinateMap.FrameDestination(0, 0, 4, 200),
+            new FrameCoordinateMap.FrameDestination(96, 0, 5, 200));
+        // Window only slightly off a 480×1040 phone still has bars, and they are not the picture.
+        AssertBars(480, 1000, 480, 1040,
+            new FrameCoordinateMap.FrameDestination(0, 0, 9, 1000),
+            new FrameCoordinateMap.FrameDestination(470, 0, 10, 1000));
+
+        // Narrow client: top and bottom bars. The extra pixel stays on the bottom.
+        AssertBars(30, 40, 100, 50,
+            new FrameCoordinateMap.FrameDestination(0, 0, 30, 12),
+            new FrameCoordinateMap.FrameDestination(0, 27, 30, 13));
+        AssertBars(1, 100, 10000, 1,
+            new FrameCoordinateMap.FrameDestination(0, 0, 1, 49),
+            new FrameCoordinateMap.FrameDestination(0, 50, 1, 50));
+        AssertBars(400, 1041, 480, 1040,
+            new FrameCoordinateMap.FrameDestination(0, 0, 400, 87),
+            new FrameCoordinateMap.FrameDestination(0, 953, 400, 88));
+
+        AssertBars(480, 1040, 480, 1040);
+
+        Span<FrameCoordinateMap.FrameDestination> none = stackalloc FrameCoordinateMap.FrameDestination[4];
+        var fitted = FrameCoordinateMap.Letterbox(480, 1040, 480, 1040);
+        Assert.Equal(0, FrameCoordinateMap.LetterboxBars(0, 40, fitted, none));
+        Assert.Equal(0, FrameCoordinateMap.LetterboxBars(-1, 40, fitted, none));
+
+        var whole = new FrameCoordinateMap.FrameDestination[4];
+        Assert.Equal(1, FrameCoordinateMap.LetterboxBars(8, 6, new FrameCoordinateMap.FrameDestination(0, 0, 0, 0), whole));
+        Assert.Equal(new FrameCoordinateMap.FrameDestination(0, 0, 8, 6), whole[0]);
+        Assert.Equal(1, FrameCoordinateMap.LetterboxBars(8, 6, new FrameCoordinateMap.FrameDestination(20, 20, 2, 2), whole));
+        Assert.Equal(new FrameCoordinateMap.FrameDestination(0, 0, 8, 6), whole[0]);
+
+        Assert.Equal(2, FrameCoordinateMap.LetterboxBars(10, 10, new FrameCoordinateMap.FrameDestination(-2, -3, 5, 6), whole));
+        Assert.Equal(new FrameCoordinateMap.FrameDestination(0, 3, 10, 7), whole[0]);
+        Assert.Equal(new FrameCoordinateMap.FrameDestination(3, 0, 7, 3), whole[1]);
+
+        var shortSpan = new FrameCoordinateMap.FrameDestination[3];
+        var error = Assert.Throws<ArgumentException>(() =>
+            FrameCoordinateMap.LetterboxBars(8, 6, new FrameCoordinateMap.FrameDestination(0, 0, 4, 4), shortSpan));
+        Assert.Equal("bars", error.ParamName);
+    }
+
+    private static void AssertBars(
+        int clientWidth,
+        int clientHeight,
+        int frameWidth,
+        int frameHeight,
+        params FrameCoordinateMap.FrameDestination[] expected)
+    {
+        var picture = FrameCoordinateMap.Letterbox(clientWidth, clientHeight, frameWidth, frameHeight);
+        Span<FrameCoordinateMap.FrameDestination> bars = stackalloc FrameCoordinateMap.FrameDestination[4];
+        var count = FrameCoordinateMap.LetterboxBars(clientWidth, clientHeight, picture, bars);
+        Assert.Equal(expected.Length, count);
+        for (var i = 0; i < expected.Length; i++)
+        {
+            Assert.Equal(expected[i], bars[i]);
+        }
+
+        var covered = new byte[clientWidth * clientHeight];
+        Mark(covered, clientWidth, picture, 1);
+        for (var i = 0; i < count; i++)
+        {
+            Mark(covered, clientWidth, bars[i], 2);
+        }
+
+        for (var i = 0; i < covered.Length; i++)
+        {
+            Assert.NotEqual(0, covered[i]);
+        }
+    }
+
+    private static void Mark(byte[] covered, int clientWidth, FrameCoordinateMap.FrameDestination rect, byte kind)
+    {
+        Assert.True(rect.Width > 0 && rect.Height > 0);
+        for (var y = 0; y < rect.Height; y++)
+        {
+            for (var x = 0; x < rect.Width; x++)
+            {
+                var index = (rect.Y + y) * clientWidth + (rect.X + x);
+                Assert.Equal(0, covered[index]);
+                covered[index] = kind;
+            }
+        }
+    }
+
+    [Fact]
     public void Mouse_lparam_is_a_pair_of_signed_client_coordinates()
     {
         FrameCoordinateMap.ClientPoint(10 | (20 << 16), out var x, out var y);

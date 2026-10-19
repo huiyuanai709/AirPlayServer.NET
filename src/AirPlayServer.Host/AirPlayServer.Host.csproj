@@ -9,6 +9,7 @@
     <OptimizationPreference>Speed</OptimizationPreference>
     <EventSourceSupport>false</EventSourceSupport>
     <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Description>Native AOT host for the AirPlayServer.NET receiver.</Description>
   </PropertyGroup>
 
@@ -27,4 +28,32 @@
   <ItemGroup>
     <InternalsVisibleTo Include="AirPlayServer.Host.Tests" />
   </ItemGroup>
+
+  <!-- Bake the publish version into a const. Assembly attribute lookup is
+       reflection, and Native AOT with warnings-as-errors will not keep it. -->
+  <Target Name="GenerateHostVersion" BeforeTargets="CoreCompile">
+    <PropertyGroup>
+      <_HostVersionFile>$(IntermediateOutputPath)HostVersion.g.cs</_HostVersionFile>
+      <_HostInfo>$([System.Text.RegularExpressions.Regex]::Replace('$(InformationalVersion)', '[;&quot;\r\n\\]', ''))</_HostInfo>
+      <_HostVer>$([System.Text.RegularExpressions.Regex]::Replace('$(Version)', '[;&quot;\r\n\\]', ''))</_HostVer>
+      <_HostInfo Condition="'$(_HostInfo)' == ''">0.0.0</_HostInfo>
+      <_HostVer Condition="'$(_HostVer)' == ''">0.0.0</_HostVer>
+    </PropertyGroup>
+    <ItemGroup>
+      <_AirPlayHostVersionLine Remove="@(_AirPlayHostVersionLine)" />
+      <_AirPlayHostVersionLine Include="// &lt;auto-generated /&gt;" />
+      <_AirPlayHostVersionLine Include="namespace AirPlayServer.Host%3B" />
+      <_AirPlayHostVersionLine Include="internal static class HostVersion" />
+      <_AirPlayHostVersionLine Include="{" />
+      <_AirPlayHostVersionLine Include="    public const string InformationalVersion = &quot;$(_HostInfo)&quot;%3B" />
+      <_AirPlayHostVersionLine Include="    public const string Version = &quot;$(_HostVer)&quot;%3B" />
+      <_AirPlayHostVersionLine Include="}" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(_HostVersionFile)" Lines="@(_AirPlayHostVersionLine)" Overwrite="true" />
+    <ItemGroup>
+      <Compile Remove="$(_HostVersionFile)" />
+      <Compile Include="$(_HostVersionFile)" />
+      <FileWrites Include="$(_HostVersionFile)" />
+    </ItemGroup>
+  </Target>
 </Project>

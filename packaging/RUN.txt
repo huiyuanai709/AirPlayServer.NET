@@ -43,7 +43,7 @@ Linux：sudo apt-get install ffmpeg
 也可以把 libavcodec.so.N、libavutil.so.N、libswresample.so.N 放在本目录。
 当前主版本是 libavcodec.so.63、libavutil.so.61、libswresample.so.7。
 这些库是 LGPL-2.1-or-later，带 GPL 组件的构建则是 GPL。分发它们时要遵守该构建的许可证。
-本程序是 GPL-3.0-only。自动更新不会删除你另外拷进来的 DLL / SO。
+本程序是 GPL-3.0-only。更新不会删除你另外拷进来的 DLL / SO。
 
 Linux 包不创建窗口，也不包含 Media Foundation。没有 FFmpeg 时可以用 --demo-frame 检查导出。
 linux-x64 包里的 airplayserver.service 是 systemd 草稿，不含 --seed。
@@ -53,11 +53,13 @@ linux-x64 包里的 airplayserver.service 是 systemd 草稿，不含 --seed。
 --seed 只留在内存里，不要写进单元文件或脚本后提交。
 发布包不含 .pdb / .dbg 调试符号，运行不需要它们。
 
-启动时会检查 GitHub 上这个仓库的最新稳定版（不含预发布）。
-版本以本目录的 VERSION.txt 为准。有较新版本时，下载同一平台的 zip，
-能对上 SHA256SUMS.txt 就先校验，再替换本目录里的程序和这些说明文件，然后重新启动。
-检查失败、校验失败或目录不可写时，只记日志，继续跑当前这个程序。
-不想检查时加上 --no-update。只检查、不启动接收端时用 --check-update 或 --update。
-已经是最新稳定版时，这两条只打印版本并退出。
+默认不检查更新；用 --update 手动更新。普通启动不访问 GitHub。
+要更新时运行 --update 或 --check-update。版本以本目录的 VERSION.txt 为准。
+有较新稳定版时，下载同一平台的 zip，能对上 SHA256SUMS.txt 就先校验，
+再替换本目录里的程序和这些说明文件，然后重新启动。
+已经是最新稳定版时，这两条只打印版本并退出，不启动接收端。
+--no-update 仍然可以写，效果和默认一样，可以和其他参数一起用。
+--auto-update 会在这次启动时检查。检查失败、GitHub 速率用完、校验失败或目录不可写时，
+只记日志，继续跑当前这个程序。
 --version 打印版本，不访问网络。
 公开的 Release 不需要令牌。私有仓库请设置环境变量 GITHUB_TOKEN 或 GH_TOKEN。

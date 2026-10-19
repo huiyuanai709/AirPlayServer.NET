@@ -210,8 +210,8 @@ public class SelfUpdateTests
     public void Relaunch_arguments_drop_the_update_flags_and_keep_order()
     {
         var kept = HostUpdate.ArgumentsForRelaunch(
-            ["--name", "客厅", "--update", "--screen", "480x1040", "--check-update"]);
-        Assert.Equal(["--name", "客厅", "--screen", "480x1040"], kept);
+            ["--auto-update", "--name", "客厅", "--update", "--screen", "480x1040", "--check-update", "--no-update"]);
+        Assert.Equal(["--auto-update", "--name", "客厅", "--screen", "480x1040", "--no-update"], kept);
     }
 
     [Fact]

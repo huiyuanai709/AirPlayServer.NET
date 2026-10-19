@@ -94,24 +94,39 @@ public class HostArgsTests
         Assert.Contains("--no-update", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("--update", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("--check-update", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("--auto-update", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("不检查更新；用 --update 手动更新", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("--version", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("SHA256SUMS.txt", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("GITHUB_TOKEN", HostArgs.HelpText, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Update_flags_default_to_a_startup_check()
+    public void Update_flags_default_to_disabled()
     {
-        Assert.Equal(HostUpdateMode.Automatic, HostArgs.Parse([]).UpdateMode);
+        Assert.Equal(HostUpdateMode.Disabled, HostArgs.Parse([]).UpdateMode);
+        Assert.Equal(HostUpdateMode.Disabled, HostArgs.Parse(["--screen", "1290x2796", "--model", "iphone-15-pro-max", "--h265"]).UpdateMode);
         Assert.Equal(HostUpdateMode.Explicit, HostArgs.Parse(["--update"]).UpdateMode);
         Assert.Equal(HostUpdateMode.Explicit, HostArgs.Parse(["--check-update", "--name", "客厅"]).UpdateMode);
+        Assert.Equal(HostUpdateMode.Explicit, HostArgs.Parse(["--update", "--check-update"]).UpdateMode);
         Assert.Equal(HostUpdateMode.Disabled, HostArgs.Parse(["--no-update"]).UpdateMode);
+        Assert.Equal(HostUpdateMode.Disabled, HostArgs.Parse(["--no-update", "--name", "客厅", "--h265"]).UpdateMode);
+        Assert.Equal("客厅", HostArgs.Parse(["--no-update", "--name", "客厅"]).Options.Name);
+        Assert.Equal(HostUpdateMode.Automatic, HostArgs.Parse(["--auto-update"]).UpdateMode);
+        Assert.Equal(HostUpdateMode.Automatic, HostArgs.Parse(["--screen", "1290x2796", "--auto-update", "--auto-update"]).UpdateMode);
         Assert.True(HostArgs.Parse(["--version"]).ShowVersion);
 
         var updateFirst = Assert.Throws<ArgumentException>(() => HostArgs.Parse(["--update", "--no-update"]));
         Assert.Contains("--update", updateFirst.Message, StringComparison.Ordinal);
+        Assert.Contains("--no-update", updateFirst.Message, StringComparison.Ordinal);
         var skipFirst = Assert.Throws<ArgumentException>(() => HostArgs.Parse(["--no-update", "--check-update"]));
         Assert.Contains("--no-update", skipFirst.Message, StringComparison.Ordinal);
+        var autoWithSkip = Assert.Throws<ArgumentException>(() => HostArgs.Parse(["--auto-update", "--no-update"]));
+        Assert.Contains("--auto-update", autoWithSkip.Message, StringComparison.Ordinal);
+        Assert.Contains("--no-update", autoWithSkip.Message, StringComparison.Ordinal);
+        var autoWithUpdate = Assert.Throws<ArgumentException>(() => HostArgs.Parse(["--update", "--auto-update", "--name", "客厅"]));
+        Assert.Contains("--update", autoWithUpdate.Message, StringComparison.Ordinal);
+        Assert.Contains("--auto-update", autoWithUpdate.Message, StringComparison.Ordinal);
     }
 
     [Fact]

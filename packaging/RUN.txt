@@ -33,12 +33,15 @@ Windows 先用 Media Foundation HEVC。没有 CLSID_CMSH265DecoderMFT（也没�
 Linux 上 H.264 和 HEVC 都只走 FFmpeg。
 
 FFmpeg 不在这个压缩包里，也没有链进程序。把共享库放在本目录，或装到系统路径。
-认 FFmpeg 4.4 到 8（libavcodec 58–62，libavutil 56–60）。
+认 FFmpeg 4.4 到 9（libavcodec 58–63，libavutil 56–61，libswresample 3–7）。
 Windows：从 https://github.com/BtbN/FFmpeg-Builds/releases 下载 win64-lgpl-shared
-（win64-gpl-shared 也可以；不要用 static），把 bin 里的 DLL 全部拷到本目录。
+（win64-gpl-shared 也可以；不要用 static）。n7、n8，以及当前带 avcodec-63.dll 的构建
+（n9.0 或 master）都可以。把 bin 里的 DLL 全部拷到本目录。
 至少要有同一版本的 avcodec-*.dll、avutil-*.dll、swresample-*.dll。
+当前这组是 avcodec-63.dll、avutil-61.dll、swresample-7.dll。
 Linux：sudo apt-get install ffmpeg
 也可以把 libavcodec.so.N、libavutil.so.N、libswresample.so.N 放在本目录。
+当前主版本是 libavcodec.so.63、libavutil.so.61、libswresample.so.7。
 这些库是 LGPL-2.1-or-later，带 GPL 组件的构建则是 GPL。分发它们时要遵守该构建的许可证。
 本程序是 GPL-3.0-only。更新不会删除你另外拷进来的 DLL / SO。
 

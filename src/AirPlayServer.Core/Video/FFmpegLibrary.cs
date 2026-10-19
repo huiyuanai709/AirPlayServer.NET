@@ -229,18 +229,12 @@ internal sealed unsafe class FFmpegLibrary
             return null;
         }
 
-        // Newest compatible SONAME first. Each triple is one FFmpeg major:
+        // Newest compatible SONAME first. Each triple is one FFmpeg major
+        // (avcodec, avutil, swresample): 9 / current BtbN master (63/61/7),
         // 8 (62/60/6), 7 (61/59/5), 6 (60/58/4), 5 (59/57/4), 4.4 (58/56/3).
-        (int Avcodec, int Avutil, int Swresample)[] triples =
-        [
-            (62, 60, 6),
-            (61, 59, 5),
-            (60, 58, 4),
-            (59, 57, 4),
-            (58, 56, 3),
-        ];
-
-        foreach (var triple in triples)
+        // Windows names are avcodec-63.dll, avutil-61.dll, swresample-7.dll.
+        // Linux names are libavcodec.so.63, libavutil.so.61, libswresample.so.7.
+        foreach (var triple in SonameTriples)
         {
             if (TryLoadTriple(triple.Avutil, triple.Swresample, triple.Avcodec, out var avutil, out var avcodec, out var avutilName, out var avcodecName)
                 && TryBind(avutil, avcodec, avutilName, avcodecName, out var library))
@@ -337,7 +331,7 @@ internal sealed unsafe class FFmpegLibrary
         {
             // AVFrame has no leading AVClass, so av_opt_set does not write its fields.
             // The prefix (data, linesize, extended_data, width, height, nb_samples, format)
-            // is stable across FFmpeg 4.4 through 8; the buffer allocation checks it.
+            // is stable across FFmpeg 4.4 through 9; the buffer allocation checks it.
             Marshal.WriteInt32(frame, WidthOffset, 32);
             Marshal.WriteInt32(frame, HeightOffset, 32);
             Marshal.WriteInt32(frame, FormatOffset, PixelYuv420P);
@@ -413,10 +407,25 @@ internal sealed unsafe class FFmpegLibrary
     private static string Unversioned(string library)
         => OperatingSystem.IsWindows() ? library + ".dll" : "lib" + library + ".so";
 
-    private static string FileName(string library, int major)
-        => OperatingSystem.IsWindows()
+    // Newest first. Windows: avcodec-N.dll. Linux: libavcodec.so.N.
+    // 9 / current BtbN master and n9.0 ship avcodec 63, avutil 61, swresample 7.
+    internal static readonly (int Avcodec, int Avutil, int Swresample)[] SonameTriples =
+    [
+        (63, 61, 7),
+        (62, 60, 6),
+        (61, 59, 5),
+        (60, 58, 4),
+        (59, 57, 4),
+        (58, 56, 3),
+    ];
+
+    internal static string LibraryFileName(string library, int major, bool windows)
+        => windows
             ? library + "-" + major.ToString(CultureInfo.InvariantCulture) + ".dll"
             : "lib" + library + ".so." + major.ToString(CultureInfo.InvariantCulture);
+
+    private static string FileName(string library, int major)
+        => LibraryFileName(library, major, OperatingSystem.IsWindows());
 
     private static bool TryLoadTriple(int avutilMajor, int swresampleMajor, int avcodecMajor, out nint avutil, out nint avcodec, out string avutilName, out string avcodecName)
         => TryLoadTriple(FileName("avutil", avutilMajor), FileName("swresample", swresampleMajor), FileName("avcodec", avcodecMajor), out avutil, out avcodec, out avutilName, out avcodecName);

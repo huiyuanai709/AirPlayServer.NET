@@ -81,8 +81,11 @@ must follow that build's license. An LGPL build must stay replaceable; this
 process does not absorb FFmpeg into the Native AOT image.
 
 Copyright (c) the FFmpeg developers. <https://ffmpeg.org/>
-Upstream receiver builds used LGPL-2.1-or-later FFmpeg. See the README section
-"FFmpeg（可选，运行时加载）" for which SONAMEs are probed and where to put the files.
+Upstream receiver builds used LGPL-2.1-or-later FFmpeg. The host probes BtbN
+n7 and n8 shared builds, and current builds that ship avcodec 63 (n9.0 or
+master: `avcodec-63.dll` / `libavcodec.so.63`, with avutil 61 and swresample 7),
+then older SONAMEs back to FFmpeg 4.4. See the README section
+"FFmpeg（可选，运行时加载）" for the full probe list and where to put the files.
 
 ## TapClock screen catalog
 

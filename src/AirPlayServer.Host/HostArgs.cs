@@ -46,6 +46,10 @@ internal sealed class HostArgs
           AirPlayServer.Host --version
           AirPlayServer.Host --help
 
+        --listen 默认 0.0.0.0。控制端口仍监听全部 IPv4。mDNS 通告会选一张手机能到达的局域网地址，
+        跳过 Hyper-V vEthernet、WSL、Docker、Clash TAP、VPN 和 169.254 链路本地。
+        只剩这些地址时才用第一张非回环网卡。写成具体地址（例如 --listen 192.168.5.15）时，监听和通告都用它。
+
         FairPlay 默认开启。POST /fp-setup 和 72 字节 ekey 共用同一次进程内握手。
         TapClock 仍然用 --tapclock、--tapclock-dir、--tapclock-fps。
         Windows 上让手机画面进 TapClock 的顺序：

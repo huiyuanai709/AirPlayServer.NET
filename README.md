@@ -8,7 +8,7 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 
 ## 现在能做什么
 
-- 用 UDP 套接字向 `224.0.0.251:5353` 通告 `_airplay._tcp` 和 `_raop._tcp`，并回答匹配的 mDNS 查询。
+- 用 UDP 套接字向 `224.0.0.251:5353` 通告 `_airplay._tcp` 和 `_raop._tcp`，并回答匹配的 mDNS 查询。默认 `--listen 0.0.0.0` 时，A 记录选手机能到达的局域网 IPv4（跳过 Hyper-V `vEthernet`、WSL、Docker、Clash TAP、VPN 和 `169.254.0.0/16`；只剩这些地址才用第一张非回环网卡）。`--listen 192.168.x.y` 则监听和通告都用该地址。
 - 在 AirPlay 端口（默认 7001）和 RAOP 端口（默认 5001）上接受 HTTP/1.1 与 RTSP/1.0 控制连接。读取用 `System.IO.Pipelines`。
 - 完成瞬时配对：`POST /pair-setup` 返回 Ed25519 公钥；`POST /pair-verify` 做 X25519、对两端临时公钥签名，再用 SHA-512 派生的 AES-128-CTR 掩住签名。
 - `GET /server-info` 返回 XML plist，`GET|POST /info` 返回二进制 plist。

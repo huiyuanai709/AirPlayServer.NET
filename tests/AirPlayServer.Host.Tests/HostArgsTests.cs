@@ -1,5 +1,7 @@
 using AirPlayServer.Core;
+using AirPlayServer.Core.Notify;
 using AirPlayServer.Host;
+using AirPlayServer.Host.Notify;
 
 namespace AirPlayServer.Host.Tests;
 
@@ -145,5 +147,48 @@ public class HostArgsTests
         Assert.Contains("--h265", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("--hevc", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("1290x2796", HostArgs.HelpText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Notify_flags_override_the_config_file_and_can_hide_the_page()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "airplay-notify-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var path = Path.Combine(directory, "session-notify.json");
+            SessionNotifyConfigStore.Save(path, new SessionNotifyConfig { DisconnectDebounceMs = 1000 });
+            var parsed = HostArgs.Parse(
+            [
+                "--notify-config", path,
+                "--tapclock-events",
+                "--tapclock-base", "http://127.0.0.1:5099",
+                "--notify-debounce-ms", "2500",
+                "--notify-port", "7101",
+                "--notify-listen", "127.0.0.1",
+                "--no-notify",
+            ]);
+            var plan = SessionNotifyService.Load(parsed.Notify);
+            Assert.True(plan.Config.TapClockEventsEnabled);
+            Assert.Equal("http://127.0.0.1:5099", plan.Config.TapClockBaseUrl);
+            Assert.Equal(2500, plan.Config.DisconnectDebounceMs);
+            Assert.Equal(7101, plan.Config.ConfigPort);
+            Assert.Equal("127.0.0.1", plan.Config.ConfigBindAddress);
+            Assert.False(plan.ServePage);
+            Assert.Equal(path, plan.Path);
+
+            var defaults = HostArgs.Parse([]);
+            Assert.False(defaults.Notify.DisablePage);
+            Assert.Null(defaults.Notify.TapClockEvents);
+            Assert.Contains("--tapclock-events", HostArgs.HelpText, StringComparison.Ordinal);
+            Assert.Contains("/api/integrations/airplay/events", HostArgs.HelpText, StringComparison.Ordinal);
+            Assert.Contains("--notify-debounce-ms", HostArgs.HelpText, StringComparison.Ordinal);
+            Assert.Contains("--no-notify", HostArgs.HelpText, StringComparison.Ordinal);
+            Assert.Contains("不操作控制中心", HostArgs.HelpText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 }

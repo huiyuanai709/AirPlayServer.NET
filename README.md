@@ -18,6 +18,49 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 - 宿主默认用进程内 `FairPlayKeys` 回答 `POST /fp-setup`，并在握手之后解开 72 字节 `ekey`。同一次 `FairPlaySession` 同时服务这两步。没有完成握手时，SETUP 仍然 200，随后的加密包只计数、不解码。`/pair-setup-pin`、`/play` 仍返回 501。`--media-key-plugin` 是可选的原生覆盖，FairPlay 不再依赖它。
 - Windows 上用 Media Foundation 把 H.264 解成 BGRA，GDI 窗口显示最新一帧。HEVC 先试 Media Foundation，打不开时用程序旁边的 FFmpeg。Linux 上不创建窗口，也不把 `mfplat` / `user32` 编进 linux-x64 的 AOT 二进制；H.264 / HEVC 在运行时加载 FFmpeg（`libavcodec` / `libavutil`）。没有解码器时可以用 `--demo-frame`。`--h265` 只有在 HEVC 解码器真能打开时才宣告 features 第 42 位。
 - 可选地把最新帧编码成 JPEG，按 TapClock ATBF type 3 推到 `host:42125`，或原子写入监视目录。默认关闭。
+- 镜像数据连上或断开时，可以 POST Webhook，并按 TapClock 的集成接口通知它重连。配置页默认开在 `127.0.0.1:7099`。本程序不点击控制中心。
+
+## 镜像连接通知
+
+「已连接」指镜像**数据** TCP 端口已经解析到至少一个合法的 128 字节包头。只完成 RTSP `SETUP`、或有人往数据端口发 HTTP，都不算连接。锁屏的 type 110 `TEARDOWN`、完整 `TEARDOWN`、以及数据连接自己断开，都会进入断连。断连先等防抖（默认 3000 毫秒）。这段时间里新的数据连接又建立，就不发 `disconnected`，会话 id 也不变。防抖结束仍没有数据连接，才把状态改成未连接并 POST。进程退出不补发断连，避免接收端已经停了 TapClock 还去重连。
+
+`session_id` 在同一次镜像会话里保持不变，包括锁屏后的 type 110 重连。完整 `TEARDOWN` 被发布成断连之后会清掉，下一次会话用新的 id。
+
+配置写在程序旁边的 `session-notify.json`，也可以用 `--notify-config` 指定。页面用 Tailwind CDN，没有 Node 构建。监听地址和端口改完后下次启动生效，默认只绑本机。
+
+TapClock 主路径（与通用 Webhook 并行，互不替代）：
+
+```http
+POST {tapclock_base}/api/integrations/airplay/events
+Content-Type: application/json
+X-TapClock-Token: <共享密钥，可省略>
+```
+
+`tapclock_base` 默认 `http://127.0.0.1:5088`。正文：
+
+```json
+{
+  "event": "connected",
+  "at": "2026-10-19T14:30:00.0000000+00:00",
+  "session_id": "32位十六进制，可省略",
+  "reason": "mirror-data",
+  "source": "AirPlayServer.NET"
+}
+```
+
+`event` 是 `connected` 或 `disconnected`。`at` 是带时区偏移的 ISO-8601。`reason` 可能是 `mirror-data`、`data-closed`、`video-teardown`、`session-teardown`。非 2xx（包括 202、409、400 以外的失败）只记日志，不让宿主退出。重试、冷却和「控制中心 → 屏幕镜像 → AirPlay → 上一台设备」的点击都由 TapClock 做。
+
+通用 Webhook 另有连接地址和断开地址。正文是 `event`、`at`、`device`、`session_id`、`reason`。可选一个自定义头带共享密钥。
+
+`GET http://127.0.0.1:7099/api/status`：
+
+```json
+{ "connected": true, "since": "2026-10-19T14:30:00.0000000+00:00", "name": "设备名或接收端名", "session_id": "...", "disconnect_pending": false }
+```
+
+`connected` 在防抖期间仍为 true，`disconnect_pending` 为 true。`since` 在未连接时为 null。
+
+Connected means a parsed 128-byte mirror data header, not RTSP SETUP by itself. Disconnect is posted only after the debounce (default 3000 ms) if no replacement data client appears. TapClock receives `POST {base}/api/integrations/airplay/events`. This process does not synthesize Control Center clicks.
 
 ## 架构
 
@@ -31,6 +74,8 @@ mDNS announcer                         control listeners :7001 and :5001
                  AirPlayReceiver
                           |
                           |  TCP mirror data + UDP timing
+                          |  session notify -> webhooks + TapClock events
+                          |  config page 127.0.0.1:7099  GET /api/status
                           v
                  FairPlayKeys (fp-setup + 72-byte ekey) -> AES-CTR
                  IH264Decoder  ->  FrameSlot (latest BGRA)
@@ -46,9 +91,9 @@ mDNS announcer                         control listeners :7001 and :5001
 | 项目 | 职责 |
 | --- | --- |
 | `deps/AirPlayFairPlay` | 进程内 FairPlay。`FairPlaySession` 来自 AirPlayFairPlayPlugin `8a6a9c46`。GPL-3.0-only。 |
-| `src/AirPlayServer.Core` | 协议库。`IsAotCompatible`。发现、配对、`FairPlayKeys`、镜像、JPEG/ATBF。 |
+| `src/AirPlayServer.Core` | 协议库。`IsAotCompatible`。发现、配对、`FairPlayKeys`、镜像、JPEG/ATBF、镜像会话通知。 |
 | `src/AirPlayServer.Host` | 控制台宿主。`PublishAot`。 |
-| `tests/AirPlayServer.Core.Tests` | 握手、镜像包、解密、SETUP plist、ATBF 与目录改名、机型表与 `/info` 广告尺寸。 |
+| `tests/AirPlayServer.Core.Tests` | 握手、镜像包、解密、SETUP plist、ATBF 与目录改名、机型表与 `/info` 广告尺寸、会话通知与防抖。 |
 | `tests/AirPlayServer.Host.Tests` | `--model` 解析 UIKit 点，`--screen` 单独决定广告分辨率。版本比较、发布资源名、SHA256 和自更新替换也在这里。 |
 | `packaging/` | 本地 AOT 发布脚本、systemd 草稿，以及 Release 包里的 `RUN.txt`。脚本本身不创建 GitHub Release。 |
 | `.github/workflows/ci.yml` | PR 和 push 上的 restore、build、test，以及 linux-x64 / win-x64 的 AOT 发布冒烟。 |

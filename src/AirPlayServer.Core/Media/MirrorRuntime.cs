@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using AirPlayServer.Core.Notify;
 using AirPlayServer.Core.Pairing;
 using AirPlayServer.Core.Protocol;
 using AirPlayServer.Core.Video;
@@ -28,6 +29,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private readonly IMediaKeyUnwrapper _unwrapper;
     private readonly byte[]? _labKey;
     private readonly IAirPlayLog _log;
+    private readonly MirrorSessionTracker _sessions = new();
     private readonly MirrorDecryptor _decryptor = new();
     private readonly CancellationTokenSource _cancellation = new();
     private readonly object _gate = new();
@@ -108,6 +110,12 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
     public MirrorActivity Activity { get; }
 
+    /// <summary>
+    /// Published mirror data session. Connected starts at the first valid
+    /// 128-byte mirror header on the data port, not at RTSP SETUP.
+    /// </summary>
+    public MirrorSessionTracker Sessions => _sessions;
+
     public static MirrorRuntime Start(
         IPAddress listen,
         int eventPort,
@@ -152,6 +160,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             return;
         }
 
+        _sessions.Dispose();
         await _cancellation.CancelAsync().ConfigureAwait(false);
         DropClient();
         _data.Dispose();
@@ -314,6 +323,16 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 ResetDecodersLocked();
             }
 
+            if (kind == TeardownKind.VideoOnly)
+            {
+                _sessions.LatchDetachReason(MirrorSessionReasons.VideoTeardown);
+            }
+            else
+            {
+                _sessions.LatchDetachReason(MirrorSessionReasons.SessionTeardown);
+                _sessions.NoteSessionEnded();
+            }
+
             DropClient();
             _log.Log(AirPlayLogLevel.Information, kind == TeardownKind.VideoOnly
                 ? "Mirror video teardown. Session key kept for the next SETUP."
@@ -473,9 +492,10 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             Activity.SetKeysReady(false);
         }
 
+        var name = Find(root, "name") is PlistString sender && !string.IsNullOrWhiteSpace(sender.Value) ? sender.Value : null;
+        _sessions.NoteSessionStarting(name);
         DropClient();
-        var name = Find(root, "name") is PlistString sender ? sender.Value : "unknown";
-        _log.Log(AirPlayLogLevel.Information, "Mirror session setup from " + name + ". Video CTR starts at the next type-110 SETUP.");
+        _log.Log(AirPlayLogLevel.Information, "Mirror session setup from " + (name ?? "unknown") + ". Video CTR starts at the next type-110 SETUP.");
         return Http1Response.Empty(200);
     }
 
@@ -570,73 +590,103 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(clientToken, cancellationToken);
         var readToken = linked.Token;
         var header = new byte[128];
-        while (!readToken.IsCancellationRequested)
+        long generation = 0;
+        try
         {
-            await ReadExactAsync(client, header.AsMemory(0, 4), readToken).ConfigureAwait(false);
-            if ((header[0] == (byte)'P' && header[1] == (byte)'O' && header[2] == (byte)'S' && header[3] == (byte)'T')
-                || (header[0] == (byte)'G' && header[1] == (byte)'E' && header[2] == (byte)'T'))
+            var established = false;
+            while (!readToken.IsCancellationRequested)
             {
-                _log.Log(AirPlayLogLevel.Information, "Mirror data connection sent HTTP. Closing it.");
-                return;
-            }
-
-            await ReadExactAsync(client, header.AsMemory(4, 124), readToken).ConfigureAwait(false);
-            if (!MirrorHeader.TryParse(header, out var parsed))
-            {
-                return;
-            }
-
-            if (parsed.PayloadSize < 0 || parsed.PayloadSize > MaxPayloadBytes)
-            {
-                _log.Log(AirPlayLogLevel.Warning, "Mirror payload size " + parsed.PayloadSize + " was rejected.");
-                return;
-            }
-
-            if (parsed.SenderPaused)
-            {
-                _log.Log(AirPlayLogLevel.Information, "Mirror sender paused.");
-            }
-            else if (parsed.SenderResumed)
-            {
-                _log.Log(AirPlayLogLevel.Information, "Mirror sender resumed.");
-            }
-
-            if (parsed.PayloadSize == 0)
-            {
-                if (parsed.PayloadType == 1 && !_acceptHevc && Interlocked.Exchange(ref _loggedEmptyCodec, 1) == 0)
+                if (!established)
                 {
-                    _log.Log(AirPlayLogLevel.Warning, "Mirror codec packet was empty. That usually means the sender wanted a codec other than H.264 while Features bit 42 is off. Start the host with --h265 to advertise SupportsScreenMultiCodec.");
+                    await ReadExactAsync(client, header.AsMemory(0, 4), readToken).ConfigureAwait(false);
+                    if (IsHttpProbe(header))
+                    {
+                        _log.Log(AirPlayLogLevel.Information, "Mirror data connection sent HTTP. Closing it.");
+                        return;
+                    }
+
+                    await ReadExactAsync(client, header.AsMemory(4, 124), readToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    await ReadExactAsync(client, header, readToken).ConfigureAwait(false);
                 }
 
-                continue;
-            }
+                if (!MirrorHeader.TryParse(header, out var parsed))
+                {
+                    return;
+                }
 
-            var rented = ArrayPool<byte>.Shared.Rent(parsed.PayloadSize);
-            try
-            {
-                await ReadExactAsync(client, rented.AsMemory(0, parsed.PayloadSize), readToken).ConfigureAwait(false);
+                if (parsed.PayloadSize < 0 || parsed.PayloadSize > MaxPayloadBytes)
+                {
+                    _log.Log(AirPlayLogLevel.Warning, "Mirror payload size " + parsed.PayloadSize + " was rejected.");
+                    return;
+                }
+
+                if (!established)
+                {
+                    // Connected means this header parsed. SETUP alone never reaches here.
+                    generation = _sessions.BeginData(DateTimeOffset.UtcNow);
+                    established = true;
+                }
+
+                if (parsed.SenderPaused)
+                {
+                    _log.Log(AirPlayLogLevel.Information, "Mirror sender paused.");
+                }
+                else if (parsed.SenderResumed)
+                {
+                    _log.Log(AirPlayLogLevel.Information, "Mirror sender resumed.");
+                }
+
+                if (parsed.PayloadSize == 0)
+                {
+                    if (parsed.PayloadType == 1 && !_acceptHevc && Interlocked.Exchange(ref _loggedEmptyCodec, 1) == 0)
+                    {
+                        _log.Log(AirPlayLogLevel.Warning, "Mirror codec packet was empty. That usually means the sender wanted a codec other than H.264 while Features bit 42 is off. Start the host with --h265 to advertise SupportsScreenMultiCodec.");
+                    }
+
+                    continue;
+                }
+
+                var rented = ArrayPool<byte>.Shared.Rent(parsed.PayloadSize);
                 try
                 {
-                    if (parsed.PayloadType == 0)
+                    await ReadExactAsync(client, rented.AsMemory(0, parsed.PayloadSize), readToken).ConfigureAwait(false);
+                    try
                     {
-                        HandleEncrypted(rented.AsSpan(0, parsed.PayloadSize), parsed.IsKeyframe);
+                        if (parsed.PayloadType == 0)
+                        {
+                            HandleEncrypted(rented.AsSpan(0, parsed.PayloadSize), parsed.IsKeyframe);
+                        }
+                        else if (parsed.PayloadType == 1)
+                        {
+                            HandleCodec(rented.AsSpan(0, parsed.PayloadSize), parsed);
+                        }
                     }
-                    else if (parsed.PayloadType == 1)
+                    catch (Exception ex) when (ex is not OperationCanceledException)
                     {
-                        HandleCodec(rented.AsSpan(0, parsed.PayloadSize), parsed);
+                        _log.Log(AirPlayLogLevel.Warning, "Mirror payload was not decoded: " + ex.Message);
                     }
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                finally
                 {
-                    _log.Log(AirPlayLogLevel.Warning, "Mirror payload was not decoded: " + ex.Message);
+                    ArrayPool<byte>.Shared.Return(rented, clearArray: true);
                 }
             }
-            finally
+        }
+        finally
+        {
+            if (generation != 0)
             {
-                ArrayPool<byte>.Shared.Return(rented, clearArray: true);
+                _sessions.EndData(generation);
             }
         }
     }
+
+    private static bool IsHttpProbe(byte[] header)
+        => (header[0] == (byte)'P' && header[1] == (byte)'O' && header[2] == (byte)'S' && header[3] == (byte)'T')
+           || (header[0] == (byte)'G' && header[1] == (byte)'E' && header[2] == (byte)'T');
 
     private void HandleEncrypted(Span<byte> payload, bool keyFrame)
     {

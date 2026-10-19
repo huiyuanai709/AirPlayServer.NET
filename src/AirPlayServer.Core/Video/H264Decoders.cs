@@ -11,12 +11,12 @@ public static class H264Decoders
     public static IH264Decoder CreatePlatformDefault(IAirPlayLog? log = null)
         => Create(log, load: null);
 
-    internal static IH264Decoder Create(IAirPlayLog? log, Func<IAirPlayLog?, FFmpegLibrary?>? load)
+    internal static IH264Decoder Create(IAirPlayLog? log, Func<IAirPlayLog?, FFmpegLibrary?>? load, BgraBufferPool? buffers = null)
     {
 #if WINDOWS_HOST
         if (OperatingSystem.IsWindows())
         {
-            var mediaFoundation = new MediaFoundationH264Decoder(log);
+            var mediaFoundation = new MediaFoundationH264Decoder(log, buffers);
             if (mediaFoundation.IsAvailable)
             {
                 return mediaFoundation;
@@ -29,7 +29,7 @@ public static class H264Decoders
         }
 #endif
         var library = load is not null ? load(log) : FFmpegLibrary.TryLoad(log);
-        if (library is not null && FFmpegH264Decoder.TryCreate(library, log, out var ffmpeg) && ffmpeg is not null)
+        if (library is not null && FFmpegH264Decoder.TryCreate(library, log, buffers, out var ffmpeg) && ffmpeg is not null)
         {
             return ffmpeg;
         }

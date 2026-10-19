@@ -16,12 +16,12 @@ public static class HevcDecoders
     public static IHevcDecoder CreatePlatformDefault(IAirPlayLog? log = null)
         => Create(log, load: null);
 
-    internal static IHevcDecoder Create(IAirPlayLog? log, Func<IAirPlayLog?, FFmpegLibrary?>? load)
+    internal static IHevcDecoder Create(IAirPlayLog? log, Func<IAirPlayLog?, FFmpegLibrary?>? load, BgraBufferPool? buffers = null)
     {
 #if WINDOWS_HOST
         if (OperatingSystem.IsWindows())
         {
-            var mediaFoundation = new MediaFoundationHevcDecoder(log);
+            var mediaFoundation = new MediaFoundationHevcDecoder(log, buffers);
             if (mediaFoundation.IsAvailable)
             {
                 return mediaFoundation;
@@ -35,7 +35,7 @@ public static class HevcDecoders
         }
 #endif
         var library = load is not null ? load(log) : FFmpegLibrary.TryLoad(log);
-        if (library is not null && FFmpegHevcDecoder.TryCreate(library, log, out var ffmpeg) && ffmpeg is not null)
+        if (library is not null && FFmpegHevcDecoder.TryCreate(library, log, buffers, out var ffmpeg) && ffmpeg is not null)
         {
             return ffmpeg;
         }

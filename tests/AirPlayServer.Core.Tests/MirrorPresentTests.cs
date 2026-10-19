@@ -92,6 +92,134 @@ public sealed class MirrorPresentTests
         Assert.False(BgraScale.PaintLetterbox(source, 2, 8, 8, destination, 2, 4, 8, 0, 0, 0, 4, bottomUp: false));
     }
 
+    [Fact]
+    public void Scaled_letterbox_matches_nearest_neighbor_and_forces_alpha()
+    {
+        var sizes = new (int sw, int sh, int dw, int dh, int vw, int vh, int ox, int oy, bool bottomUp, int pad)[]
+        {
+            (4, 2, 4, 2, 4, 2, 0, 0, false, 0),
+            (4, 2, 6, 4, 4, 2, 1, 1, false, 4),
+            (5, 3, 3, 2, 3, 2, 0, 0, false, 0),
+            (2, 2, 5, 4, 5, 4, 0, 0, true, 0),
+            (3, 5, 7, 6, 4, 3, 2, 1, true, 8),
+            (1, 8, 1, 3, 1, 3, 0, 0, false, 0),
+            (8, 1, 3, 1, 3, 1, 0, 0, true, 0),
+        };
+
+        foreach (var size in sizes)
+        {
+            var sourceStride = (size.sw * 4) + size.pad;
+            var source = new byte[sourceStride * size.sh];
+            for (var y = 0; y < size.sh; y++)
+            {
+                for (var x = 0; x < size.sw; x++)
+                {
+                    var index = (y * sourceStride) + (x * 4);
+                    source[index] = (byte)(10 + x);
+                    source[index + 1] = (byte)(20 + y);
+                    source[index + 2] = (byte)(30 + x + y);
+                    source[index + 3] = 1;
+                }
+            }
+
+            var destinationStride = size.dw * 4;
+            var actual = new byte[destinationStride * size.dh];
+            var expected = new byte[actual.Length];
+            actual.AsSpan().Fill(7);
+            expected.AsSpan().Fill(7);
+            Assert.True(BgraScale.PaintLetterbox(
+                source,
+                size.sw,
+                size.sh,
+                sourceStride,
+                actual,
+                size.dw,
+                size.dh,
+                destinationStride,
+                size.ox,
+                size.oy,
+                size.vw,
+                size.vh,
+                size.bottomUp));
+            PaintReference(source, size.sw, size.sh, sourceStride, expected, size.dw, size.dh, destinationStride, size.ox, size.oy, size.vw, size.vh, size.bottomUp);
+            Assert.Equal(expected, actual);
+        }
+    }
+
+    [Fact]
+    public void Rgb32_rows_are_copied_upright_or_bottom_up_with_opaque_alpha()
+    {
+        var source = new byte[8 * 2];
+        Paint(source, 0, 0, 2, 1, 2, 3);
+        Paint(source, 1, 0, 2, 4, 5, 6);
+        Paint(source, 0, 1, 2, 7, 8, 9);
+        Paint(source, 1, 1, 2, 10, 11, 12);
+        var topDown = new byte[16];
+        var bottomUp = new byte[16];
+        Assert.True(BgraRows.TryCopyRgb32(source, 2, 2, 8, false, 2, 2, topDown));
+        Assert.True(BgraRows.TryCopyRgb32(source, 2, 2, 8, true, 2, 2, bottomUp));
+        Assert.Equal(new byte[] { 1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255 }, topDown);
+        Assert.Equal(new byte[] { 7, 8, 9, 255, 10, 11, 12, 255, 1, 2, 3, 255, 4, 5, 6, 255 }, bottomUp);
+    }
+
+    private static void PaintReference(
+        byte[] source,
+        int sourceWidth,
+        int sourceHeight,
+        int sourceStride,
+        byte[] destination,
+        int destinationWidth,
+        int destinationHeight,
+        int destinationStride,
+        int originX,
+        int originY,
+        int viewWidth,
+        int viewHeight,
+        bool bottomUp)
+    {
+        if (originX > destinationWidth - viewWidth)
+        {
+            viewWidth = destinationWidth - originX;
+        }
+
+        if (originY > destinationHeight - viewHeight)
+        {
+            viewHeight = destinationHeight - originY;
+        }
+
+        for (var y = 0; y < viewHeight; y++)
+        {
+            var sourceY = Sample(y, viewHeight, sourceHeight);
+            var destY = originY + y;
+            if (bottomUp)
+            {
+                destY = destinationHeight - 1 - destY;
+            }
+
+            for (var x = 0; x < viewWidth; x++)
+            {
+                var sourceX = Sample(x, viewWidth, sourceWidth);
+                var from = (sourceY * sourceStride) + (sourceX * 4);
+                var to = (destY * destinationStride) + ((originX + x) * 4);
+                destination[to] = source[from];
+                destination[to + 1] = source[from + 1];
+                destination[to + 2] = source[from + 2];
+                destination[to + 3] = 255;
+            }
+        }
+    }
+
+    private static int Sample(int position, int view, int source)
+    {
+        if (view <= 1)
+        {
+            return source / 2;
+        }
+
+        var index = (int)((long)position * (source - 1) / (view - 1));
+        return index >= source ? source - 1 : index;
+    }
+
     private static void Paint(byte[] pixels, int x, int y, int width, byte b, byte g, byte r)
     {
         var index = ((y * width) + x) * 4;

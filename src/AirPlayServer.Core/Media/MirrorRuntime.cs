@@ -1026,7 +1026,16 @@ internal sealed class MirrorRuntime : IAsyncDisposable
 
     private void PublishDecodedLocked(DecodedFrame frame)
     {
-        _frames.Publish(frame.Width, frame.Height, frame.Bgra.Span, frame.Stride);
+        // Owned decoder buffers are the published picture. A second tight copy
+        // would be another ~14 MB moved on every 1290×2794 frame.
+        if (frame.Owned is { } owned)
+        {
+            _frames.PublishOwned(frame.Width, frame.Height, owned, frame.Stride);
+        }
+        else
+        {
+            _frames.Publish(frame.Width, frame.Height, frame.Bgra.Span, frame.Stride);
+        }
         _consecutiveDecodeMisses = 0;
         Activity.DecodeFrame();
         if (Interlocked.Exchange(ref _loggedDecoded, 1) == 0)

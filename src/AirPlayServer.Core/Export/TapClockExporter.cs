@@ -105,10 +105,21 @@ internal sealed class TapClockExporter : IAsyncDisposable
                 var height = 0;
                 try
                 {
-                    if (_frames.TryRead(out width, out height, out var stride, out var pixels, out var generation)
-                        && generation != sentGeneration)
+                    byte[]? jpeg = null;
+                    var generation = 0L;
+                    if (_frames.TryLease(out width, out height, out var stride, out var pixels, out generation, out var lease))
                     {
-                        var jpeg = BaselineJpegEncoder.EncodeBgra(pixels, width, height, stride, _options.JpegQuality);
+                        using (lease)
+                        {
+                            if (generation != sentGeneration)
+                            {
+                                jpeg = BaselineJpegEncoder.EncodeBgra(pixels, width, height, stride, _options.JpegQuality);
+                            }
+                        }
+                    }
+
+                    if (jpeg is not null)
+                    {
                         var attempt = await DeliverAsync(jpeg, socket, cancellationToken).ConfigureAwait(false);
                         socket = attempt.Socket;
                         if (attempt.Delivered)

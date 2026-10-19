@@ -6,7 +6,7 @@ namespace AirPlayServer.Core.Video;
 /// </summary>
 public readonly struct DecodedFrame
 {
-    public DecodedFrame(int width, int height, ReadOnlyMemory<byte> bgra, int stride)
+    private DecodedFrame(int width, int height, ReadOnlyMemory<byte> bgra, int stride, byte[]? owned)
     {
         if (width <= 0 || height <= 0)
         {
@@ -22,6 +22,23 @@ public readonly struct DecodedFrame
         Height = height;
         Bgra = bgra;
         Stride = stride;
+        Owned = owned;
+    }
+
+    public DecodedFrame(int width, int height, ReadOnlyMemory<byte> bgra, int stride)
+        : this(width, height, bgra, stride, null)
+    {
+    }
+
+    /// <summary>
+    /// A buffer the publisher may keep. The decoder must not write it again.
+    /// <see cref="Bgra"/> is the live prefix; the array may be longer when it
+    /// was reused from a larger frame.
+    /// </summary>
+    internal static DecodedFrame Own(int width, int height, byte[] bgra, int stride)
+    {
+        var bytes = checked(stride * height);
+        return new DecodedFrame(width, height, bgra.AsMemory(0, bytes), stride, bgra);
     }
 
     public int Width { get; }
@@ -31,19 +48,33 @@ public readonly struct DecodedFrame
     public ReadOnlyMemory<byte> Bgra { get; }
 
     public int Stride { get; }
+
+    internal byte[]? Owned { get; }
 }
 
 /// <summary>
 /// Latest-frame slot. Publishers overwrite; readers always observe the newest picture.
+/// There is no queue. Same-size frames reuse pooled BGRA arrays. A leased picture
+/// stays immutable until <see cref="Lease.Dispose"/>; the next publish writes a
+/// different array, so the window and TapClock can still be reading the previous one.
 /// </summary>
 public sealed class FrameSlot
 {
     private readonly object _gate = new();
-    private byte[]? _pixels;
+    private readonly BgraBufferPool _pool = new();
+    private Held? _current;
+    private Held? _pin;
+    private Held? _stateSpare;
+    private int _pinStamp;
     private int _width;
     private int _height;
     private int _stride;
     private long _generation;
+
+    /// <summary>Arrays allocated by <see cref="Buffers"/>. Stable once width and height stop changing.</summary>
+    internal int BufferAllocations => _pool.Allocations;
+
+    internal BgraBufferPool Buffers => _pool;
 
     public long Generation
     {
@@ -58,44 +89,58 @@ public sealed class FrameSlot
 
     public long Publish(int width, int height, ReadOnlySpan<byte> bgra, int stride)
     {
-        if (width <= 0 || height <= 0)
+        Validate(width, height, stride, bgra.Length);
+        var tight = width * 4;
+        var copy = _pool.Rent(tight * height);
+        if (!BgraRows.TryPack(bgra, stride, copy, width, height))
         {
-            throw new ArgumentOutOfRangeException(nameof(width));
+            _pool.Return(copy);
+            throw new ArgumentException("BGRA buffer is smaller than width, height, and stride.");
         }
 
-        if (stride < width * 4)
+        return Install(width, height, copy, tight);
+    }
+
+    /// <summary>
+    /// Publishes <paramref name="pixels"/> with no BGRA copy when the stride is
+    /// already tight. The slot owns the array after this returns.
+    /// </summary>
+    internal long PublishOwned(int width, int height, byte[] pixels, int stride)
+    {
+        ArgumentNullException.ThrowIfNull(pixels);
+        try
         {
-            throw new ArgumentException("Stride is shorter than one BGRA row.", nameof(stride));
+            Validate(width, height, stride, pixels.Length);
+        }
+        catch
+        {
+            _pool.Return(pixels);
+            throw;
         }
 
         var tight = width * 4;
-        var copy = new byte[tight * height];
-        for (var y = 0; y < height; y++)
+        if (stride == tight)
         {
-            var row = y * stride;
-            if (row + tight > bgra.Length)
-            {
-                throw new ArgumentException("BGRA buffer is smaller than width, height, and stride.");
-            }
-
-            bgra.Slice(row, tight).CopyTo(copy.AsSpan(y * tight));
+            return Install(width, height, pixels, tight);
         }
 
-        lock (_gate)
+        var packed = _pool.Rent(tight * height);
+        if (!BgraRows.TryPack(pixels, stride, packed, width, height))
         {
-            _pixels = copy;
-            _width = width;
-            _height = height;
-            _stride = tight;
-            return ++_generation;
+            _pool.Return(packed);
+            _pool.Return(pixels);
+            throw new ArgumentException("BGRA buffer is smaller than width, height, and stride.");
         }
+
+        _pool.Return(pixels);
+        return Install(width, height, packed, tight);
     }
 
     public bool TryRead(out int width, out int height, out int stride, out byte[] pixels, out long generation)
     {
         lock (_gate)
         {
-            if (_pixels is null)
+            if (_current is null)
             {
                 width = 0;
                 height = 0;
@@ -105,13 +150,211 @@ public sealed class FrameSlot
                 return false;
             }
 
+            // One pin keeps the last TryRead array stable until the next TryRead.
+            // The window and TapClock use TryLease so they do not share this pin.
+            if (!ReferenceEquals(_pin, _current))
+            {
+                ReleasePinLocked();
+                _current.Leases++;
+                _pin = _current;
+                _pinStamp = _current.Stamp;
+            }
+
             width = _width;
             height = _height;
             stride = _stride;
-            pixels = _pixels;
+            pixels = _current.Data;
             generation = _generation;
             return true;
         }
+    }
+
+    public bool TryReadSize(out int width, out int height)
+    {
+        lock (_gate)
+        {
+            if (_current is null)
+            {
+                width = 0;
+                height = 0;
+                return false;
+            }
+
+            width = _width;
+            height = _height;
+            return true;
+        }
+    }
+
+    public bool TryLease(out int width, out int height, out int stride, out byte[] pixels, out long generation, out Lease lease)
+    {
+        lock (_gate)
+        {
+            if (_current is null)
+            {
+                width = 0;
+                height = 0;
+                stride = 0;
+                pixels = [];
+                generation = 0;
+                lease = default;
+                return false;
+            }
+
+            _current.Leases++;
+            width = _width;
+            height = _height;
+            stride = _stride;
+            pixels = _current.Data;
+            generation = _generation;
+            lease = new Lease(this, _current, _current.Stamp);
+            return true;
+        }
+    }
+
+    private long Install(int width, int height, byte[] pixels, int stride)
+    {
+        lock (_gate)
+        {
+            if (_current is not null && _current.Leases == 0)
+            {
+                if (ReferenceEquals(_pin, _current))
+                {
+                    _pin = null;
+                }
+
+                var recycled = _current.Data;
+                _current.Data = pixels;
+                _current.Stamp++;
+                if (!ReferenceEquals(recycled, pixels))
+                {
+                    _pool.Return(recycled);
+                }
+            }
+            else
+            {
+                var state = _stateSpare ?? new Held();
+                _stateSpare = null;
+                state.Data = pixels;
+                state.Leases = 0;
+                state.Stamp++;
+                _current = state;
+            }
+
+            _width = width;
+            _height = height;
+            _stride = stride;
+            return ++_generation;
+        }
+    }
+
+    private void Release(Held? buffer, int stamp)
+    {
+        if (buffer is null)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (buffer.Stamp != stamp || buffer.Leases <= 0)
+            {
+                return;
+            }
+
+            buffer.Leases--;
+            if (buffer.Leases == 0 && !ReferenceEquals(buffer, _current))
+            {
+                Recycle(buffer);
+            }
+        }
+    }
+
+    private void ReleasePinLocked()
+    {
+        if (_pin is null)
+        {
+            return;
+        }
+
+        var pinned = _pin;
+        _pin = null;
+        if (pinned.Stamp != _pinStamp || pinned.Leases <= 0)
+        {
+            return;
+        }
+
+        pinned.Leases--;
+        if (pinned.Leases == 0 && !ReferenceEquals(pinned, _current))
+        {
+            Recycle(pinned);
+        }
+    }
+
+    private void Recycle(Held buffer)
+    {
+        if (ReferenceEquals(_pin, buffer))
+        {
+            _pin = null;
+        }
+
+        var data = buffer.Data;
+        buffer.Data = [];
+        buffer.Stamp++;
+        if (data.Length != 0)
+        {
+            _pool.Return(data);
+        }
+
+        _stateSpare ??= buffer;
+    }
+
+    private static void Validate(int width, int height, int stride, int length)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(width));
+        }
+
+        var tight = (long)width * 4;
+        if (tight > int.MaxValue || stride < tight)
+        {
+            throw new ArgumentException("Stride is shorter than one BGRA row.", nameof(stride));
+        }
+
+        var rows = (long)stride * height;
+        var bytes = tight * height;
+        if (rows <= 0 || rows > length || bytes <= 0 || bytes > int.MaxValue)
+        {
+            throw new ArgumentException("BGRA buffer is smaller than width, height, and stride.");
+        }
+    }
+
+    internal sealed class Held
+    {
+        public byte[] Data = [];
+        public int Leases;
+        public int Stamp;
+    }
+
+    /// <summary>
+    /// Keeps one published array immutable. Dispose before the next await so a
+    /// slow send does not hold the picture out of the pool.
+    /// </summary>
+    public readonly struct Lease : IDisposable
+    {
+        private readonly FrameSlot? _slot;
+        private readonly Held? _held;
+        private readonly int _stamp;
+
+        internal Lease(FrameSlot slot, Held held, int stamp)
+        {
+            _slot = slot;
+            _held = held;
+            _stamp = stamp;
+        }
+
+        public void Dispose() => _slot?.Release(_held, _stamp);
     }
 }
 

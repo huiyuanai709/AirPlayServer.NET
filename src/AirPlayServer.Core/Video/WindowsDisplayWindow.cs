@@ -77,6 +77,13 @@ internal static partial class WindowsDisplayWindow
         private int _backWidth;
         private int _backHeight;
         private int _loggedPresent;
+        private bool _paintCovers;
+        private int _paintX;
+        private int _paintY;
+        private int _paintWidth;
+        private int _paintHeight;
+        private bool _chipDrawn;
+        private Rect _chipRect;
 
         public Window(
             FrameSlot frames,
@@ -228,12 +235,20 @@ internal static partial class WindowsDisplayWindow
 
         private unsafe void Blit(nint hwnd)
         {
-            if (!_frames.TryRead(out var width, out var height, out var stride, out var pixels, out _))
+            if (!_frames.TryLease(out var width, out var height, out var stride, out var pixels, out _, out var lease))
             {
                 ClearHover(hwnd);
                 return;
             }
 
+            using (lease)
+            {
+                BlitLeased(hwnd, width, height, stride, pixels);
+            }
+        }
+
+        private unsafe void BlitLeased(nint hwnd, int width, int height, int stride, byte[] pixels)
+        {
             if (GetClientRect(hwnd, out var rect) == 0)
             {
                 return;
@@ -295,7 +310,24 @@ internal static partial class WindowsDisplayWindow
             }
 
             var buffer = new Span<byte>((void*)_backBits, (int)bytes);
-            buffer.Clear();
+            // The picture overwrites its rectangle. Clearing the whole DIB every
+            // tick is a second full-frame write; bars stay black from the last
+            // clear as long as the letterbox rectangle does not move.
+            var sameView = _paintCovers
+                && _paintX == destination.X
+                && _paintY == destination.Y
+                && _paintWidth == destination.Width
+                && _paintHeight == destination.Height;
+            if (!sameView)
+            {
+                buffer.Clear();
+                _chipDrawn = false;
+            }
+            else if (_chipDrawn)
+            {
+                ClearChip(buffer, rowBytes);
+            }
+
             if (BgraScale.PaintLetterbox(
                 pixels,
                 width,
@@ -311,6 +343,11 @@ internal static partial class WindowsDisplayWindow
                 destination.Height,
                 bottomUp: true))
             {
+                _paintCovers = true;
+                _paintX = destination.X;
+                _paintY = destination.Y;
+                _paintWidth = destination.Width;
+                _paintHeight = destination.Height;
                 return true;
             }
 
@@ -400,7 +437,7 @@ internal static partial class WindowsDisplayWindow
 
         private void UpdateHoverReadout(nint hwnd)
         {
-            if (!_pointerInside || !_frames.TryRead(out var width, out var height, out _, out _, out _))
+            if (!_pointerInside || !_frames.TryReadSize(out var width, out var height))
             {
                 ClearHover(hwnd);
                 return;
@@ -497,6 +534,37 @@ internal static partial class WindowsDisplayWindow
             _backPrevious = 0;
             _backWidth = 0;
             _backHeight = 0;
+            _paintCovers = false;
+            _chipDrawn = false;
+        }
+
+        private void ClearChip(Span<byte> buffer, int stride)
+        {
+            if (!_chipDrawn || _backWidth < 1 || _backHeight < 1)
+            {
+                _chipDrawn = false;
+                return;
+            }
+
+            var left = Math.Clamp(_chipRect.Left, 0, _backWidth);
+            var right = Math.Clamp(_chipRect.Right, 0, _backWidth);
+            var top = Math.Clamp(_chipRect.Top, 0, _backHeight);
+            var bottom = Math.Clamp(_chipRect.Bottom, 0, _backHeight);
+            var byteWidth = (right - left) * 4;
+            if (byteWidth <= 0 || top >= bottom)
+            {
+                _chipDrawn = false;
+                return;
+            }
+
+            // The DIB is bottom-up. GDI chip coordinates start at the top-left.
+            for (var y = top; y < bottom; y++)
+            {
+                var memoryY = _backHeight - 1 - y;
+                buffer.Slice((memoryY * stride) + (left * 4), byteWidth).Clear();
+            }
+
+            _chipDrawn = false;
         }
 
         private static void PaintLetterboxBars(
@@ -632,6 +700,8 @@ internal static partial class WindowsDisplayWindow
                 SetBkMode(dc, 1);
                 SetTextColor(dc, 0x00F2F2F2);
                 TextOutW(dc, ChipLeft + 8, ChipTop + 4, text, text.Length);
+                _chipRect = box;
+                _chipDrawn = true;
             }
             finally
             {

@@ -120,10 +120,10 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 options.Name);
             var instance = ReceiverNames.InstanceLabel(options.Name);
             var frames = new FrameSlot();
-            decoder = options.Decoder ?? H264Decoders.CreatePlatformDefault(log);
+            decoder = options.Decoder ?? H264Decoders.Create(log, load: null, frames.Buffers);
             if (options.AcceptHevc)
             {
-                hevc = options.HevcDecoder ?? HevcDecoders.CreatePlatformDefault(log);
+                hevc = options.HevcDecoder ?? HevcDecoders.Create(log, load: null, frames.Buffers);
             }
 
             var advertisesHevc = HevcDecoders.ShouldAdvertise(options.AcceptHevc, hevc, log);

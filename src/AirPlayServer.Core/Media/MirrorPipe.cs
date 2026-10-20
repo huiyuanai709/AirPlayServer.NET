@@ -182,18 +182,31 @@ internal sealed class MirrorPipe : IAsyncDisposable
         IPAddress? before;
         IPAddress? after = null;
         var corrected = false;
+        var noteData = false;
         lock (_gate)
         {
             before = _dataPeer;
             _claimedAddress = address;
             if (!_dataPeerSeen)
             {
-                return;
+                after = address;
             }
+            else
+            {
+                after = MirrorDataPeer.Resolve(_reportedDataPeer, _listenAddress, _claimedAddress, _peerName);
+                _dataPeer = after;
+                noteData = true;
+                corrected = before is not null && after is not null && !before.Equals(after);
+            }
+        }
 
-            after = MirrorDataPeer.Resolve(_reportedDataPeer, _listenAddress, _claimedAddress, _peerName);
-            _dataPeer = after;
-            corrected = before is not null && after is not null && !before.Equals(after);
+        if (noteData)
+        {
+            _sessions.NoteDataPeer(after);
+        }
+        else
+        {
+            _sessions.NotePeer(after);
         }
 
         if (corrected)
@@ -509,6 +522,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
             {
                 _peer = endpoint.Address;
             }
+
+            _sessions.NotePeer(endpoint.Address);
         }
 
         if (Find(root, "eiv") is PlistData)
@@ -817,7 +832,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 if (!established)
                 {
                     // Connected means this header parsed. SETUP alone never reaches here.
-                    generation = _sessions.BeginData(DateTimeOffset.UtcNow);
+                    // The data peer is preferred; BeginData keeps a control address when this is null.
+                    generation = _sessions.BeginData(DateTimeOffset.UtcNow, DataPeer);
                     established = true;
                 }
 

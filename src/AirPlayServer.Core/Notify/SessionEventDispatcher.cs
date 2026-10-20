@@ -196,6 +196,7 @@ public sealed class SessionEventDispatcher : IDisposable
                     Event = eventName,
                     At = at,
                     Device = args.DeviceName ?? "",
+                    SourceIp = args.SourceIp ?? "",
                     SessionId = args.SessionId,
                     Reason = args.Reason,
                 };
@@ -228,6 +229,8 @@ public sealed class SessionEventDispatcher : IDisposable
         {
             Event = eventName,
             At = at,
+            Device = args.DeviceName ?? "",
+            SourceIp = args.SourceIp ?? "",
             SessionId = args.SessionId,
             Reason = args.Reason,
             Source = TapClockIntegration.Source,
@@ -278,7 +281,8 @@ public sealed class SessionEventDispatcher : IDisposable
     private static string Describe(MirrorSessionEventArgs args)
     {
         var device = string.IsNullOrWhiteSpace(args.DeviceName) ? "" : " 设备: " + args.DeviceName + "。";
+        var source = string.IsNullOrWhiteSpace(args.SourceIp) ? "" : " 来源: " + args.SourceIp + "。";
         var session = string.IsNullOrWhiteSpace(args.SessionId) ? "" : " 会话: " + args.SessionId + "。";
-        return device + session;
+        return device + source + session;
     }
 }

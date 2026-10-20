@@ -159,24 +159,22 @@ public sealed class DiscoveryTests
     }
 
     [Fact]
-    public void Real_lans_share_one_record_set_and_the_hotspot_is_absent()
+    public void Each_lan_announcement_names_only_that_nic_and_never_the_hotspot()
     {
-        var addresses = new[]
-        {
-            IPAddress.Parse("172.16.88.168"),
-            IPAddress.Parse("172.16.93.10"),
-        };
-        var packet = MdnsMessages.BuildAnnouncement(Sample(), addresses);
+        var wifi = MdnsMessages.BuildAnnouncement(Sample(), IPAddress.Parse("172.16.88.168"));
+        var ethernet = MdnsMessages.BuildAnnouncement(Sample(), IPAddress.Parse("172.16.93.10"));
 
-        Assert.InRange(packet.Length, 12, 1400);
-        Assert.Equal(8, MdnsMessages.CountWalkableRecords(packet));
-        Assert.True(ContainsSequence(packet, [172, 16, 88, 168]));
-        Assert.True(ContainsSequence(packet, [172, 16, 93, 10]));
-        Assert.False(ContainsSequence(packet, [192, 168, 137, 1]));
+        Assert.Equal(7, MdnsMessages.CountWalkableRecords(wifi));
+        Assert.Equal(7, MdnsMessages.CountWalkableRecords(ethernet));
+        Assert.True(ContainsSequence(wifi, [172, 16, 88, 168]));
+        Assert.False(ContainsSequence(wifi, [172, 16, 93, 10]));
+        Assert.False(ContainsSequence(wifi, [192, 168, 137, 1]));
+        Assert.True(ContainsSequence(ethernet, [172, 16, 93, 10]));
+        Assert.False(ContainsSequence(ethernet, [172, 16, 88, 168]));
     }
 
     [Fact]
-    public void Off_subnet_query_still_builds_an_answer_for_the_wifi_address()
+    public void Off_subnet_multicast_query_is_answered_on_the_arrival_nic()
     {
         var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any,
         [
@@ -187,7 +185,8 @@ public sealed class DiscoveryTests
                 OperationalStatus.Up,
                 IPAddress.Parse("192.168.137.1"),
                 HasGateway: true,
-                PrefixLength: 24),
+                PrefixLength: 24,
+                InterfaceIndex: 4),
             new AdvertisementCandidate(
                 "Wi-Fi",
                 "Intel(R) Wi-Fi 6 AX201",
@@ -195,17 +194,26 @@ public sealed class DiscoveryTests
                 OperationalStatus.Up,
                 IPAddress.Parse("172.16.88.168"),
                 HasGateway: true,
-                PrefixLength: 24),
+                PrefixLength: 24,
+                InterfaceIndex: 12),
         ]);
         var querier = IPAddress.Parse("172.16.93.211");
-        Assert.True(LocalNetwork.ShouldReplyUnicast(quBit: false, remotePort: 5353, querier, nics));
+        var arrival = LocalNetwork.FindByInterface(12, nics);
+        var plan = LocalNetwork.PlanReply(quBit: false, remotePort: 5353, queryWasMulticast: true, querier, nics, arrival);
+        Assert.True(plan.SendMulticast);
+        Assert.False(plan.SendUnicast);
+        Assert.True(MdnsSockets.IsMulticastDestination(IPAddress.Parse("224.0.0.251")));
+        Assert.False(MdnsSockets.IsMulticastDestination(IPAddress.Parse("172.16.88.168")));
 
+        var answer = LocalNetwork.AnswerAddress(querier, nics, arrival, boundAddress: null);
         var query = MdnsMessages.BuildQuery(0x2222, "_airplay");
         var response = new byte[2048];
-        var answers = LocalNetwork.ReplyAddresses(LocalNetwork.MatchRemote(querier, nics), nics);
-        Assert.True(MdnsMessages.TryBuildQueryResponse(query, Sample(), response, out var written, out var quBit, answers));
+        Assert.True(MdnsMessages.TryBuildQueryResponse(query, Sample(), response, out var written, out var quBit, answer));
         Assert.False(quBit);
         Assert.Equal(4, MdnsMessages.CountWalkableRecords(response.AsSpan(0, written)));
+        Assert.Equal(0x2222, BinaryPrimitives.ReadUInt16BigEndian(response));
+        MdnsMessages.StampMulticastId(response.AsSpan(0, written));
+        Assert.Equal(0, BinaryPrimitives.ReadUInt16BigEndian(response));
         var body = response.AsSpan(0, written).ToArray();
         Assert.True(ContainsSequence(body, [172, 16, 88, 168]));
         Assert.False(ContainsSequence(body, [192, 168, 137, 1]));

@@ -80,6 +80,19 @@ internal static class MdnsMessages
     private static IReadOnlyList<IPAddress>? AddressList(IPAddress? address)
         => address is null ? null : [address];
 
+    /// <summary>
+    /// Multicast mDNS responses use query id 0. Receivers must ignore the id.
+    /// Unicast responses keep the id copied from the query.
+    /// </summary>
+    public static void StampMulticastId(Span<byte> message)
+    {
+        if (message.Length >= 2)
+        {
+            message[0] = 0;
+            message[1] = 0;
+        }
+    }
+
     public static byte[] BuildQuery(ushort id, string service)
     {
         var writer = new DnsWriter();

@@ -52,14 +52,15 @@ internal sealed class HostArgs
           AirPlayServer.Host --version
           AirPlayServer.Host --help
 
-        --listen 默认 0.0.0.0。控制端口仍监听全部 IPv4。mDNS 通告每一张非虚拟 RFC1918 地址
-        （有网关的 Wi-Fi 或以太网在前），写在同一条记录里，并在每张这样的网卡上加入多播。
-        跳过 Hyper-V vEthernet、WSL、Docker、Clash TAP、VPN、169.254 链路本地，以及
-        Windows 移动热点 / ICS / Wi-Fi Direct（Local Area Connection*、Microsoft Wi-Fi Direct
-        Virtual Adapter、192.168.137.0/24）。热点不会成为第二条 A 记录。查询方不在这些子网上时
-        （例如本机 172.16.88.x、查询来自 172.16.93.x）会把应答单播回查询方。
-        只剩虚拟或热点地址时才用第一张非回环网卡。写成具体地址（例如 --listen 192.168.5.15）时，
-        监听和通告都用它。网卡抖动不会拆掉正在镜像的会话；通告地址没变就不再发。
+        --listen 默认 0.0.0.0。控制端口仍监听全部 IPv4。mDNS 给每一张非虚拟 RFC1918 网卡
+        各发一条只含该网卡地址的通告，并在这些网卡上加入多播。跳过 Hyper-V vEthernet、WSL、
+        Docker、Clash TAP、VPN、169.254 链路本地，以及 Windows 移动热点 / ICS / Wi-Fi Direct
+        （Local Area Connection*、Microsoft Wi-Fi Direct Virtual Adapter、192.168.137.0/24）。
+        热点不会成为第二条 A 记录。发往 224.0.0.251 的查询，即使来自另一子网
+        （例如本机 172.16.88.x、查询来自 172.16.93.x），也在收到它的那张网卡上多播应答。
+        直接发到本机地址的查询则单播回去。只剩虚拟或热点地址时才用第一张非回环网卡。
+        写成具体地址（例如 --listen 192.168.5.15）时，监听和通告都用它。
+        网卡抖动不会拆掉正在镜像的会话；通告地址没变就不再发。
 
         FairPlay 默认开启。POST /fp-setup 和 72 字节 ekey 共用同一次进程内握手。
         TapClock 仍然用 --tapclock、--tapclock-dir、--tapclock-fps。

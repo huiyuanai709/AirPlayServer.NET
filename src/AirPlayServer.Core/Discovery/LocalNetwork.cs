@@ -155,7 +155,7 @@ internal static class LocalNetwork
                 continue;
             }
 
-            var nic = new AdvertisedNic(candidate.Address, candidate.PrefixLength, candidate.Name);
+            var nic = new AdvertisedNic(candidate.Address, candidate.PrefixLength, candidate.Name, candidate.InterfaceIndex);
             fallback ??= nic;
             if (IsIpv4LinkLocal(candidate.Address) || IsVirtualOrTunnel(candidate) || IsWindowsIcsSubnet(candidate.Address))
             {
@@ -219,75 +219,97 @@ internal static class LocalNetwork
     }
 
     /// <summary>
-    /// QU-bit and legacy (source port other than 5353) queries are always unicast.
-    /// A querier that sits on none of the advertised prefixes also gets a unicast
-    /// copy: a multicast reply pinned to 172.16.88.168 does not reach 172.16.93.211.
+    /// How to deliver one answer. This follows mDNSResponder's <c>ProcessQuery</c>:
+    /// a multicast query needs a multicast answer, including a QU query whose sender
+    /// is not on the receiving NIC's subnet ("overlaid subnets on one link"). A
+    /// unicast reply from 172.16.88.168 is ignored by a querier on 172.16.93.0/24.
+    /// A query addressed to our own unicast address is answered unicast, including
+    /// when that query was routed from another subnet.
     /// </summary>
-    internal static bool ShouldReplyUnicast(bool quBit, int remotePort, IPAddress? remote, IReadOnlyList<AdvertisedNic> nics)
+    internal static MdnsReplyPlan PlanReply(
+        bool quBit,
+        int remotePort,
+        bool queryWasMulticast,
+        IPAddress? remote,
+        IReadOnlyList<AdvertisedNic> nics,
+        AdvertisedNic? arrival)
     {
-        if (quBit || (remotePort is not 0 and not MdnsSockets.Port))
+        if (remotePort != 0 && remotePort != MdnsSockets.Port)
         {
-            return true;
+            return new MdnsReplyPlan(SendUnicast: true, SendMulticast: false, Reason: "legacy");
         }
 
-        if (remote is null || QuerierOnAdvertisedLan(remote, nics) || !HasAdvertisedPrefix(nics))
+        var onArrivalSubnet = OnArrivalSubnet(remote, nics, arrival);
+        if (!queryWasMulticast)
+        {
+            return new MdnsReplyPlan(
+                SendUnicast: true,
+                SendMulticast: false,
+                Reason: onArrivalSubnet ? "unicast-query" : "routed-query");
+        }
+
+        if (quBit && onArrivalSubnet)
+        {
+            return new MdnsReplyPlan(SendUnicast: true, SendMulticast: false, Reason: "qu");
+        }
+
+        return new MdnsReplyPlan(
+            SendUnicast: false,
+            SendMulticast: true,
+            Reason: quBit ? "qu-overlaid" : "multicast");
+    }
+
+    internal static AdvertisedNic? FindByInterface(int interfaceIndex, IReadOnlyList<AdvertisedNic> nics)
+    {
+        if (interfaceIndex <= 0)
+        {
+            return null;
+        }
+
+        foreach (var nic in nics)
+        {
+            if (nic.InterfaceIndex == interfaceIndex)
+            {
+                return nic;
+            }
+        }
+
+        return null;
+    }
+
+    internal static IPAddress? AnswerAddress(IPAddress? remote, IReadOnlyList<AdvertisedNic> nics, AdvertisedNic? arrival, IPAddress? boundAddress)
+    {
+        if (arrival is not null)
+        {
+            return arrival.Value.Address;
+        }
+
+        if (boundAddress is not null && !IPAddress.Any.Equals(boundAddress))
+        {
+            return boundAddress;
+        }
+
+        if (remote is not null)
+        {
+            return MatchRemote(remote, nics);
+        }
+
+        return nics.Count == 0 ? null : nics[0].Address;
+    }
+
+    private static bool OnArrivalSubnet(IPAddress? remote, IReadOnlyList<AdvertisedNic> nics, AdvertisedNic? arrival)
+    {
+        if (remote is null)
         {
             return false;
         }
 
-        return true;
-    }
-
-    /// <summary>
-    /// Addresses to put in one response. <paramref name="preferred"/> is first so
-    /// the on-link NIC leads when the querier matched one. The rest of the
-    /// advertised set follows; hotspot addresses are never in <paramref name="nics"/>.
-    /// </summary>
-    internal static IPAddress[] ReplyAddresses(IPAddress? preferred, IReadOnlyList<AdvertisedNic> nics)
-    {
-        var list = new List<IPAddress>(nics.Count + 1);
-        if (preferred is not null)
+        if (arrival is { PrefixLength: > 0 })
         {
-            list.Add(preferred);
+            return SharesPrefix(remote, arrival.Value.Address, arrival.Value.PrefixLength);
         }
 
-        foreach (var nic in nics)
-        {
-            if (ContainsAddress(list, nic.Address))
-            {
-                continue;
-            }
-
-            list.Add(nic.Address);
-        }
-
-        return list.ToArray();
-    }
-
-    private static bool HasAdvertisedPrefix(IReadOnlyList<AdvertisedNic> nics)
-    {
-        foreach (var nic in nics)
-        {
-            if (nic.PrefixLength > 0)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static bool ContainsAddress(List<IPAddress> addresses, IPAddress address)
-    {
-        foreach (var candidate in addresses)
-        {
-            if (candidate.Equals(address))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return QuerierOnAdvertisedLan(remote, nics);
     }
 
     /// <summary>
@@ -384,11 +406,32 @@ internal static class LocalNetwork
                     nic.OperationalStatus,
                     unicast.Address,
                     hasGateway,
-                    PrefixLengthOf(unicast)));
+                    PrefixLengthOf(unicast),
+                    InterfaceIndex(nic)));
             }
         }
 
         return candidates;
+    }
+
+    private static int InterfaceIndex(NetworkInterface nic)
+    {
+        try
+        {
+            return nic.GetIPProperties().GetIPv4Properties()?.Index ?? 0;
+        }
+        catch (NetworkInformationException)
+        {
+            return 0;
+        }
+        catch (PlatformNotSupportedException)
+        {
+            return 0;
+        }
+        catch (NotImplementedException)
+        {
+            return 0;
+        }
     }
 
     private static bool HasIpv4Gateway(IPInterfaceProperties properties)
@@ -557,6 +600,10 @@ internal readonly record struct AdvertisementCandidate(
     OperationalStatus OperationalStatus,
     IPAddress Address,
     bool HasGateway,
-    int PrefixLength = 24);
+    int PrefixLength = 24,
+    int InterfaceIndex = 0);
 
-internal readonly record struct AdvertisedNic(IPAddress Address, int PrefixLength, string Name);
+internal readonly record struct AdvertisedNic(IPAddress Address, int PrefixLength, string Name, int InterfaceIndex = 0);
+
+/// <summary>Where one mDNS answer is sent. <see cref="Reason"/> is the log token.</summary>
+internal readonly record struct MdnsReplyPlan(bool SendUnicast, bool SendMulticast, string Reason);

@@ -356,17 +356,10 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
             return;
         }
 
-        // One record set for every non-hotspot LAN, sent on each of those NICs.
-        // Separate packets that each cache-flush a different A record are what
-        // replaced the real LAN with 192.168.137.1 and stalled the picture.
-        // Hotspot addresses are already absent from nics.
-        var published = new IPAddress[nics.Count];
-        for (var i = 0; i < nics.Count; i++)
-        {
-            published[i] = nics[i].Address;
-        }
-
-        var packet = MdnsMessages.BuildAnnouncement(_advertisement, published);
+        // One packet per non-hotspot NIC, and that packet names only that NIC.
+        // mDNSResponder registers records on a single interface the same way.
+        // Putting every LAN in every packet, or adding the hotspot, is the
+        // second A record that left RTSP up and stalled the picture.
         var sent = 0;
         var port = 0;
         string? lastError = null;
@@ -384,6 +377,7 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
                 }
             }
 
+            var packet = MdnsMessages.BuildAnnouncement(_advertisement, target.PacketAddress);
             try
             {
                 await target.Socket.SendToAsync(packet, SocketFlags.None, MdnsSockets.GroupEndpoint, cancellationToken).ConfigureAwait(false);
@@ -425,13 +419,31 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
     {
         var buffer = new byte[2048];
         var response = new byte[2048];
+        var packetInfo = MdnsSockets.TryEnablePacketInformation(socket);
         EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
         while (!cancellationToken.IsCancellationRequested)
         {
-            SocketReceiveFromResult received;
+            int receivedBytes;
+            EndPoint remoteEndPoint;
+            IPAddress? destination;
+            var interfaceIndex = 0;
             try
             {
-                received = await socket.ReceiveFromAsync(buffer, SocketFlags.None, remote, cancellationToken).ConfigureAwait(false);
+                if (packetInfo)
+                {
+                    var message = await socket.ReceiveMessageFromAsync(buffer, SocketFlags.None, remote, cancellationToken).ConfigureAwait(false);
+                    receivedBytes = message.ReceivedBytes;
+                    remoteEndPoint = message.RemoteEndPoint;
+                    destination = message.PacketInformation.Address;
+                    interfaceIndex = message.PacketInformation.Interface;
+                }
+                else
+                {
+                    var received = await socket.ReceiveFromAsync(buffer, SocketFlags.None, remote, cancellationToken).ConfigureAwait(false);
+                    receivedBytes = received.ReceivedBytes;
+                    remoteEndPoint = received.RemoteEndPoint;
+                    destination = null;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -446,41 +458,36 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
                 break;
             }
 
-            var remoteEndpoint = received.RemoteEndPoint as IPEndPoint;
+            var remoteEndpoint = remoteEndPoint as IPEndPoint;
             var remoteAddress = remoteEndpoint?.Address;
             var remotePort = remoteEndpoint?.Port ?? 0;
             var nics = _nics;
-            var answerAddress = boundAddress is not null && !IPAddress.Any.Equals(boundAddress)
-                ? boundAddress
-                : remoteAddress is null
-                    ? _advertisement.Address
-                    : LocalNetwork.MatchRemote(remoteAddress, nics);
-            var replyAddresses = LocalNetwork.ReplyAddresses(answerAddress, nics);
+            var arrival = LocalNetwork.FindByInterface(interfaceIndex, nics);
+            var answerAddress = LocalNetwork.AnswerAddress(remoteAddress, nics, arrival, boundAddress);
             if (!MdnsMessages.TryBuildQueryResponse(
-                    buffer.AsSpan(0, received.ReceivedBytes),
+                    buffer.AsSpan(0, receivedBytes),
                     _advertisement,
                     response,
                     out var written,
                     out var quBit,
-                    replyAddresses))
+                    answerAddress))
             {
                 continue;
             }
 
-            var reply = response.AsMemory(0, written);
-            // QU and legacy queries are unicast. An off-subnet querier
-            // (172.16.93.211 asking a host on 172.16.88.168/24) also needs a
-            // unicast copy: multicast stays on the joined NIC and is not routed.
-            // The multicast copy is still sent when the QU bit is clear so
-            // listeners on the joined LAN keep seeing the answer.
-            var sendUnicast = LocalNetwork.ShouldReplyUnicast(quBit, remotePort, remoteAddress, nics);
-            var offSubnet = sendUnicast && !quBit && (remotePort == 0 || remotePort == MdnsSockets.Port);
+            var plan = LocalNetwork.PlanReply(
+                quBit,
+                remotePort,
+                MdnsSockets.IsMulticastDestination(destination),
+                remoteAddress,
+                nics,
+                arrival);
             var sent = false;
-            if (sendUnicast && remoteEndpoint is not null)
+            if (plan.SendUnicast && remoteEndpoint is not null)
             {
                 try
                 {
-                    await socket.SendToAsync(reply, SocketFlags.None, remoteEndpoint, cancellationToken).ConfigureAwait(false);
+                    await socket.SendToAsync(response.AsMemory(0, written), SocketFlags.None, remoteEndpoint, cancellationToken).ConfigureAwait(false);
                     sent = true;
                 }
                 catch (SocketException ex)
@@ -497,8 +504,9 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
                 }
             }
 
-            if (!quBit)
+            if (plan.SendMulticast)
             {
+                MdnsMessages.StampMulticastId(response.AsSpan(0, written));
                 if (answerAddress is not null)
                 {
                     MdnsSockets.TrySetMulticastInterface(socket, answerAddress);
@@ -506,7 +514,7 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
 
                 try
                 {
-                    await socket.SendToAsync(reply, SocketFlags.None, MdnsSockets.GroupEndpoint, cancellationToken).ConfigureAwait(false);
+                    await socket.SendToAsync(response.AsMemory(0, written), SocketFlags.None, MdnsSockets.GroupEndpoint, cancellationToken).ConfigureAwait(false);
                     sent = true;
                 }
                 catch (SocketException ex)
@@ -525,12 +533,12 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
 
             if (sent)
             {
-                NoteQuery(received.RemoteEndPoint, sendUnicast, offSubnet);
+                NoteQuery(remoteEndPoint, plan);
             }
         }
     }
 
-    private void NoteQuery(EndPoint remote, bool unicast, bool offSubnet)
+    private void NoteQuery(EndPoint remote, MdnsReplyPlan plan)
     {
         var key = remote.ToString() ?? "";
         bool first;
@@ -544,10 +552,10 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
             return;
         }
 
-        var mode = unicast ? (offSubnet ? "True, off-subnet" : "True") : "False";
+        var mode = plan.SendUnicast ? "True" : "False";
         _log.Log(
             AirPlayLogLevel.Information,
-            "mDNS 已应答来自 " + key + " 的查询（unicast=" + mode + "）。Answered an mDNS query from " + key + ", unicast=" + mode + ".");
+            "mDNS 已应答来自 " + key + " 的查询（unicast=" + mode + ", " + plan.Reason + "）。Answered an mDNS query from " + key + ", unicast=" + mode + ", " + plan.Reason + ".");
     }
 
     private string? EnsureSockets(IReadOnlyList<AdvertisedNic> nics)

@@ -207,31 +207,59 @@ public sealed class LocalNetworkTests
     }
 
     [Fact]
-    public void Off_subnet_querier_is_answered_unicast_and_on_subnet_stays_multicast()
+    public void Overlaid_subnet_query_is_multicast_and_the_arrival_nic_is_the_answer()
     {
+        // mDNSResponder ProcessQuery: a multicast query whose sender is not on
+        // this NIC's subnet still gets a multicast answer. A unicast reply is
+        // ignored because the source does not look local.
         AdvertisedNic[] wifiOnly =
         [
-            new(IPAddress.Parse("172.16.88.168"), 24, "Wi-Fi"),
+            new(IPAddress.Parse("172.16.88.168"), 24, "Wi-Fi", InterfaceIndex: 12),
         ];
         var querier = IPAddress.Parse("172.16.93.211");
+        var arrival = LocalNetwork.FindByInterface(12, wifiOnly);
 
+        Assert.Equal(IPAddress.Parse("172.16.88.168"), arrival?.Address);
         Assert.False(LocalNetwork.QuerierOnAdvertisedLan(querier, wifiOnly));
-        Assert.True(LocalNetwork.ShouldReplyUnicast(quBit: false, remotePort: 5353, querier, wifiOnly));
-        Assert.False(LocalNetwork.ShouldReplyUnicast(quBit: false, remotePort: 5353, IPAddress.Parse("172.16.88.50"), wifiOnly));
-        Assert.True(LocalNetwork.ShouldReplyUnicast(quBit: true, remotePort: 5353, IPAddress.Parse("172.16.88.50"), wifiOnly));
-        Assert.True(LocalNetwork.ShouldReplyUnicast(quBit: false, remotePort: 5300, IPAddress.Parse("172.16.88.50"), wifiOnly));
+
+        var qm = LocalNetwork.PlanReply(quBit: false, remotePort: 5353, queryWasMulticast: true, querier, wifiOnly, arrival);
+        Assert.False(qm.SendUnicast);
+        Assert.True(qm.SendMulticast);
+        Assert.Equal("multicast", qm.Reason);
+
+        var quOverlaid = LocalNetwork.PlanReply(quBit: true, remotePort: 5353, queryWasMulticast: true, querier, wifiOnly, arrival);
+        Assert.False(quOverlaid.SendUnicast);
+        Assert.True(quOverlaid.SendMulticast);
+        Assert.Equal("qu-overlaid", quOverlaid.Reason);
+
+        var sameSubnet = IPAddress.Parse("172.16.88.50");
+        var quLocal = LocalNetwork.PlanReply(quBit: true, remotePort: 5353, queryWasMulticast: true, sameSubnet, wifiOnly, arrival);
+        Assert.True(quLocal.SendUnicast);
+        Assert.False(quLocal.SendMulticast);
+        Assert.Equal("qu", quLocal.Reason);
+
+        var qmLocal = LocalNetwork.PlanReply(quBit: false, remotePort: 5353, queryWasMulticast: true, sameSubnet, wifiOnly, arrival);
+        Assert.False(qmLocal.SendUnicast);
+        Assert.True(qmLocal.SendMulticast);
+
+        var legacy = LocalNetwork.PlanReply(quBit: false, remotePort: 5300, queryWasMulticast: true, sameSubnet, wifiOnly, arrival);
+        Assert.True(legacy.SendUnicast);
+        Assert.Equal("legacy", legacy.Reason);
+
+        var routed = LocalNetwork.PlanReply(quBit: false, remotePort: 5353, queryWasMulticast: false, querier, wifiOnly, arrival);
+        Assert.True(routed.SendUnicast);
+        Assert.False(routed.SendMulticast);
+        Assert.Equal("routed-query", routed.Reason);
 
         AdvertisedNic[] bothLans =
         [
-            new(IPAddress.Parse("172.16.88.168"), 24, "Wi-Fi"),
-            new(IPAddress.Parse("172.16.93.10"), 24, "Ethernet"),
+            new(IPAddress.Parse("172.16.88.168"), 24, "Wi-Fi", InterfaceIndex: 12),
+            new(IPAddress.Parse("172.16.93.10"), 24, "Ethernet", InterfaceIndex: 8),
         ];
-        Assert.True(LocalNetwork.QuerierOnAdvertisedLan(querier, bothLans));
-        Assert.False(LocalNetwork.ShouldReplyUnicast(quBit: false, remotePort: 5353, querier, bothLans));
-        var answers = LocalNetwork.ReplyAddresses(LocalNetwork.MatchRemote(querier, bothLans), bothLans);
-        Assert.Equal(IPAddress.Parse("172.16.93.10"), answers[0]);
-        Assert.Equal(IPAddress.Parse("172.16.88.168"), answers[1]);
-        Assert.DoesNotContain(answers, address => address.Equals(IPAddress.Parse("192.168.137.1")));
+        var ethernet = LocalNetwork.FindByInterface(8, bothLans);
+        Assert.Equal(IPAddress.Parse("172.16.93.10"), LocalNetwork.AnswerAddress(querier, bothLans, ethernet, boundAddress: null));
+        Assert.Equal("multicast", LocalNetwork.PlanReply(false, 5353, true, querier, bothLans, ethernet).Reason);
+        Assert.Null(LocalNetwork.FindByInterface(99, bothLans));
     }
 
     [Fact]

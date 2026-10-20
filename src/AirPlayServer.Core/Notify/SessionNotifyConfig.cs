@@ -62,6 +62,8 @@ public sealed class SessionNotifyConfig
 
     public const string DefaultWebhookHeader = "X-Webhook-Token";
 
+    public const int MaxWebhookUrls = 8;
+
     [JsonPropertyName("webhooks_enabled")]
     public bool WebhooksEnabled { get; set; }
 
@@ -76,6 +78,14 @@ public sealed class SessionNotifyConfig
 
     [JsonPropertyName("webhook_secret_header")]
     public string WebhookSecretHeader { get; set; } = DefaultWebhookHeader;
+
+    /// <summary>
+    /// Extra http(s) endpoints. Mirror window presses and releases are posted
+    /// here when <see cref="WebhooksEnabled"/> is true. Connect and disconnect
+    /// keep using <see cref="ConnectUrl"/> and <see cref="DisconnectUrl"/>.
+    /// </summary>
+    [JsonPropertyName("webhook_urls")]
+    public string[] WebhookUrls { get; set; } = [];
 
     [JsonPropertyName("tapclock_events_enabled")]
     public bool TapClockEventsEnabled { get; set; }
@@ -99,6 +109,7 @@ public sealed class SessionNotifyConfig
     {
         ConnectUrl = OptionalHttpUrl(ConnectUrl, "连接 Webhook");
         DisconnectUrl = OptionalHttpUrl(DisconnectUrl, "断开 Webhook");
+        WebhookUrls = NormalizeWebhookUrls(WebhookUrls);
         WebhookSecret = OptionalSecret(WebhookSecret);
         WebhookSecretHeader = string.IsNullOrWhiteSpace(WebhookSecretHeader)
             ? DefaultWebhookHeader
@@ -136,6 +147,38 @@ public sealed class SessionNotifyConfig
 
     public static string FormatTimestamp(DateTimeOffset at)
         => at.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static string[] NormalizeWebhookUrls(string[]? urls)
+    {
+        if (urls is null || urls.Length == 0)
+        {
+            return [];
+        }
+
+        var kept = new List<string>(Math.Min(urls.Length, MaxWebhookUrls));
+        foreach (var raw in urls)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                continue;
+            }
+
+            if (kept.Count == MaxWebhookUrls)
+            {
+                break;
+            }
+
+            var text = OptionalHttpUrl(raw, "点击 Webhook");
+            if (text is null || kept.Contains(text, StringComparer.Ordinal))
+            {
+                continue;
+            }
+
+            kept.Add(text);
+        }
+
+        return kept.ToArray();
+    }
 
     private static string? OptionalHttpUrl(string? value, string label)
     {
@@ -199,6 +242,12 @@ public sealed class TapClockEventBody
     [JsonPropertyName("at")]
     public string At { get; set; } = "";
 
+    [JsonPropertyName("device")]
+    public string Device { get; set; } = "";
+
+    [JsonPropertyName("source_ip")]
+    public string SourceIp { get; set; } = "";
+
     [JsonPropertyName("session_id")]
     public string? SessionId { get; set; }
 
@@ -220,6 +269,9 @@ public sealed class WebhookEventBody
     [JsonPropertyName("device")]
     public string Device { get; set; } = "";
 
+    [JsonPropertyName("source_ip")]
+    public string SourceIp { get; set; } = "";
+
     [JsonPropertyName("session_id")]
     public string? SessionId { get; set; }
 
@@ -238,6 +290,9 @@ public sealed class MirrorStatusBody
 
     [JsonPropertyName("name")]
     public string Name { get; set; } = "";
+
+    [JsonPropertyName("source_ip")]
+    public string SourceIp { get; set; } = "";
 
     [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     [JsonPropertyName("session_id")]
@@ -277,6 +332,8 @@ public sealed class SessionNotifySaveResult
 [JsonSerializable(typeof(SessionNotifyConfig))]
 [JsonSerializable(typeof(TapClockEventBody))]
 [JsonSerializable(typeof(WebhookEventBody))]
+[JsonSerializable(typeof(MirrorClickBody))]
+[JsonSerializable(typeof(string[]))]
 [JsonSerializable(typeof(MirrorStatusBody))]
 [JsonSerializable(typeof(MirrorStatusBody[]))]
 [JsonSerializable(typeof(SessionNotifySaveResult))]

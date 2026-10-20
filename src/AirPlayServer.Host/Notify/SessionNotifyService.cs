@@ -59,6 +59,15 @@ internal sealed class SessionNotifyService : IAsyncDisposable
             config.DisconnectDebounceMs = debounce;
         }
 
+        if (launch.WebhookUrls.Count > 0)
+        {
+            config.WebhooksEnabled = true;
+            var merged = new string[config.WebhookUrls.Length + launch.WebhookUrls.Count];
+            config.WebhookUrls.CopyTo(merged, 0);
+            launch.WebhookUrls.CopyTo(merged, config.WebhookUrls.Length);
+            config.WebhookUrls = merged;
+        }
+
         config.Normalize();
         return new SessionNotifyPlan
         {
@@ -72,7 +81,7 @@ internal sealed class SessionNotifyService : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(receiver);
-        var dispatcher = new SessionEventDispatcher(receiver.SessionEvents, plan.Config, ConsoleAirPlayLog.Instance);
+        var dispatcher = new SessionEventDispatcher(receiver.SessionEvents, plan.Config, ConsoleAirPlayLog.Instance, clicks: receiver.Clicks);
         var service = new SessionNotifyService(plan, dispatcher);
         if (!plan.ServePage)
         {
@@ -126,6 +135,10 @@ internal sealed class SessionNotifyService : IAsyncDisposable
         if (config.WebhooksEnabled)
         {
             yield return "Webhook: 连接 " + (config.ConnectUrl ?? "（空）") + "，断开 " + (config.DisconnectUrl ?? "（空）") + "。";
+            if (config.WebhookUrls.Length > 0)
+            {
+                yield return "点击 Webhook: " + string.Join(", ", config.WebhookUrls);
+            }
         }
         else
         {

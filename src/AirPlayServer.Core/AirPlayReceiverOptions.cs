@@ -60,9 +60,10 @@ public sealed class AirPlayReceiverOptions
 
     /// <summary>
     /// Ask the host to open one latest-frame window per mirror session.
-    /// The window itself comes from <see cref="OpenMirrorSurface"/>. Clicks in
-    /// that window are not forwarded to the phone. Headless hosts leave the
-    /// factory null, or pass <c>--no-window</c>.
+    /// The window itself comes from <see cref="OpenMirrorSurface"/>. Pointer
+    /// presses are published on <see cref="AirPlayReceiver.Clicks"/> and are
+    /// not forwarded to the phone. Headless hosts leave the factory null, or
+    /// pass <c>--no-window</c>.
     /// </summary>
     public bool ShowWindow { get; set; }
 

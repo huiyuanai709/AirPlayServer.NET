@@ -184,6 +184,7 @@ public sealed class SessionNotifyServer : IAsyncDisposable
             Connected = snapshot.Connected,
             Since = snapshot.Since is { } since ? SessionNotifyConfig.FormatTimestamp(since) : null,
             Name = name ?? "",
+            SourceIp = snapshot.SourceIp ?? "",
             SessionId = snapshot.SessionId,
             DisconnectPending = snapshot.DisconnectPending,
         };

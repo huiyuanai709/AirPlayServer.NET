@@ -36,6 +36,10 @@ v0.1.14 的更新器只认不带 -ui 的文件名，所以从那一版执行 --u
        AirPlayServer.Host.exe --screen 480x1040 --model iphone-15-pro --tapclock 127.0.0.1:42125
   3. iPhone 在同一局域网里发现接收端并开始镜像。
 
+镜像伴音（type 96，AAC-ELD）写到系统默认播放设备。Windows 用 WASAPI。Linux 需要 PulseAudio 或 ALSA，没有就只出画面、日志里会写明。音量用手机的 SET_PARAMETER，GET_PARAMETER 回当前分贝。
+
+带窗口的包可以订阅镜像上的按下和抬起。--webhook 可重复，也写在配置页的「点击地址」里。事件名 mirror.click，不发给手机。说明和 JSON 见仓库 README。
+
 镜像连上或断开时可以通知 TapClock（不在这里点击控制中心）：
 
   浏览器打开 http://127.0.0.1:7099/ ，打开「向 TapClock 发送镜像事件」。

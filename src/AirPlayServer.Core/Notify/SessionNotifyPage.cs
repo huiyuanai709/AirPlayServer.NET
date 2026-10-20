@@ -22,6 +22,7 @@ internal static class SessionNotifyPage
               <p id="status-line" class="text-lg">正在读取…</p>
               <dl class="text-sm text-slate-600 space-y-1">
                 <div>名称 <span id="status-name" class="text-slate-900"></span></div>
+                <div>来源 IP <span id="status-source" class="font-mono text-slate-900"></span></div>
                 <div>开始时间 <span id="status-since" class="text-slate-900"></span></div>
                 <div>会话 <span id="status-session" class="font-mono text-slate-900"></span></div>
                 <div>各路会话 <span id="status-sessions" class="text-slate-900"></span></div>
@@ -35,7 +36,9 @@ internal static class SessionNotifyPage
                 <label class="block text-sm">断开地址<input id="disconnect_url" type="url" placeholder="http://127.0.0.1:9/airplay/disconnected" class="mt-1 w-full rounded border border-slate-300 px-3 py-2" /></label>
                 <label class="block text-sm">密钥（可选）<input id="webhook_secret" type="text" autocomplete="off" class="mt-1 w-full rounded border border-slate-300 px-3 py-2" /></label>
                 <label class="block text-sm">密钥 HTTP 头<input id="webhook_secret_header" type="text" class="mt-1 w-full rounded border border-slate-300 px-3 py-2" /></label>
-                <p class="text-xs text-slate-500">POST JSON：event、at、device、session_id、reason。有密钥时带上上面的头。</p>
+                <p class="text-xs text-slate-500">连接和断开 POST JSON：event、at、device、source_ip、session_id、reason。device 是手机名，source_ip 是对端 IP（不带端口）。不知道时为空字符串。有密钥时带上上面的头。</p>
+                <label class="block text-sm">点击地址（每行一个 http 或 https，最多 8 个）<textarea id="webhook_urls" rows="4" placeholder="http://127.0.0.1:9/mirror/click" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-xs"></textarea></label>
+                <p class="text-xs text-slate-500">连接和断开仍走上面两个地址。镜像窗口的按下和抬起另 POST 到点击地址，event 为 mirror.click，同样带 device 和 source_ip。window_x/y 是客户区设备像素，原点在左上，Y 向下。画面按比例 letterbox，黑边上 on_content 为 false，content_x/y 为空。画面内 content_x/y 是解码帧像素，整数截断。配置了逻辑屏幕尺寸时，另有 logical_x/y = 帧像素 * 逻辑宽高 / 帧宽高。点击不发给手机。有密钥时带上上面的头。</p>
               </fieldset>
               <fieldset class="space-y-3">
                 <legend class="font-medium">TapClock</legend>
@@ -47,6 +50,8 @@ internal static class SessionNotifyPage
                 <pre class="text-xs bg-slate-50 rounded p-3 overflow-x-auto">{
           "event": "disconnected",
           "at": "2026-10-19T14:30:00.0000000+00:00",
+          "device": "客厅的 iPhone",
+          "source_ip": "192.168.5.20",
           "session_id": "...",
           "reason": "data-closed",
           "source": "AirPlayServer.NET"
@@ -72,13 +77,14 @@ internal static class SessionNotifyPage
                 ? (status.disconnect_pending ? "已连接（断连防抖中）" : "已连接")
                 : "未连接";
               document.getElementById("status-name").textContent = status.name || "—";
+              document.getElementById("status-source").textContent = status.source_ip || "—";
               document.getElementById("status-since").textContent = status.since || "—";
               document.getElementById("status-session").textContent = status.session_id || "—";
               const sessions = Array.isArray(status.sessions) ? status.sessions : [];
               const list = document.getElementById("status-sessions");
               list.textContent = sessions.length === 0
                 ? "—"
-                : sessions.map((item) => (item.connected ? "已连接 " : "未连接 ") + (item.name || "—") + " " + (item.session_id || "")).join("；");
+                : sessions.map((item) => (item.connected ? "已连接 " : "未连接 ") + (item.name || "—") + " " + (item.source_ip || "—") + " " + (item.session_id || "")).join("；");
             }
 
             async function refreshStatus() {
@@ -94,6 +100,8 @@ internal static class SessionNotifyPage
                 if (checks.has(name)) input.checked = !!value;
                 else input.value = value ?? "";
               }
+              const urls = Array.isArray(config.webhook_urls) ? config.webhook_urls : [];
+              document.getElementById("webhook_urls").value = urls.join("\n");
             }
 
             function readForm() {
@@ -105,6 +113,7 @@ internal static class SessionNotifyPage
                 else body[name] = input.value.trim() === "" ? null : input.value.trim();
               }
               if (!body.webhook_secret_header) body.webhook_secret_header = "X-Webhook-Token";
+              body.webhook_urls = document.getElementById("webhook_urls").value.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
               return body;
             }
 

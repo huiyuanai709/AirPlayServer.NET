@@ -121,6 +121,9 @@ internal sealed class HostArgs
         --notify-listen  配置页监听地址，默认 127.0.0.1。只接受 IPv4。
         --notify-port    配置页端口，默认 7099。0 表示不打开页面。
         --notify-config  配置 JSON 路径。默认是程序旁边的 session-notify.json。
+        --webhook URL    可重复。镜像窗口的按下和抬起 POST 到这个 http(s) 地址，事件名 mirror.click。
+                         同时启用 Webhook，并和配置文件里的 webhook_urls 合并，最多 8 个。
+                         坐标说明见 README。点击不发给手机。
         --no-notify      不打开配置页。文件里已经启用的 Webhook 和 TapClock 事件仍会发送。
         镜像「已连接」是指数据端口解析到了合法的 128 字节镜像包，不是只完成了 RTSP SETUP。
         配置页提供 GET /api/status，返回 connected、since、name、session_id、disconnect_pending。
@@ -275,6 +278,9 @@ internal sealed class HostArgs
                     break;
                 case "--notify-config":
                     notify.ConfigPath = Next(args, ref i, token);
+                    break;
+                case "--webhook":
+                    notify.WebhookUrls.Add(Next(args, ref i, token));
                     break;
                 case "--no-notify":
                     notify.DisablePage = true;

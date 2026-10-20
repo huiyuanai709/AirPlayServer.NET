@@ -17,16 +17,18 @@ public sealed class SessionEventDispatcher : IDisposable
     private readonly HttpClient _http;
     private readonly object _gate = new();
     private SessionNotifyConfig _config;
+    private readonly MirrorClickHub? _clicks;
     private Task _lastDelivery = Task.CompletedTask;
     private int _stopped;
 
-    public SessionEventDispatcher(IMirrorSessionEvents sessions, SessionNotifyConfig config, IAirPlayLog? log = null, HttpMessageHandler? handler = null)
+    public SessionEventDispatcher(IMirrorSessionEvents sessions, SessionNotifyConfig config, IAirPlayLog? log = null, HttpMessageHandler? handler = null, MirrorClickHub? clicks = null)
     {
         ArgumentNullException.ThrowIfNull(sessions);
         ArgumentNullException.ThrowIfNull(config);
         config.Normalize();
         _sessions = sessions;
         _config = config;
+        _clicks = clicks;
         _log = log ?? NullAirPlayLog.Instance;
         _http = new HttpClient(handler ?? new SocketsHttpHandler(), disposeHandler: handler is null)
         {
@@ -34,6 +36,10 @@ public sealed class SessionEventDispatcher : IDisposable
         };
         _sessions.DisconnectDebounceMs = config.DisconnectDebounceMs;
         _sessions.Changed += OnChanged;
+        if (_clicks is not null)
+        {
+            _clicks.Published += OnClick;
+        }
     }
 
     internal Task CurrentDelivery
@@ -67,8 +73,83 @@ public sealed class SessionEventDispatcher : IDisposable
         }
 
         _sessions.Changed -= OnChanged;
+        if (_clicks is not null)
+        {
+            _clicks.Published -= OnClick;
+        }
+
         _http.Dispose();
     }
+
+    private void OnClick(object? sender, MirrorClickEventArgs args)
+    {
+        var task = SendClickAsync(args);
+        lock (_gate)
+        {
+            _lastDelivery = task;
+        }
+    }
+
+    private async Task SendClickAsync(MirrorClickEventArgs args)
+    {
+        if (Volatile.Read(ref _stopped) != 0)
+        {
+            return;
+        }
+
+        SessionNotifyConfig config;
+        lock (_gate)
+        {
+            config = _config;
+        }
+
+        if (!config.WebhooksEnabled || config.WebhookUrls.Length == 0)
+        {
+            return;
+        }
+
+        var gesture = args.Gesture;
+        var body = new MirrorClickBody
+        {
+            Event = "mirror.click",
+            Phase = gesture.Phase == MirrorPointerPhase.Down ? "down" : "up",
+            At = SessionNotifyConfig.FormatTimestamp(gesture.At),
+            SessionId = args.SessionId,
+            Device = args.DeviceName ?? "",
+            SourceIp = args.SourceIp,
+            Button = ButtonName(gesture.Button),
+            WindowX = gesture.WindowX,
+            WindowY = gesture.WindowY,
+            OnContent = gesture.OnContent,
+            ContentX = gesture.ContentX,
+            ContentY = gesture.ContentY,
+            ContentWidth = gesture.ContentWidth,
+            ContentHeight = gesture.ContentHeight,
+            LogicalX = gesture.LogicalX,
+            LogicalY = gesture.LogicalY,
+            LogicalWidth = gesture.LogicalWidth,
+            LogicalHeight = gesture.LogicalHeight,
+        };
+        var json = JsonSerializer.Serialize(body, SessionNotifyJsonContext.Default.MirrorClickBody);
+        foreach (var url in config.WebhookUrls)
+        {
+            if (Volatile.Read(ref _stopped) != 0)
+            {
+                return;
+            }
+
+            await PostAsync(url, json, config.WebhookSecretHeader, config.WebhookSecret, "Webhook").ConfigureAwait(false);
+        }
+    }
+
+    private static string ButtonName(MirrorPointerButton button) => button switch
+    {
+        MirrorPointerButton.Right => "right",
+        MirrorPointerButton.Middle => "middle",
+        MirrorPointerButton.X1 => "x1",
+        MirrorPointerButton.X2 => "x2",
+        _ => "left",
+    };
 
     private void OnChanged(object? sender, MirrorSessionEventArgs args)
     {
@@ -115,6 +196,7 @@ public sealed class SessionEventDispatcher : IDisposable
                     Event = eventName,
                     At = at,
                     Device = args.DeviceName ?? "",
+                    SourceIp = args.SourceIp ?? "",
                     SessionId = args.SessionId,
                     Reason = args.Reason,
                 };
@@ -147,6 +229,8 @@ public sealed class SessionEventDispatcher : IDisposable
         {
             Event = eventName,
             At = at,
+            Device = args.DeviceName ?? "",
+            SourceIp = args.SourceIp ?? "",
             SessionId = args.SessionId,
             Reason = args.Reason,
             Source = TapClockIntegration.Source,
@@ -197,7 +281,8 @@ public sealed class SessionEventDispatcher : IDisposable
     private static string Describe(MirrorSessionEventArgs args)
     {
         var device = string.IsNullOrWhiteSpace(args.DeviceName) ? "" : " 设备: " + args.DeviceName + "。";
+        var source = string.IsNullOrWhiteSpace(args.SourceIp) ? "" : " 来源: " + args.SourceIp + "。";
         var session = string.IsNullOrWhiteSpace(args.SessionId) ? "" : " 会话: " + args.SessionId + "。";
-        return device + session;
+        return device + source + session;
     }
 }

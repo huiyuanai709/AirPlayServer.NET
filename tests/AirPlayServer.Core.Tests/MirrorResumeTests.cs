@@ -404,14 +404,14 @@ public sealed class MirrorResumeTests
     }
 
     [Fact]
-    public async Task Misses_after_a_picture_wait_for_the_next_idr()
+    public async Task Misses_after_a_picture_keep_the_decoder_and_the_next_slice_paints()
     {
         var lab = new byte[16];
         lab[12] = 2;
         var secret = new byte[32];
         secret[13] = 9;
         const ulong streamId = 36;
-        var decoder = new GatedDecoder { PicturesBeforeSilence = 1 };
+        var decoder = new GatedDecoder { PicturesBeforeSilence = 1, RecoverAfter = 2 };
         var log = new CountingLog();
         await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, log);
         mirror.ArmForStream(lab, secret, streamId);
@@ -420,28 +420,59 @@ public sealed class MirrorResumeTests
         var first = AccessUnit(0x41);
         var second = AccessUnit(0x21);
         var third = AccessUnit(0x01);
-        var again = AccessUnit(0x65);
         await SendAsync(
             mirror,
-            () => mirror.Activity.AcceptedAccessUnits >= 4 && decoder.Decodes >= 3 && decoder.Resets >= 1,
+            () => mirror.Activity.DecodedFrames == 2,
             CodecPacket(0),
             Packet(0, 0x10, 0, Encrypt(lab, secret, streamId, idr, skip: 0)),
             Packet(0, 0, 0, Encrypt(lab, secret, streamId, first, skip: idr.Length)),
             Packet(0, 0, 0, Encrypt(lab, secret, streamId, second, skip: idr.Length + first.Length)),
             Packet(0, 0, 0, Encrypt(lab, secret, streamId, third, skip: idr.Length + first.Length + second.Length)));
-        Assert.Equal(3, decoder.Decodes);
-        Assert.Equal(1, decoder.Resets);
-        Assert.Equal(1, log.Count("下一个关键帧"));
-        Assert.Equal(1, log.Count("did not return a picture"));
+        Assert.Equal(4, decoder.Decodes);
+        Assert.Equal(2, mirror.Activity.DecodedFrames);
+        Assert.Equal(0, decoder.Resets);
+        Assert.Equal(0, log.Count("下一个关键帧"));
+        Assert.Equal(0, log.Count("did not return a picture"));
+        Assert.Equal(1, log.Count("解码器保持打开"));
+    }
 
+    [Fact]
+    public async Task Non_coded_units_are_not_decoded_and_do_not_wait_for_an_idr()
+    {
+        var lab = new byte[16];
+        lab[12] = 4;
+        var secret = new byte[32];
+        secret[13] = 11;
+        const ulong streamId = 37;
+        var decoder = new SpyDecoder();
+        var log = new CountingLog();
+        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, log);
+        mirror.ArmForStream(lab, secret, streamId);
+
+        var idr = AccessUnit(0x65);
+        var sei = AccessUnit(0x06);
+        var aud = AccessUnit(0x09);
+        var pps = AccessUnit(0x68);
+        var next = AccessUnit(0x41);
+        var skipSei = idr.Length;
+        var skipAud = skipSei + sei.Length;
+        var skipPps = skipAud + aud.Length;
+        var skipNext = skipPps + pps.Length;
         await SendAsync(
             mirror,
-            () => decoder.Decodes >= 4,
-            Packet(0, 0, 0, Encrypt(lab, secret, streamId, again, skip: idr.Length + first.Length + second.Length + third.Length)));
-        Assert.Equal(4, decoder.Decodes);
-        Assert.Equal(1, decoder.Resets);
-        Assert.Equal(1, log.Count("下一个关键帧"));
-        Assert.Equal(1, log.Count("did not return a picture"));
+            () => mirror.Activity.DecodedFrames == 2,
+            CodecPacket(0),
+            Packet(0, 0x10, 0, Encrypt(lab, secret, streamId, idr, skip: 0)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, sei, skip: skipSei)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, aud, skip: skipAud)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, pps, skip: skipPps)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, next, skip: skipNext)));
+        Assert.Equal(2, decoder.Snapshot().Length);
+        Assert.Equal(0x65, decoder.Snapshot()[0][^1]);
+        Assert.Equal(new byte[] { 0, 0, 0, 1, 0x41 }, decoder.Snapshot()[1]);
+        Assert.Equal(0, decoder.Resets);
+        Assert.Equal(0, log.Count("下一个关键帧"));
+        Assert.Equal(0, log.Count("解码器保持打开"));
     }
 
     [Fact]
@@ -896,10 +927,17 @@ public sealed class MirrorResumeTests
         private int _configures;
         private int _failures;
         private int _pictures;
+        private int _silent;
 
         public int LeadFailures { get; init; }
 
         public int PicturesBeforeSilence { get; init; } = int.MaxValue;
+
+        /// <summary>
+        /// After <see cref="PicturesBeforeSilence"/> pictures, return no picture
+        /// this many times and then decode again. Zero stays silent.
+        /// </summary>
+        public int RecoverAfter { get; init; }
 
         public int Decodes => Volatile.Read(ref _decodes);
 
@@ -933,7 +971,11 @@ public sealed class MirrorResumeTests
 
             if (Volatile.Read(ref _pictures) >= PicturesBeforeSilence)
             {
-                return false;
+                if (RecoverAfter <= 0 || Volatile.Read(ref _silent) < RecoverAfter)
+                {
+                    Interlocked.Increment(ref _silent);
+                    return false;
+                }
             }
 
             Interlocked.Increment(ref _pictures);

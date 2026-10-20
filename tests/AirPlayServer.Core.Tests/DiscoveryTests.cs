@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using AirPlayServer.Core;
@@ -96,7 +97,51 @@ public sealed class DiscoveryTests
         var changed = MdnsCadence.DescribeAddressChange("客厅", "aa:bb:cc:dd:ee:ff", "Ethernet=192.168.5.15", "Wi-Fi=192.168.1.20");
         Assert.Contains("192.168.5.15", changed, StringComparison.Ordinal);
         Assert.Contains("192.168.1.20", changed, StringComparison.Ordinal);
-        Assert.Contains("重新连发", changed, StringComparison.Ordinal);
+        Assert.Contains("只再发一条", changed, StringComparison.Ordinal);
+        Assert.Contains("not reset", changed, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Unchanged_address_does_not_request_another_announcement()
+    {
+        var wifi = new AdvertisedNic(IPAddress.Parse("172.16.88.168"), 24, "Wi-Fi");
+        var same = new AdvertisedNic(IPAddress.Parse("172.16.88.168"), 24, "Wi-Fi");
+        Assert.False(MdnsCadence.ShouldRefreshAnnouncement([wifi], [same]));
+        Assert.False(MdnsCadence.ShouldRefreshAnnouncement([wifi], [wifi]));
+
+        var moved = new AdvertisedNic(IPAddress.Parse("172.16.88.50"), 24, "Wi-Fi");
+        Assert.True(MdnsCadence.ShouldRefreshAnnouncement([wifi], [moved]));
+        Assert.True(MdnsCadence.NetworkChangeDebounce >= TimeSpan.FromSeconds(2));
+        Assert.True(MdnsCadence.AddressPollInterval >= TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public void Chosen_lan_is_the_only_address_in_the_announcement()
+    {
+        var chosen = LocalNetwork.SelectAdvertisementAddress(IPAddress.Any,
+        [
+            new AdvertisementCandidate(
+                "Local Area Connection* 2",
+                "Microsoft Wi-Fi Direct Virtual Adapter",
+                NetworkInterfaceType.Wireless80211,
+                OperationalStatus.Up,
+                IPAddress.Parse("192.168.137.1"),
+                HasGateway: true,
+                PrefixLength: 24),
+            new AdvertisementCandidate(
+                "Wi-Fi",
+                "Intel(R) Wi-Fi 6 AX201",
+                NetworkInterfaceType.Wireless80211,
+                OperationalStatus.Up,
+                IPAddress.Parse("172.16.88.168"),
+                HasGateway: true,
+                PrefixLength: 24),
+        ]);
+        var packet = MdnsMessages.BuildAnnouncement(Sample(), chosen);
+
+        Assert.Equal(IPAddress.Parse("172.16.88.168"), chosen);
+        Assert.True(ContainsSequence(packet, [172, 16, 88, 168]));
+        Assert.False(ContainsSequence(packet, [192, 168, 137, 1]));
     }
 
     [Fact]

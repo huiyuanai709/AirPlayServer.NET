@@ -24,7 +24,19 @@ internal static class MdnsCadence
     /// </summary>
     public const int QueryBlindSeconds = 10;
 
-    public const int NetworkChangeDebounceMilliseconds = 500;
+    /// <summary>
+    /// Quiet time after <see cref="System.Net.NetworkInformation.NetworkChange"/>
+    /// before adapters are read again. Windows raises several events for one
+    /// Mobile Hotspot flap. An unchanged advertised address produces no packet.
+    /// </summary>
+    public const int NetworkChangeDebounceMilliseconds = 2000;
+
+    /// <summary>
+    /// Steady-loop adapter poll. NetworkChange callbacks only bump a counter;
+    /// they do not enumerate NICs or send. A real address change is noticed
+    /// on this poll, after the debounce above.
+    /// </summary>
+    public const int AddressPollMilliseconds = 5000;
 
     /// <summary>Gaps after the immediate first packet. Timestamps are 0s, 1s, 2s, 4s.</summary>
     public static readonly int[] StartupGapSeconds = [1, 1, 2];
@@ -37,6 +49,16 @@ internal static class MdnsCadence
         => TimeSpan.FromSeconds(receivingQueries ? SteadySeconds : QueryBlindSeconds);
 
     public static TimeSpan NetworkChangeDebounce => TimeSpan.FromMilliseconds(NetworkChangeDebounceMilliseconds);
+
+    public static TimeSpan AddressPollInterval => TimeSpan.FromMilliseconds(AddressPollMilliseconds);
+
+    /// <summary>
+    /// True only when the published A record changed. Hotspot-only flaps are
+    /// absent from both lists once selection has run, so they return false.
+    /// A true result is one mDNS announcement. It does not reset a mirror.
+    /// </summary>
+    public static bool ShouldRefreshAnnouncement(IReadOnlyList<AdvertisedNic> previous, IReadOnlyList<AdvertisedNic> next)
+        => !SameAddresses(previous, next);
 
     public static IReadOnlyList<TimeSpan> StartupGaps()
     {
@@ -148,6 +170,6 @@ internal static class MdnsCadence
     }
 
     public static string DescribeAddressChange(string instanceName, string deviceId, string previous, string next)
-        => $"mDNS 通告地址变化 {instanceName} MAC/deviceId={deviceId} {previous} -> {next}，重新连发。"
-            + $" Advertised addresses changed for {instanceName} deviceId={deviceId}: {previous} -> {next}. Sending the startup burst again.";
+        => $"mDNS 通告地址变化 {instanceName} MAC/deviceId={deviceId} {previous} -> {next}，只再发一条，不重置镜像。"
+            + $" Advertised address changed for {instanceName} deviceId={deviceId}: {previous} -> {next}. Sending one announcement. The mirror session is not reset.";
 }

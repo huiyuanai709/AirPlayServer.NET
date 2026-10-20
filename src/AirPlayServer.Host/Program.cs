@@ -4,7 +4,9 @@ using AirPlayServer.Core;
 using AirPlayServer.Core.Export;
 using AirPlayServer.Core.Protocol;
 using AirPlayServer.Host;
+#if AVALONIA_UI
 using AirPlayServer.Host.Display;
+#endif
 using AirPlayServer.Host.Notify;
 using AirPlayServer.Host.Update;
 
@@ -74,6 +76,7 @@ if (arguments.UpdateMode == HostUpdateMode.Automatic && !HostUpdate.WasJustUpdat
     }
 }
 
+#if AVALONIA_UI
 if (arguments.Options.ShowWindow && OperatingSystem.IsMacOS())
 {
     return AvaloniaMirrorDisplay.RunOnMainThread(arguments.Options, () => RunReceiverAsync(arguments, shutdown.Token));
@@ -83,6 +86,7 @@ if (arguments.Options.ShowWindow)
 {
     arguments.Options.OpenMirrorSurface = AvaloniaMirrorDisplay.Open;
 }
+#endif
 
 try
 {
@@ -90,7 +94,9 @@ try
 }
 finally
 {
+#if AVALONIA_UI
     AvaloniaMirrorDisplay.Shutdown();
+#endif
 }
 
 static async Task<int> RunReceiverAsync(HostArgs arguments, CancellationToken cancellationToken)
@@ -161,6 +167,7 @@ static async Task<int> RunReceiverAsync(HostArgs arguments, CancellationToken ca
             : "最多 " + arguments.Options.MaxMirrors.ToString(CultureInfo.InvariantCulture) + " 路";
         Console.WriteLine("同时镜像: " + mirrorLimit
             + "。每路独立数据端口、会话和窗口。导出文件为 mirror-<来源IP>.jpg。");
+#if AVALONIA_UI
         var windowLine = "显示: 当前进程没有打开窗口。";
         if (arguments.Options.ShowWindow && !AvaloniaMirrorDisplay.HasOpenedSurface)
         {
@@ -174,6 +181,9 @@ static async Task<int> RunReceiverAsync(HostArgs arguments, CancellationToken ca
                     + "。窗口里的点击不会发给手机。"
                 : "显示: 每一路镜像一个窗口（Windows、macOS、Linux），标题是设备名，只画该路最新一帧。未指定 --model，鼠标悬停显示解码帧像素。窗口里的点击不会发给手机。";
         }
+#else
+        var windowLine = "显示: 精简构建，没有 Avalonia 窗口。画面仍可导出。";
+#endif
 
         Console.WriteLine(windowLine);
         if (arguments.Options.TapClock is { Enabled: true } tapClock)

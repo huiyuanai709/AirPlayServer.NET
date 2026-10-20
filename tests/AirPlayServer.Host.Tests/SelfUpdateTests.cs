@@ -50,6 +50,10 @@ public class SelfUpdateTests
         Assert.Equal("v0.1.3", info.Tag);
         Assert.Equal("linux-x64", info.Rid);
         Assert.Equal("AirPlayServer.Host", info.Binary);
+        Assert.Null(info.Flavor);
+        Assert.True(VersionFile.TryParse(text + "flavor=ui\n", out var flavored));
+        Assert.Equal("ui", flavored.Flavor);
+        Assert.Equal("linux-x64", flavored.Rid);
         Assert.True(SemanticVersion.TryParse(info.Tag, out var version));
         Assert.Equal(0, version.Major);
         Assert.Equal(1, version.Minor);
@@ -63,16 +67,27 @@ public class SelfUpdateTests
         var release = new PublishedRelease("v0.1.4", Parsed("v0.1.4"),
         [
             Asset("AirPlayServer.Host-v0.1.4-win-x64.zip"),
+            Asset("AirPlayServer.Host-v0.1.4-win-x64-ui.zip"),
             Asset("AirPlayServer.Host-v0.1.4-linux-x64.zip"),
+            Asset("AirPlayServer.Host-v0.1.4-linux-x64-ui.zip"),
             Asset("AirPlayServer.Host-v0.1.4-linux-x64.pdb"),
             Asset("SHA256SUMS.txt"),
         ]);
 
-        Assert.Equal("AirPlayServer.Host-v0.1.4-linux-x64.zip", ReleaseAssets.ZipFileName("v0.1.4", HostRid.LinuxX64));
+        Assert.Equal(
+            "AirPlayServer.Host-v0.1.4-linux-x64.zip",
+            ReleaseAssets.ZipFileName("v0.1.4", HostRid.LinuxX64, avaloniaUi: false));
+        Assert.Equal(
+            "AirPlayServer.Host-v0.1.4-linux-x64-ui.zip",
+            ReleaseAssets.ZipFileName("v0.1.4", HostRid.LinuxX64, avaloniaUi: true));
+        Assert.Equal(
+            "AirPlayServer.Host-v0.1.4-win-x64-ui.zip",
+            ReleaseAssets.ZipFileName("v0.1.4", HostRid.WinX64, avaloniaUi: true));
+        Assert.Equal(ReleaseAssets.ZipFileName("v0.1.4", HostRid.LinuxX64, HostBuild.HasAvaloniaWindow), ReleaseAssets.ZipFileName("v0.1.4", HostRid.LinuxX64));
         Assert.True(ReleaseAssets.TrySelectZip(release, HostRid.LinuxX64, out var linux));
-        Assert.Equal("AirPlayServer.Host-v0.1.4-linux-x64.zip", linux!.Name);
+        Assert.Equal(ReleaseAssets.ZipFileName("v0.1.4", HostRid.LinuxX64), linux!.Name);
         Assert.True(ReleaseAssets.TrySelectZip(release, HostRid.WinX64, out var windows));
-        Assert.Equal("AirPlayServer.Host-v0.1.4-win-x64.zip", windows!.Name);
+        Assert.Equal(ReleaseAssets.ZipFileName("v0.1.4", HostRid.WinX64), windows!.Name);
         Assert.False(ReleaseAssets.TrySelectZip(release, "osx-arm64", out _));
         Assert.True(ReleaseAssets.TrySelectSums(release, out var sums));
         Assert.Equal("SHA256SUMS.txt", sums!.Name);

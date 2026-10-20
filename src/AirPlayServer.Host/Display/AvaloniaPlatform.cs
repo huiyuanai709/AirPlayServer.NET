@@ -14,7 +14,15 @@ internal static class AvaloniaPlatform
     public static AppBuilder UseHostPlatform(this AppBuilder builder)
     {
 #if AVALONIA_WIN
-        return builder.UseWin32().UseSkia().UseHarfBuzz();
+        // Software only. AngleEgl would load av_libglesv2.dll, which the UI
+        // zip does not ship. The picture is a CPU BGRA blit.
+        return builder.UseWin32()
+            .With(new Win32PlatformOptions
+            {
+                RenderingMode = [Win32RenderingMode.Software],
+            })
+            .UseSkia()
+            .UseHarfBuzz();
 #elif AVALONIA_OSX
         return builder.UseAvaloniaNative().UseSkia().UseHarfBuzz();
 #else

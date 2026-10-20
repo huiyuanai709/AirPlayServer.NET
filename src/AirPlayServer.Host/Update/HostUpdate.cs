@@ -56,9 +56,12 @@ internal static class HostUpdate
     {
         Console.WriteLine("AirPlayServer.Host");
         Console.WriteLine("程序内版本: " + HostVersion.InformationalVersion);
+        Console.WriteLine("构建: " + HostBuild.Flavor);
         if (TryReadVersionFile(out var info, out _))
         {
-            Console.WriteLine("VERSION.txt: " + info.Tag + (info.Rid is null ? "" : "（" + info.Rid + "）"));
+            Console.WriteLine("VERSION.txt: " + info.Tag
+                + (info.Rid is null ? "" : "（" + info.Rid + "）")
+                + (info.Flavor is null ? "" : "，" + info.Flavor));
             return;
         }
 

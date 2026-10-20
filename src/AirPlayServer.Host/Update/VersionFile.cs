@@ -1,6 +1,6 @@
 namespace AirPlayServer.Host.Update;
 
-internal readonly record struct VersionFile(string Tag, string? Rid, string? Binary)
+internal readonly record struct VersionFile(string Tag, string? Rid, string? Binary, string? Flavor = null)
 {
     public static bool TryParse(string? text, out VersionFile info)
     {
@@ -13,6 +13,7 @@ internal readonly record struct VersionFile(string Tag, string? Rid, string? Bin
         string? tag = null;
         string? rid = null;
         string? binary = null;
+        string? flavor = null;
         var span = text.AsSpan().TrimStart('\uFEFF');
         while (!span.IsEmpty)
         {
@@ -49,6 +50,10 @@ internal readonly record struct VersionFile(string Tag, string? Rid, string? Bin
             {
                 binary = value;
             }
+            else if (key.Equals("flavor", StringComparison.OrdinalIgnoreCase))
+            {
+                flavor = value;
+            }
         }
 
         if (string.IsNullOrWhiteSpace(tag))
@@ -56,7 +61,7 @@ internal readonly record struct VersionFile(string Tag, string? Rid, string? Bin
             return false;
         }
 
-        info = new VersionFile(tag, rid, binary);
+        info = new VersionFile(tag, rid, binary, flavor);
         return true;
     }
 }

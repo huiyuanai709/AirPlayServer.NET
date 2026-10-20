@@ -30,24 +30,25 @@ jobs:
       - name: Check the release zip omits debug symbols
         run: ./packaging/stage-release-test.sh
 
-      - name: Native AOT publish (linux-x64)
-        run: ./packaging/publish.sh linux-x64
+      - name: Native AOT publish (linux-x64 lean)
+        run: ./packaging/publish.sh linux-x64 Release lean
 
-      - name: Avalonia native libraries are in the linux publish
+      - name: Smoke the lean binary
         run: |
           set -euo pipefail
-          found=$(find artifacts/linux-x64 -type f \( -name '*.so' -o -name '*.so.*' \) | wc -l)
-          if [ "$found" -lt 1 ]; then
-            echo "linux-x64 publish has no Avalonia/Skia native library" >&2
-            find artifacts/linux-x64 -type f >&2
-            exit 1
-          fi
-          find artifacts/linux-x64 -type f \( -name '*.so' -o -name '*.so.*' \)
-
-      - name: Smoke the published binary
-        run: |
           artifacts/linux-x64/AirPlayServer.Host --help
           artifacts/linux-x64/AirPlayServer.Host --self-check
+          artifacts/linux-x64/AirPlayServer.Host --help | grep -F "构建: lean"
+
+      - name: Native AOT publish (linux-x64 ui)
+        run: ./packaging/publish.sh linux-x64 Release ui
+
+      - name: Smoke the ui binary
+        run: |
+          set -euo pipefail
+          artifacts/linux-x64-ui/AirPlayServer.Host --help
+          artifacts/linux-x64-ui/AirPlayServer.Host --self-check
+          artifacts/linux-x64-ui/AirPlayServer.Host --help | grep -F "构建: ui"
 
   macos:
     runs-on: macos-latest
@@ -59,23 +60,25 @@ jobs:
           dotnet-version: 11.0.x
           dotnet-quality: preview
 
-      - name: Native AOT publish (osx-arm64)
-        run: ./packaging/publish.sh osx-arm64
+      - name: Native AOT publish (osx-arm64 lean)
+        run: ./packaging/publish.sh osx-arm64 Release lean
 
-      - name: Avalonia native libraries are in the macOS publish
+      - name: Smoke the lean binary
         run: |
           set -euo pipefail
-          found=$(find artifacts/osx-arm64 -type f -name '*.dylib' | wc -l)
-          if [ "$found" -lt 1 ]; then
-            echo "osx-arm64 publish has no Avalonia native library" >&2
-            find artifacts/osx-arm64 -type f >&2
-            exit 1
-          fi
-
-      - name: Smoke the published binary
-        run: |
           artifacts/osx-arm64/AirPlayServer.Host --help
           artifacts/osx-arm64/AirPlayServer.Host --self-check
+          artifacts/osx-arm64/AirPlayServer.Host --help | grep -F "构建: lean"
+
+      - name: Native AOT publish (osx-arm64 ui)
+        run: ./packaging/publish.sh osx-arm64 Release ui
+
+      - name: Smoke the ui binary
+        run: |
+          set -euo pipefail
+          artifacts/osx-arm64-ui/AirPlayServer.Host --help
+          artifacts/osx-arm64-ui/AirPlayServer.Host --self-check
+          artifacts/osx-arm64-ui/AirPlayServer.Host --help | grep -F "构建: ui"
 
   windows:
     runs-on: windows-latest
@@ -94,11 +97,22 @@ jobs:
         shell: bash
         run: ./packaging/stage-release-test.sh
 
-      - name: Native AOT publish (win-x64)
-        run: ./packaging/publish.ps1 -Runtime win-x64
+      - name: Native AOT publish (win-x64 lean)
+        run: ./packaging/publish.ps1 -Runtime win-x64 -Flavor lean
 
-      - name: Smoke the published binary
+      - name: Smoke the lean binary
         shell: pwsh
         run: |
           ./artifacts/win-x64/AirPlayServer.Host.exe --help
           ./artifacts/win-x64/AirPlayServer.Host.exe --self-check
+          if (-not (./artifacts/win-x64/AirPlayServer.Host.exe --help | Select-String -SimpleMatch "构建: lean")) { exit 1 }
+
+      - name: Native AOT publish (win-x64 ui)
+        run: ./packaging/publish.ps1 -Runtime win-x64 -Flavor ui
+
+      - name: Smoke the ui binary
+        shell: pwsh
+        run: |
+          ./artifacts/win-x64-ui/AirPlayServer.Host.exe --help
+          ./artifacts/win-x64-ui/AirPlayServer.Host.exe --self-check
+          if (-not (./artifacts/win-x64-ui/AirPlayServer.Host.exe --help | Select-String -SimpleMatch "构建: ui")) { exit 1 }

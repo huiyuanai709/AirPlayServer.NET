@@ -60,12 +60,17 @@ zip_path = os.environ["ZIP_PATH"]
 rid = os.environ["RID"]
 binary = os.environ["BINARY_NAME"]
 expect_service = os.environ["EXPECT_SERVICE"] == "1"
-prefix = f"AirPlayServer.Host-v0.0.0-test-{rid}"
-
+flavor = os.environ.get("FLAVOR", "lean")
+suffix = "-ui" if flavor == "ui" else ""
+prefix = f"AirPlayServer.Host-v0.0.0-test-{rid}{suffix}"
 with zipfile.ZipFile(zip_path) as archive:
     names = set(archive.namelist())
     version = archive.read(f"{prefix}/VERSION.txt").decode()
     run = archive.read(f"{prefix}/RUN.txt").decode()
+    service_text = ""
+    service_name = f"{prefix}/airplayserver.service"
+    if service_name in names:
+        service_text = archive.read(service_name).decode()
 
 required = {
     f"{prefix}/RUN.txt",
@@ -106,7 +111,11 @@ present = sorted(
 if present:
     sys.exit("unexpected entries " + ", ".join(present))
 
-expected_version = f"tag=v0.0.0-test\nrid={rid}\nbinary={binary}\nlicense=GPL-3.0-only\n"
+expected_version = f"tag=v0.0.0-test\nrid={rid}\nbinary={binary}\nlicense=GPL-3.0-only\nflavor={flavor}\n"
+if expect_service and flavor == "ui" and "--no-window" not in service_text:
+    sys.exit("ui linux unit file must pass --no-window")
+if expect_service and flavor == "lean" and "--no-window" in service_text:
+    sys.exit("lean linux unit file must not force --no-window")
 if version != expected_version:
     sys.exit("VERSION.txt was " + version)
 
@@ -123,6 +132,8 @@ chmod 600 "$tmp/linux/AirPlayServer.Host" || true
 chmod 777 "$tmp/linux/SomeNative.dll" "$tmp/linux/libsomething.so" "$tmp/linux/libsomething.dylib" || true
 "$stage" linux-x64 v0.0.0-test "$tmp/linux" "$tmp/linux.zip"
 expect_zip "$tmp/linux.zip" linux-x64 "AirPlayServer.Host" 1
+"$stage" linux-x64 v0.0.0-test "$tmp/linux" "$tmp/linux-ui.zip" ui
+FLAVOR=ui expect_zip "$tmp/linux-ui.zip" linux-x64 "AirPlayServer.Host" 1
 
 mode="$("$py" - "$tmp/linux.zip" <<'PY'
 import sys
@@ -229,6 +240,17 @@ fi
 "$assert" "$tmp/strip"
 if ! grep -q "libHarfBuzzSharp.pdb" "$tmp/strip.out"; then
   fail "strip log was: $(cat "$tmp/strip.out")"
+fi
+
+mkdir -p "$tmp/natives"
+cp /bin/true "$tmp/natives/libSkiaSharp.so"
+printf 'leave' > "$tmp/natives/AirPlayServer.Host"
+"$root/packaging/strip-native-symbols.sh" "$tmp/natives" >"$tmp/natives.out"
+if ! grep -q "libSkiaSharp.so" "$tmp/natives.out"; then
+  fail "strip-native-symbols did not see libSkiaSharp.so: $(cat "$tmp/natives.out")"
+fi
+if [ ! -f "$tmp/natives/AirPlayServer.Host" ] || [ ! -f "$tmp/natives/libSkiaSharp.so" ]; then
+  fail "strip-native-symbols removed a runtime file"
 fi
 
 echo "stage-release-test ok"

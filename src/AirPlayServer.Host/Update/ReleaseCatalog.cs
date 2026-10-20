@@ -32,8 +32,11 @@ internal static class ReleaseAssets
 {
     public const string SumsFileName = "SHA256SUMS.txt";
 
+    public static string ZipFileName(string tag, string rid, bool avaloniaUi) =>
+        "AirPlayServer.Host-" + tag + "-" + rid + (avaloniaUi ? "-ui" : "") + ".zip";
+
     public static string ZipFileName(string tag, string rid) =>
-        "AirPlayServer.Host-" + tag + "-" + rid + ".zip";
+        ZipFileName(tag, rid, HostBuild.HasAvaloniaWindow);
 
     public static string BinaryName(string rid) => rid switch
     {

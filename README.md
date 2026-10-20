@@ -13,7 +13,7 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 - 完成瞬时配对：`POST /pair-setup` 返回 Ed25519 公钥；`POST /pair-verify` 做 X25519、对两端临时公钥签名，再用 SHA-512 派生的 AES-128-CTR 掩住签名。
 - `GET /server-info` 返回 XML plist，`GET|POST /info` 返回二进制 plist。
 - `POST /reverse` 回答 `101 Switching Protocols`（`PTTH/1.0`），连接先挂住，事件还不解析。
-- `ANNOUNCE`、镜像 `SETUP`（会话 + type 110）、`RECORD`、`GET_PARAMETER`（volume）、`SET_PARAMETER`、`PAUSE`、`FLUSH`、`TEARDOWN` 已接通。音频 type 96 仍返回 501。
+- `ANNOUNCE`、镜像 `SETUP`（会话 + type 110 + 伴音 type 96）、`RECORD`、`GET_PARAMETER`（volume）、`SET_PARAMETER`、`PAUSE`、`FLUSH`、`TEARDOWN` 已接通。type 96 收 AAC-ELD，解成 PCM 后写到系统默认播放设备。
 - 镜像画面走 TCP，不是 UDP RTP。每个包是 128 字节小端头加负载。Type 0 是 AES-128-CTR 的 AVCC；type 1 是明文 SPS/PPS 和几何信息。
 - 宿主默认用进程内 `FairPlayKeys` 回答 `POST /fp-setup`，并在握手之后解开 72 字节 `ekey`。同一次 `FairPlaySession` 同时服务这两步。没有完成握手时，SETUP 仍然 200，随后的加密包只计数、不解码。`/pair-setup-pin`、`/play` 仍返回 501。`--media-key-plugin` 是可选的原生覆盖，FairPlay 不再依赖它。
 - Windows 上用 Media Foundation 把 H.264 解成 BGRA。HEVC 先试 Media Foundation，打不开时用程序旁边的 FFmpeg。发布包有两种：不带 `-ui` 的精简包没有窗口；带 `-ui` 的把最新一帧画在 Avalonia 窗口里（Windows、macOS、Linux 各一路一个窗口）。linux-x64 的 Native AOT 不链 `mfplat` / `user32`；H.264 / HEVC 在运行时加载 FFmpeg（`libavcodec` / `libavutil`）。没有解码器时可以用 `--demo-frame`。`--h265` 只有在 HEVC 解码器真能打开时才宣告 features 第 42 位。ui 包在无图形会话时加 `--no-window`。精简包默认就没有窗口。
@@ -65,6 +65,61 @@ X-TapClock-Token: <共享密钥，可省略>
 
 通用 Webhook 另有连接地址和断开地址。正文是 `event`、`at`、`device`、`session_id`、`reason`。可选一个自定义头带共享密钥。
 
+镜像窗口的按下和抬起走另一份地址列表 `webhook_urls`（命令行 `--webhook`，可重复；配置页「点击地址」，每行一个）。启用 Webhook 之后才会 POST。连接和断开地址不会收到点击。事件名是 `mirror.click`，`phase` 是 `down` 或 `up`（没有合成的 click，订阅方自己配对）。字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `at` | 手势时刻，ISO-8601，带时区偏移 |
+| `session_id` | 这一路镜像的会话。数据端口还没连上时可能没有 |
+| `device` | 设备名，没有时为空字符串 |
+| `source_ip` | 镜像数据对端；还没有数据连接时用 RTSP 对端。没有则为空并省略 |
+| `button` | `left`、`right`、`middle`、`x1`、`x2` |
+| `window_x`、`window_y` | 窗口客户区设备像素。原点在左上，Y 向下。DIP 乘上渲染缩放后向零截断 |
+| `on_content` | 点是否落在按比例摆好的画面上。黑边是 false |
+| `content_x`、`content_y` | 解码帧像素。`frame = (客户区点 - 画面原点) * 帧尺寸 / 画面矩形尺寸`，整数截断，再夹到 `[0, 帧尺寸)`。黑边时省略 |
+| `content_width`、`content_height` | 当前帧宽高。还没有帧时省略 |
+| `logical_x`、`logical_y` | 仅当命令行或配置给出了逻辑屏幕尺寸（`--model`）并且点在画面上。`logical = content * logicalSize / frameSize`，整数除法，X 和 Y 分开算。否则省略 |
+| `logical_width`、`logical_height` | 配置的逻辑屏幕尺寸。没配置就省略 |
+
+点击不发给手机，也不改 HID。订阅示例（本机先听 9 号端口，再让窗口点一下）：
+
+```bash
+nc -l 127.0.0.1 9
+```
+
+收到的正文类似：
+
+```json
+{
+  "event": "mirror.click",
+  "phase": "down",
+  "at": "2026-10-20T07:40:00.0000000+00:00",
+  "session_id": "32位十六进制",
+  "device": "客厅的 iPhone",
+  "source_ip": "192.168.1.20",
+  "button": "left",
+  "window_x": 240,
+  "window_y": 400,
+  "on_content": true,
+  "content_x": 120,
+  "content_y": 260,
+  "content_width": 480,
+  "content_height": 1040,
+  "logical_x": 107,
+  "logical_y": 232,
+  "logical_width": 430,
+  "logical_height": 932
+}
+```
+
+用 curl 自测这条 JSON 能否被你的服务收下（把地址换成 `webhook_urls` 里的那一个）：
+
+```bash
+curl -sS -X POST http://127.0.0.1:9/mirror/click \
+  -H 'Content-Type: application/json' \
+  -d '{"event":"mirror.click","phase":"down","at":"2026-10-20T07:40:00.0000000+00:00","device":"客厅的 iPhone","button":"left","window_x":240,"window_y":400,"on_content":true,"content_x":120,"content_y":260,"content_width":480,"content_height":1040}'
+```
+
 `GET http://127.0.0.1:7099/api/status`：
 
 ```json
@@ -74,6 +129,14 @@ X-TapClock-Token: <共享密钥，可省略>
 `connected` 在防抖期间仍为 true，`disconnect_pending` 为 true。`since` 在未连接时为 null。
 
 Connected means a parsed 128-byte mirror data header, not RTSP SETUP by itself. Disconnect is posted only after the debounce (default 3000 ms) if no replacement data client appears. TapClock receives `POST {base}/api/integrations/airplay/events`. This process does not synthesize Control Center clicks.
+
+## 镜像伴音和音量
+
+type 96 的 SETUP 返回本会话自己的 `dataPort`、`controlPort` 和 `timingPort`。多路镜像各用各的套接字、解码器、音量和播放，互不共用。密钥是 SHA-512(16 字节内容密钥 || 32 字节 pair-verify 秘密) 的前 16 字节，AES-128-CBC，IV 是会话 `eiv`，每个 RTP 包重置。载荷是 AAC-ELD（AudioSpecificConfig `F8 E8 50 00`，44.1 kHz 立体声）。解码用已经按需加载的 libavcodec，不链进 AOT 二进制。
+
+播放写系统默认设备。Windows 用 WASAPI 共享模式，让系统做采样率转换。Linux 先试 PulseAudio（`libpulse-simple.so.0`），再试 ALSA（`libasound.so.2`）的 `default`。都打不开时日志写明降级，PCM 丢掉，视频镜像继续。macOS 这一版没有 CoreAudio，同样走 Pulse/ALSA，没有就丢掉。解码器和播放设备都等到第一包 PCM 才打开。
+
+`SET_PARAMETER` 的 `text/parameters`（`volume: -11.25`）或二进制 plist 的 `volume` 把分贝钳在 [-144, 0]，并按上游播放器的增益用到 PCM 上：-30 dB 及以下静音，0 dB 原样，中间线性。`GET_PARAMETER volume` 返回当前保存的分贝，默认 `volume: 0.0`。`PAUSE` 丢掉已排队的伴音并静音，直到 `FLUSH` 或 `RECORD`。`FLUSH` 的 `RTP-Info: seq=N` 只清音频缓冲。这三条都不动视频，也不改锁屏恢复时保留的解码器和内容密钥。只拆 type 96 时停音频套接字、留视频和密钥。type 110（哪怕同一条里还有 type 96）仍只拆视频，密钥和 SPS/PPS 保留；若 plist 里有 type 96，音频套接字一并停下。
 
 ## 架构
 
@@ -228,7 +291,7 @@ git push origin v0.1.0
 | `pinpair.c` 的 SRP PIN | 未实现。`/pair-setup-pin` 返回 501。 |
 | `fairplay_playfair.c` / `POST /fp-setup` | 已接入。进程内 [AirPlayFairPlay](https://github.com/huiyuanai709/AirPlayFairPlayPlugin)（GPL-3.0-only），源自 PlayFair / xenos1337。宿主默认启用。`--media-key-plugin` 只是可选的原生覆盖。 |
 | `raop_rtp_mirror.c` 的镜像数据 | 已实现骨架：TCP 128 字节头、type 0/1、UDP 计时探测。不是经典 UDP 视频 RTP。 |
-| `raop_rtp.c` 音频 | 未实现。type 96 的 SETUP 返回 501。 |
+| `raop_rtp.c` / `raop_buffer.c` 音频 | type 96：独立 UDP 数据/控制/计时口，AES-128-CBC（密钥是 SHA-512(contentKey \|\| ecdh) 的前 16 字节，IV 是会话 eiv，每包重置），AAC-ELD 经运行时 FFmpeg 解成 44.1 kHz 立体声 S16。不向手机要重传。FFmpeg 或播放设备打不开时 SETUP 仍 200，PCM 丢掉，视频继续。 |
 | FFmpeg H.264 / AAC-ELD、YUV、SDL、ImGui | H.264 / HEVC 画面：Windows 优先 Media Foundation。HEVC 的 MFT 打不开时，以及 Linux 上，运行时加载 FFmpeg 的 `libavcodec` / `libavutil`（不链进 AOT 二进制）。NV12 / YUV420P 在进程内转成 BGRA。没有这些库就不产出画面，并且不宣告 `--h265`。AAC 仍未实现。 |
 | `MirrorSimAdapter` JSONL | 未实现。TapClock 走 ATBF，不走这条。 |
 | URL / HLS `/play` | 与上游一样不提供。这里直接 501。 |
@@ -259,7 +322,7 @@ int AirPlay_FairPlaySetup(const uint8_t* request, int requestLength,
 
 Windows 上 Media Foundation 把 Annex-B 访问单元变成 BGRA，写入 `FrameSlot`（只保留最新一帧）。同步硬件变换如果还能锁定 NV12、RGB32 或 ARGB32 缓冲就优先用它。变换列出 RGB 时，由 Media Foundation 做 YUV 转换，输出类型上写着解析出来的矩阵和范围。微软 H.264 解码器本身只出 NV12 这一类 YUV，那种帧在进程内转换：SPS 的 VUI 优先，其次是媒体类型上的矩阵和 nominal range，都没有时按 iPhone 镜像的 BT.709 全范围。硬件变换的输出如果是 DXGI 表面，或者只有异步硬件变换时，退回系统自带的软件解码器。HEVC 同样先走 Media Foundation。`CLSID_CMSH265DecoderMFT` 不在时改用 FFmpeg。Linux 上 H.264 和 HEVC 都只走 FFmpeg。没有画面时，访问单元仍然计数，但不会冒充成手机屏幕。Linux 上继续可以用 `--demo-frame` 检查导出。
 
-ui 构建默认打开 Avalonia 窗口，把最新一帧按比例放进客户区（比例不同时留黑边，不拉变形）。缩放是最近邻，和以前的 GDI 软件缩放同一套整数格子，alpha 写成不透明。`--no-window` 关掉它。精简构建没有这个窗口，接收和导出不变。鼠标悬停时，标题和左上角显示 TapClock 绝对屏幕坐标，和 TapClock 日志里的「屏幕坐标」用同一套整数除法：客户区上的点先换成解码帧像素（画面按比例居中，黑边和画面矩形之外不算），再 `screen = 帧像素 * --model 宽高 / 帧宽高`，X 和 Y 各算各的。例如 `--model iphone-15-pro-max` 是 430×932；480×1040 的帧上，像素 (323, 850) 读成 `TapClock 289, 761`。没写 `--model` 时，图像尺寸就是屏幕，标签退回 `像素 x, y`。悬停不读 `--screen`。窗口里的鼠标点击不会发给手机，也不改 HID。Linux 窗口走 X11，运行时需要 `libX11`。macOS 走 Avalonia.Native。
+ui 构建默认打开 Avalonia 窗口，把最新一帧按比例放进客户区（比例不同时留黑边，不拉变形）。缩放是最近邻，和以前的 GDI 软件缩放同一套整数格子，alpha 写成不透明。`--no-window` 关掉它。精简构建没有这个窗口，接收和导出不变。鼠标悬停时，标题和左上角显示 TapClock 绝对屏幕坐标，和 TapClock 日志里的「屏幕坐标」用同一套整数除法：客户区上的点先换成解码帧像素（画面按比例居中，黑边和画面矩形之外不算），再 `screen = 帧像素 * --model 宽高 / 帧宽高`，X 和 Y 各算各的。例如 `--model iphone-15-pro-max` 是 430×932；480×1040 的帧上，像素 (323, 850) 读成 `TapClock 289, 761`。没写 `--model` 时，图像尺寸就是屏幕，标签退回 `像素 x, y`。悬停不读 `--screen`。窗口里的鼠标按下和抬起会按上面的 `mirror.click` 发给 `webhook_urls`，不发给手机，也不改 HID。Linux 窗口走 X11，运行时需要 `libX11`。macOS 走 Avalonia.Native。
 
 TapClock 的点击留在它自己的主机 TCP `42123`（ATB/1）。坐标是板上的 HID 计数（AssistiveTouch），不是这台电脑窗口里的像素。点击对齐和镜像广告是两套尺寸，写在不同的参数上：
 

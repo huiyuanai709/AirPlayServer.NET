@@ -314,6 +314,71 @@ public sealed class MirrorSessionNotifyTests
     }
 
     [Fact]
+    public async Task Click_posts_only_to_the_webhook_list()
+    {
+        using var tracker = new MirrorSessionTracker();
+        var handler = new CaptureHandler();
+        var hub = new MirrorClickHub();
+        var config = new SessionNotifyConfig
+        {
+            WebhooksEnabled = true,
+            ConnectUrl = "http://127.0.0.1:9/on",
+            WebhookSecret = "hook-secret",
+            WebhookSecretHeader = "X-Hook",
+            WebhookUrls = ["http://127.0.0.1:9/click-a", "http://127.0.0.1:9/click-b"],
+            TapClockEventsEnabled = true,
+            TapClockBaseUrl = "http://127.0.0.1:5088",
+        };
+        using var dispatcher = new SessionEventDispatcher(tracker, config, handler: handler, clicks: hub);
+        var at = new DateTimeOffset(2026, 10, 20, 7, 40, 0, TimeSpan.Zero);
+        hub.Publish(new MirrorClickEventArgs
+        {
+            SessionId = "abc",
+            DeviceName = "phone",
+            SourceIp = "192.168.1.20",
+            Gesture = MirrorClickMap.Map(
+                MirrorPointerPhase.Down,
+                MirrorPointerButton.Left,
+                at,
+                10,
+                20,
+                100,
+                200,
+                50,
+                100,
+                0,
+                0),
+        });
+        await dispatcher.CurrentDelivery.WaitAsync(TimeSpan.FromSeconds(2));
+        await handler.WaitForAsync(2, TimeSpan.FromSeconds(2));
+        Assert.Equal(2, handler.Count);
+        Assert.Equal("http://127.0.0.1:9/click-a", handler.Requests[0].Uri.AbsoluteUri.TrimEnd('/'));
+        Assert.Equal("http://127.0.0.1:9/click-b", handler.Requests[1].Uri.AbsoluteUri.TrimEnd('/'));
+        Assert.Equal("hook-secret", handler.Requests[0].Headers["X-Hook"]);
+        var body = Read(handler.Requests[0]);
+        Assert.Equal("mirror.click", body.GetProperty("event").GetString());
+        Assert.Equal("down", body.GetProperty("phase").GetString());
+        Assert.Equal("left", body.GetProperty("button").GetString());
+        Assert.Equal("abc", body.GetProperty("session_id").GetString());
+        Assert.Equal("phone", body.GetProperty("device").GetString());
+        Assert.Equal("192.168.1.20", body.GetProperty("source_ip").GetString());
+        Assert.True(body.GetProperty("on_content").GetBoolean());
+        Assert.Equal(5, body.GetProperty("content_x").GetInt32());
+        Assert.False(body.TryGetProperty("logical_x", out _));
+        Assert.DoesNotContain(handler.Requests, item => item.Uri.Port == 5088);
+        Assert.DoesNotContain(handler.Requests, item => item.Uri.AbsoluteUri.Contains("/on", StringComparison.Ordinal));
+
+        dispatcher.Apply(new SessionNotifyConfig { WebhooksEnabled = false, WebhookUrls = ["http://127.0.0.1:9/click-a"] });
+        hub.Publish(new MirrorClickEventArgs
+        {
+            Gesture = MirrorClickMap.Map(MirrorPointerPhase.Up, MirrorPointerButton.Left, at, 1, 1, 10, 10, 10, 10, 0, 0),
+        });
+        await dispatcher.CurrentDelivery.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(30);
+        Assert.Equal(2, handler.Count);
+    }
+
+    [Fact]
     public async Task Posts_tapclock_and_webhook_bodies_after_debounce()
     {
         using var tracker = new MirrorSessionTracker();

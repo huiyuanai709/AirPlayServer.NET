@@ -254,6 +254,30 @@ internal sealed class MirrorDecryptor : IDisposable
         }
     }
 
+    /// <summary>
+    /// Copies the content key and pair-verify secret for the audio cipher.
+    /// Audio uses SHA-512 of these bytes, not the video CTR key.
+    /// </summary>
+    public bool TryCopyMaterial(Span<byte> contentKey, Span<byte> ecdhSecret)
+    {
+        if (contentKey.Length != 16 || ecdhSecret.Length != 32)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (_contentKey is null || _ecdh is null)
+            {
+                return false;
+            }
+
+            _contentKey.CopyTo(contentKey);
+            _ecdh.CopyTo(ecdhSecret);
+            return true;
+        }
+    }
+
     public bool TryDecrypt(ReadOnlySpan<byte> input, Span<byte> output)
     {
         lock (_gate)

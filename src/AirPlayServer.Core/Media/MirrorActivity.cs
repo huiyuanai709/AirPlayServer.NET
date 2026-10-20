@@ -17,6 +17,7 @@ public sealed class MirrorActivity
     private int _rejected;
     private int _decoded;
     private int _pending;
+    private int _audioPackets;
 
     public int DataPort { get; internal set; }
 
@@ -40,7 +41,12 @@ public sealed class MirrorActivity
 
     public int PendingEncryptedPayloads => Volatile.Read(ref _pending);
 
+    /// <summary>RTP datagrams accepted on this session's audio data port.</summary>
+    public int AudioPacketsAccepted => Volatile.Read(ref _audioPackets);
+
     internal void SetKeysReady(bool ready) => Volatile.Write(ref _keysReady, ready ? 1 : 0);
+
+    internal void AcceptAudioPacket() => Interlocked.Increment(ref _audioPackets);
 
     internal void DropEncrypted() => Interlocked.Increment(ref _dropped);
 

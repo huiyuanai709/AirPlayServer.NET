@@ -15,4 +15,6 @@ internal sealed class NotifyLaunch
     public string? TapClockBaseUrl { get; set; }
 
     public int? DebounceMs { get; set; }
+
+    public List<string> WebhookUrls { get; } = [];
 }

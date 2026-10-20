@@ -798,6 +798,19 @@ public sealed class MirrorAndExportTests
             "GET_PARAMETER * RTSP/1.0\r\nCSeq: 7\r\nContent-Type: text/parameters",
             "volume\r\n"u8.ToArray());
         Assert.Equal("volume: 0.0\r\n", Encoding.ASCII.GetString(parameter.Body));
+        var setVolume = await conversation.ExchangeAsync(
+            "SET_PARAMETER * RTSP/1.0\r\nCSeq: 8\r\nContent-Type: text/parameters",
+            "volume: -11.25\r\n"u8.ToArray());
+        Assert.Equal(200, setVolume.Status);
+        var volumeAgain = await conversation.ExchangeAsync(
+            "GET_PARAMETER * RTSP/1.0\r\nCSeq: 9\r\nContent-Type: text/parameters",
+            "volume\r\n"u8.ToArray());
+        Assert.Equal("volume: -11.25\r\n", Encoding.ASCII.GetString(volumeAgain.Body));
+        Assert.Equal(200, (await conversation.ExchangeAsync("PAUSE * RTSP/1.0\r\nCSeq: 10\r\n\r\n")).Status);
+        Assert.True(receiver.Mirror.MediaKeysReady);
+        var flush = await conversation.ExchangeAsync("FLUSH * RTSP/1.0\r\nCSeq: 11\r\nRTP-Info: seq=3456;rtptime=1\r\n\r\n");
+        Assert.Equal(200, flush.Status);
+        Assert.True(receiver.Mirror.MediaKeysReady);
 
         var audio = new PlistDictionary();
         var audioStream = new PlistDictionary();
@@ -806,9 +819,37 @@ public sealed class MirrorAndExportTests
         audioStreams.Add(audioStream);
         audio.Add("streams", audioStreams);
         var audioResponse = await conversation.ExchangeAsync(
-            "SETUP * RTSP/1.0\r\nCSeq: 8\r\nContent-Type: application/x-apple-binary-plist",
+            "SETUP * RTSP/1.0\r\nCSeq: 12\r\nContent-Type: application/x-apple-binary-plist",
             BinaryPropertyList.Write(audio));
-        Assert.Equal(501, audioResponse.Status);
+        Assert.Equal(200, audioResponse.Status);
+        var audioBody = Assert.IsType<PlistDictionary>(BinaryPropertyList.Read(audioResponse.Body));
+        var audioPorts = Assert.IsType<PlistDictionary>(Assert.IsType<PlistArray>(audioBody.Require("streams")).Items[0]);
+        var audioDataPort = Assert.IsType<PlistInteger>(audioPorts.Require("dataPort")).Value;
+        var audioControlPort = Assert.IsType<PlistInteger>(audioPorts.Require("controlPort")).Value;
+        var audioTimingPort = Assert.IsType<PlistInteger>(audioBody.Require("timingPort")).Value;
+        Assert.Equal(96, Assert.IsType<PlistInteger>(audioPorts.Require("type")).Value);
+        Assert.NotEqual(audioDataPort, audioControlPort);
+        Assert.NotEqual(audioDataPort, audioTimingPort);
+        Assert.True(receiver.Mirror.MediaKeysReady);
+        var rtp = new byte[20];
+        rtp[0] = 0x80;
+        rtp[1] = 96;
+        using (var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+        {
+            udp.SendTo(rtp, new IPEndPoint(IPAddress.Loopback, (int)audioDataPort));
+        }
+
+        var deadline = Environment.TickCount64 + 2000;
+        while (receiver.Mirror.AudioPacketsAccepted == 0 && Environment.TickCount64 < deadline)
+        {
+            await Task.Delay(20);
+        }
+
+        Assert.True(receiver.Mirror.AudioPacketsAccepted > 0);
+        Assert.Equal(200, (await conversation.ExchangeAsync(
+            "TEARDOWN * RTSP/1.0\r\nCSeq: 13\r\nContent-Type: application/x-apple-binary-plist",
+            BinaryPropertyList.Write(audio))).Status);
+        Assert.True(receiver.Mirror.MediaKeysReady);
 
         var fairPlay = await conversation.ExchangeAsync("POST /fp-setup HTTP/1.1", new byte[16]);
         Assert.Equal(501, fairPlay.Status);

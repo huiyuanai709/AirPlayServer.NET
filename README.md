@@ -290,7 +290,7 @@ Windows 上的顺序：
    H.264 decoder is the Microsoft Media Foundation software decoder.
    ```
 
-   `720x1560` 是手机这次送出的尺寸，比 `--screen 1290x2796` 小是正常的，窗口按这个尺寸缩放。软件解码器为了逼出第一帧会 drain。drain 之后要先 flush，再把同一个关键帧送回去，后续 P 帧才有参考帧。只发 start-of-stream 时，变换不再收后面的帧，窗口停在刚恢复的那一帧，会话本身还在。硬件变换仍然不 drain。
+   `720x1560` 是手机这次送出的尺寸，比 `--screen 1290x2796` 小是正常的，窗口按这个尺寸缩放。软件解码器有时要 drain 才肯吐出恢复后的第一帧。v0.1.12 在**同一只**变换上 drain 之后再 flush，并把关键帧送回去。这只变换 flush 之后不再出画（锁屏恢复时已经见过），所以窗口停在刚 drain 出来的那一帧，会话还在。现在 drain 只用来取出这一帧，然后丢掉该变换，把同一个关键帧送进新建的软件解码器，并且不再 drain 新的那只。后面的 P 帧打在新解码器上，窗口会继续刷新。硬件变换仍然不 drain。
 
 `POST /fp-setup` 如果比带 `ekey` 的 SETUP 晚到，72 字节 `ekey` 会留着，握手完成后重试解开，这段时间的密文会按到达顺序补解密，而不是直接丢掉。关键帧如果比 SPS/PPS 早到，会留到 codec 数据到达后再解码。Hold 缓冲溢出会让这一条流保持丢弃，直到手机重新开一次镜像。`Mirror.DecodedFrames` 只在真正写出 BGRA 时增加；`DroppedEncryptedPayloads` 只计被丢掉的密文；`PendingEncryptedPayloads` 是还在等密钥的包。连不上 TapClock 时，控制台会写出 `TapClock connect to host:port failed` 并继续重试。
 

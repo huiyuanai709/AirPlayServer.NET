@@ -948,8 +948,9 @@ internal sealed class MirrorPipe : IAsyncDisposable
             {
                 // Releases the transform. The next keyframe opens a software MFT
                 // with no pictures yet, which is the drain path in
-                // MediaFoundationDrainRestart. That path must flush and submit
-                // the keyframe again or the window stays on the resumed frame.
+                // MediaFoundationDrainRestart. That path releases the drained
+                // object and submits the keyframe to a new one. Flushing the
+                // drained object is what left the window on one frame.
                 _decoder.Reset();
             }
 
@@ -1025,8 +1026,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
             }
             else if (resume)
             {
-                // Same as H.264: the new software MFT drains its first keyframe
-                // and must flush before later frames will paint.
+                // Same as H.264: drain forces the first picture, then the drained
+                // object is released. A flush of that object does not keep painting.
                 _hevc.Reset();
             }
 

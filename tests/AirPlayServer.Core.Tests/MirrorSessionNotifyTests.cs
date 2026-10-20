@@ -406,6 +406,7 @@ public sealed class MirrorSessionNotifyTests
         };
 
         tracker.NoteSessionStarting("客厅的 iPhone");
+        tracker.NotePeer(IPAddress.Parse("192.168.5.20"));
         var sessionId = tracker.GetSnapshot().SessionId;
         var generation = tracker.BeginData(new DateTimeOffset(2026, 10, 19, 14, 30, 0, TimeSpan.Zero));
         await dispatcher.CurrentDelivery.WaitAsync(TimeSpan.FromSeconds(2));
@@ -413,9 +414,8 @@ public sealed class MirrorSessionNotifyTests
 
         var tapConnect = handler.Find("http://127.0.0.1:5088/api/integrations/airplay/events");
         var hookConnect = handler.Find("http://127.0.0.1:9/connected");
-        AssertBody(tapConnect, "connected", "mirror-data", sessionId, expectDevice: false, expectSource: true);
-        Assert.Equal("客厅的 iPhone", Read(hookConnect).GetProperty("device").GetString());
-        AssertBody(hookConnect, "connected", "mirror-data", sessionId, expectDevice: true, expectSource: false);
+        AssertBody(tapConnect, "connected", "mirror-data", sessionId, expectSource: true, device: "客厅的 iPhone", sourceIp: "192.168.5.20");
+        AssertBody(hookConnect, "connected", "mirror-data", sessionId, expectSource: false, device: "客厅的 iPhone", sourceIp: "192.168.5.20");
         Assert.Equal("tap", Header(tapConnect, "X-TapClock-Token"));
         Assert.Equal("hook", Header(hookConnect, "X-Hook"));
         Assert.Equal("application/json", tapConnect.ContentType);
@@ -431,8 +431,8 @@ public sealed class MirrorSessionNotifyTests
 
         var tapDisconnect = handler.Find("http://127.0.0.1:5088/api/integrations/airplay/events", skip: 1);
         var hookDisconnect = handler.Find("http://127.0.0.1:9/disconnected");
-        AssertBody(tapDisconnect, "disconnected", "data-closed", sessionId, expectDevice: false, expectSource: true);
-        AssertBody(hookDisconnect, "disconnected", "data-closed", sessionId, expectDevice: true, expectSource: false);
+        AssertBody(tapDisconnect, "disconnected", "data-closed", sessionId, expectSource: true, device: "客厅的 iPhone", sourceIp: "192.168.5.20");
+        AssertBody(hookDisconnect, "disconnected", "data-closed", sessionId, expectSource: false, device: "客厅的 iPhone", sourceIp: "192.168.5.20");
         Assert.DoesNotContain(handler.Requests, item => item.Uri.AbsolutePath.EndsWith("/connected", StringComparison.Ordinal) && item.Body.Contains("disconnected", StringComparison.Ordinal));
     }
 
@@ -497,6 +497,7 @@ public sealed class MirrorSessionNotifyTests
             Assert.Contains("TapClock", page, StringComparison.Ordinal);
             Assert.Contains("控制中心", page, StringComparison.Ordinal);
             Assert.Contains("cdn.tailwindcss.com", page, StringComparison.Ordinal);
+            Assert.Contains("source_ip", page, StringComparison.Ordinal);
 
             var idleJson = await http.GetStringAsync("api/status");
             Assert.Contains("\"since\": null", idleJson, StringComparison.Ordinal);
@@ -504,14 +505,17 @@ public sealed class MirrorSessionNotifyTests
             {
                 Assert.False(idleStatus.RootElement.GetProperty("connected").GetBoolean());
                 Assert.Equal("客厅", idleStatus.RootElement.GetProperty("name").GetString());
+                Assert.Equal("", idleStatus.RootElement.GetProperty("source_ip").GetString());
                 Assert.True(idleStatus.RootElement.GetProperty("session_id").ValueKind == JsonValueKind.Null);
             }
 
             tracker.NoteSessionStarting("客厅的 iPhone");
+            tracker.NotePeer(IPAddress.Parse("192.168.5.20"));
             tracker.BeginData(new DateTimeOffset(2026, 10, 19, 14, 30, 0, TimeSpan.Zero));
             using var statusDocument = JsonDocument.Parse(await http.GetStringAsync("api/status"));
             Assert.True(statusDocument.RootElement.GetProperty("connected").GetBoolean());
             Assert.Equal("客厅的 iPhone", statusDocument.RootElement.GetProperty("name").GetString());
+            Assert.Equal("192.168.5.20", statusDocument.RootElement.GetProperty("source_ip").GetString());
             Assert.False(statusDocument.RootElement.GetProperty("disconnect_pending").GetBoolean());
             Assert.Matches(IsoOffset, statusDocument.RootElement.GetProperty("since").GetString());
 
@@ -604,6 +608,7 @@ public sealed class MirrorSessionNotifyTests
         var connect = await connected.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal(sessionId, connect.SessionId);
         Assert.Equal("客厅的 iPhone", connect.DeviceName);
+        Assert.Equal("127.0.0.1", connect.SourceIp);
         Assert.Equal(MirrorSessionReasons.MirrorData, connect.Reason);
 
         Assert.Equal(200, mirror.HandleMedia(Request("TEARDOWN", StreamBody(96)), session, null).Status);
@@ -618,19 +623,211 @@ public sealed class MirrorSessionNotifyTests
         release.TrySetResult();
         var disconnect = await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal(MirrorSessionReasons.VideoTeardown, disconnect.Reason);
+        Assert.Equal("客厅的 iPhone", disconnect.DeviceName);
+        Assert.Equal("127.0.0.1", disconnect.SourceIp);
         Assert.Equal(sessionId, disconnect.SessionId);
         Assert.Equal(sessionId, mirror.Sessions.GetSnapshot().SessionId);
         Assert.False(mirror.Sessions.GetSnapshot().Connected);
     }
 
-    private static void AssertBody(CapturedRequest request, string eventName, string reason, string? sessionId, bool expectDevice, bool expectSource)
+    [Fact]
+    public void Peer_address_is_kept_without_a_port_and_data_peer_wins()
+    {
+        using var tracker = new MirrorSessionTracker();
+        tracker.NotePeer(IPAddress.Any);
+        tracker.NotePeer(IPAddress.None);
+        tracker.NoteDataPeer(IPAddress.IPv6Any);
+        Assert.Null(tracker.GetSnapshot().SourceIp);
+
+        tracker.NotePeer(IPAddress.Parse("::ffff:10.0.0.8"));
+        Assert.Equal("10.0.0.8", tracker.GetSnapshot().SourceIp);
+        tracker.NoteDataPeer(IPAddress.Parse("::ffff:192.168.5.20"));
+        tracker.NotePeer(IPAddress.Parse("10.0.0.9"));
+        Assert.Equal("192.168.5.20", tracker.GetSnapshot().SourceIp);
+
+        tracker.DisconnectDebounceMs = 0;
+        var events = new List<MirrorSessionEventArgs>();
+        tracker.Changed += (_, args) => events.Add(args);
+        tracker.NoteSessionStarting("客厅的 iPhone");
+        var generation = tracker.BeginData();
+        tracker.EndData(generation);
+        Assert.Equal("192.168.5.20", events[0].SourceIp);
+        Assert.Equal("客厅的 iPhone", events[0].DeviceName);
+        Assert.Equal("192.168.5.20", events[1].SourceIp);
+        Assert.Equal("客厅的 iPhone", events[1].DeviceName);
+    }
+
+    [Fact]
+    public async Task Disconnect_keeps_the_identity_latched_when_the_data_socket_closed()
+    {
+        using var tracker = new MirrorSessionTracker();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tracker.DelayAsync = async (_, token) =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+        };
+        MirrorSessionEventArgs? disconnected = null;
+        tracker.Changed += (_, args) =>
+        {
+            if (args.Phase == MirrorSessionPhase.Disconnected)
+            {
+                disconnected = args;
+            }
+        };
+
+        tracker.NoteSessionStarting("Phone");
+        tracker.NotePeer(IPAddress.Parse("192.168.5.20"));
+        var generation = tracker.BeginData();
+        tracker.EndData(generation);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        tracker.NoteSessionStarting("Next");
+        tracker.NotePeer(IPAddress.Parse("192.168.5.21"));
+        release.TrySetResult();
+        await WaitUntilAsync(() => disconnected is not null);
+
+        Assert.Equal("Phone", disconnected!.DeviceName);
+        Assert.Equal("192.168.5.20", disconnected.SourceIp);
+        Assert.Equal("Next", tracker.GetSnapshot().DeviceName);
+        Assert.Equal("192.168.5.21", tracker.GetSnapshot().SourceIp);
+    }
+
+    [Fact]
+    public async Task Multi_session_disconnect_posts_that_session_device_and_source_ip()
+    {
+        using var hub = new MirrorSessionHub();
+        using var phoneA = new MirrorSessionTracker();
+        using var phoneB = new MirrorSessionTracker();
+        hub.Attach(phoneA);
+        hub.Attach(phoneB);
+        var handler = new CaptureHandler();
+        var config = new SessionNotifyConfig
+        {
+            WebhooksEnabled = true,
+            ConnectUrl = "http://127.0.0.1:9/connected",
+            DisconnectUrl = "http://127.0.0.1:9/disconnected",
+            TapClockEventsEnabled = true,
+            TapClockBaseUrl = "http://127.0.0.1:5088",
+            DisconnectDebounceMs = 0,
+        };
+        using var dispatcher = new SessionEventDispatcher(hub, config, handler: handler);
+        phoneA.NoteSessionStarting("Phone A");
+        phoneA.NotePeer(IPAddress.Parse("192.168.5.20"));
+        phoneB.NoteSessionStarting("Phone B");
+        phoneB.NoteDataPeer(IPAddress.Parse("192.168.5.21"));
+        var idA = phoneA.GetSnapshot().SessionId;
+        var idB = phoneB.GetSnapshot().SessionId;
+        var generationA = phoneA.BeginData();
+        phoneB.BeginData();
+        await handler.WaitForAsync(4, TimeSpan.FromSeconds(2));
+
+        phoneA.EndData(generationA);
+        await handler.WaitForAsync(6, TimeSpan.FromSeconds(2));
+        await dispatcher.CurrentDelivery.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var disconnects = handler.Requests.Where(item => item.Body.Contains("disconnected", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(2, disconnects.Length);
+        foreach (var body in disconnects)
+        {
+            var root = Read(body);
+            Assert.Equal("disconnected", root.GetProperty("event").GetString());
+            Assert.Equal("Phone A", root.GetProperty("device").GetString());
+            Assert.Equal("192.168.5.20", root.GetProperty("source_ip").GetString());
+            Assert.Equal(idA, root.GetProperty("session_id").GetString());
+            Assert.NotEqual(idB, root.GetProperty("session_id").GetString());
+        }
+
+        Assert.DoesNotContain(handler.Requests, item => item.Body.Contains("disconnected", StringComparison.Ordinal) && item.Body.Contains("Phone B", StringComparison.Ordinal));
+        Assert.Contains(handler.Requests, item => item.Uri.AbsolutePath == "/api/integrations/airplay/events" && item.Body.Contains("Phone B", StringComparison.Ordinal) && item.Body.Contains("192.168.5.21", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Status_lists_source_ip_on_every_session()
+    {
+        using var primary = new MirrorSessionTracker();
+        using var other = new MirrorSessionTracker();
+        primary.NoteSessionStarting("Phone A");
+        primary.NotePeer(IPAddress.Parse("192.168.5.20"));
+        other.NoteSessionStarting("Phone B");
+        other.NoteDataPeer(IPAddress.Parse("192.168.5.21"));
+        primary.BeginData();
+        other.BeginData();
+        var current = new SessionNotifyConfig();
+        current.Normalize();
+        var server = SessionNotifyServer.Start(
+            IPAddress.Loopback,
+            0,
+            primary,
+            "客厅",
+            () => current,
+            incoming => incoming,
+            listSessions: () => [primary.GetSnapshot(), other.GetSnapshot()]);
+        try
+        {
+            using var http = new HttpClient { BaseAddress = new Uri("http://127.0.0.1:" + server.EndPoint.Port + "/") };
+            using var document = JsonDocument.Parse(await http.GetStringAsync("api/status"));
+            Assert.Equal("192.168.5.20", document.RootElement.GetProperty("source_ip").GetString());
+            Assert.Equal("Phone A", document.RootElement.GetProperty("name").GetString());
+            var sessions = document.RootElement.GetProperty("sessions");
+            Assert.Equal(2, sessions.GetArrayLength());
+            Assert.Equal("Phone A", sessions[0].GetProperty("name").GetString());
+            Assert.Equal("192.168.5.20", sessions[0].GetProperty("source_ip").GetString());
+            Assert.Equal(primary.GetSnapshot().SessionId, sessions[0].GetProperty("session_id").GetString());
+            Assert.False(sessions[0].TryGetProperty("sessions", out _));
+            Assert.Equal("Phone B", sessions[1].GetProperty("name").GetString());
+            Assert.Equal("192.168.5.21", sessions[1].GetProperty("source_ip").GetString());
+            Assert.Equal(other.GetSnapshot().SessionId, sessions[1].GetProperty("session_id").GetString());
+            Assert.False(sessions[1].TryGetProperty("sessions", out _));
+        }
+        finally
+        {
+            await server.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Unknown_device_and_peer_are_empty_strings_on_both_payloads()
+    {
+        using var tracker = new MirrorSessionTracker();
+        var handler = new CaptureHandler();
+        var config = new SessionNotifyConfig
+        {
+            WebhooksEnabled = true,
+            DisconnectUrl = "http://127.0.0.1:9/disconnected",
+            TapClockEventsEnabled = true,
+            TapClockBaseUrl = "http://127.0.0.1:5088",
+            DisconnectDebounceMs = 0,
+        };
+        using var dispatcher = new SessionEventDispatcher(tracker, config, handler: handler);
+        var generation = tracker.BeginData();
+        await handler.WaitForAsync(1, TimeSpan.FromSeconds(2));
+        tracker.EndData(generation);
+        await handler.WaitForAsync(3, TimeSpan.FromSeconds(2));
+        await dispatcher.CurrentDelivery.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(3, handler.Count);
+        foreach (var body in handler.Requests)
+        {
+            var root = Read(body);
+            Assert.Equal("", root.GetProperty("device").GetString());
+            Assert.Equal("", root.GetProperty("source_ip").GetString());
+        }
+
+        var tapDisconnect = handler.Requests.Single(item => item.Uri.Port == 5088 && item.Body.Contains("disconnected", StringComparison.Ordinal));
+        var hookDisconnect = handler.Requests.Single(item => item.Uri.Port == 9);
+        AssertBody(tapDisconnect, "disconnected", "data-closed", tracker.GetSnapshot().SessionId, expectSource: true, "", "");
+        AssertBody(hookDisconnect, "disconnected", "data-closed", tracker.GetSnapshot().SessionId, expectSource: false, "", "");
+    }
+
+    private static void AssertBody(CapturedRequest request, string eventName, string reason, string? sessionId, bool expectSource, string device, string sourceIp)
     {
         var root = Read(request);
         Assert.Equal(eventName, root.GetProperty("event").GetString());
         Assert.Equal(reason, root.GetProperty("reason").GetString());
         Assert.Equal(sessionId, root.GetProperty("session_id").GetString());
         Assert.Matches(IsoOffset, root.GetProperty("at").GetString());
-        Assert.Equal(expectDevice, root.TryGetProperty("device", out _));
+        Assert.Equal(device, root.GetProperty("device").GetString());
+        Assert.Equal(sourceIp, root.GetProperty("source_ip").GetString());
         Assert.Equal(expectSource, root.TryGetProperty("source", out var source));
         if (expectSource)
         {

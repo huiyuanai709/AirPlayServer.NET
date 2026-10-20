@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 
 namespace AirPlayServer.Core.Notify;
 
@@ -30,6 +31,12 @@ public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
     private DateTimeOffset? _since;
     private string? _sessionId;
     private string? _deviceName;
+    private string? _sourceIp;
+    private bool _sourceFromData;
+    private string? _generationDeviceName;
+    private string? _generationSourceIp;
+    private string? _pendingDeviceName;
+    private string? _pendingSourceIp;
     private string _pendingReason = MirrorSessionReasons.DataClosed;
     private int _debounceMs = DefaultDisconnectDebounceMs;
 
@@ -79,6 +86,13 @@ public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
             if (name is not null)
             {
                 _deviceName = name;
+                // A rename while this data generation is still up belongs to the
+                // disconnect that generation will publish. A setup that arrives
+                // during the debounce is the next session and must not rewrite it.
+                if (_activeGeneration != 0 && _debounceCts is null)
+                {
+                    _generationDeviceName = name;
+                }
             }
 
             if (!_connected && _debounceCts is null)
@@ -128,8 +142,23 @@ public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
         }
     }
 
+    /// <summary>
+    /// Records a peer address for status and the next connect event.
+    /// A control-connection address does not replace one already taken from the data socket.
+    /// </summary>
+    public void NotePeer(IPAddress? address)
+        => ApplyPeer(address, fromDataSocket: false, bindActiveGeneration: false);
+
+    /// <summary>
+    /// Records the mirror data socket's peer. This replaces a control-connection
+    /// address and, while that generation is still connected, the address the
+    /// disconnect event will publish.
+    /// </summary>
+    public void NoteDataPeer(IPAddress? address)
+        => ApplyPeer(address, fromDataSocket: true, bindActiveGeneration: true);
+
     /// <summary>A valid mirror header was parsed. Returns 0 when the tracker is disposed.</summary>
-    public long BeginData(DateTimeOffset? at = null)
+    public long BeginData(DateTimeOffset? at = null, IPAddress? source = null)
     {
         MirrorSessionEventArgs? raised = null;
         long generation;
@@ -140,11 +169,19 @@ public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
                 return 0;
             }
 
+            if (FormatPeer(source) is { } text)
+            {
+                _sourceIp = text;
+                _sourceFromData = true;
+            }
+
             generation = ++_nextGeneration;
             _activeGeneration = generation;
             CancelDebounceLocked();
             _rotateAfterDisconnect = false;
             _closeAfterDisconnect = false;
+            _generationSourceIp = _sourceIp;
+            _generationDeviceName = _deviceName;
             if (!_connected)
             {
                 var stamp = at ?? _time.GetUtcNow();
@@ -189,6 +226,8 @@ public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
             }
 
             _pendingReason = reason;
+            _pendingDeviceName = _generationDeviceName;
+            _pendingSourceIp = _generationSourceIp;
             delayMs = DisconnectDebounceMs;
             if (delayMs <= 0)
             {
@@ -281,6 +320,8 @@ public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
         var at = _time.GetUtcNow();
         var announced = _sessionId;
         var reason = _pendingReason;
+        var device = _pendingDeviceName;
+        var source = _pendingSourceIp;
         _connected = false;
         _since = null;
         var rotate = _rotateAfterDisconnect;
@@ -301,7 +342,8 @@ public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
             Phase = MirrorSessionPhase.Disconnected,
             At = at,
             SessionId = announced,
-            DeviceName = _deviceName,
+            DeviceName = device,
+            SourceIp = source,
             Reason = reason,
         };
     }
@@ -313,6 +355,7 @@ public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
             At = at,
             SessionId = _sessionId,
             DeviceName = _deviceName,
+            SourceIp = _sourceIp,
             Reason = reason,
         };
 
@@ -323,8 +366,66 @@ public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
             Since = _since,
             SessionId = _sessionId,
             DeviceName = _deviceName,
+            SourceIp = _sourceIp,
             DisconnectPending = _debounceCts is not null,
         };
+
+    private void ApplyPeer(IPAddress? address, bool fromDataSocket, bool bindActiveGeneration)
+    {
+        var text = FormatPeer(address);
+        if (text is null)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            if (!fromDataSocket && _sourceFromData)
+            {
+                return;
+            }
+
+            _sourceIp = text;
+            if (fromDataSocket)
+            {
+                _sourceFromData = true;
+            }
+
+            if (bindActiveGeneration && _connected && _activeGeneration != 0 && _debounceCts is null)
+            {
+                _generationSourceIp = text;
+            }
+        }
+    }
+
+    /// <summary>IP without a port. Unspecified addresses are not a peer.</summary>
+    internal static string? FormatPeer(IPAddress? address)
+    {
+        if (address is null)
+        {
+            return null;
+        }
+
+        if (address.IsIPv4MappedToIPv6)
+        {
+            address = address.MapToIPv4();
+        }
+
+        if (address.Equals(IPAddress.Any)
+            || address.Equals(IPAddress.IPv6Any)
+            || address.Equals(IPAddress.None)
+            || address.Equals(IPAddress.IPv6None))
+        {
+            return null;
+        }
+
+        return address.ToString();
+    }
 
     private void CancelDebounceLocked()
     {
@@ -446,6 +547,9 @@ public sealed class MirrorSessionSnapshot
 
     public string? DeviceName { get; init; }
 
+    /// <summary>Peer address without a port. Null when the remote endpoint was not known.</summary>
+    public string? SourceIp { get; init; }
+
     /// <summary>True after the data socket drops and before the debounce publishes disconnected.</summary>
     public bool DisconnectPending { get; init; }
 }
@@ -459,6 +563,9 @@ public sealed class MirrorSessionEventArgs : EventArgs
     public string? SessionId { get; init; }
 
     public string? DeviceName { get; init; }
+
+    /// <summary>Peer address without a port. Null when the remote endpoint was not known.</summary>
+    public string? SourceIp { get; init; }
 
     public required string Reason { get; init; }
 }

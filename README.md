@@ -29,7 +29,7 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 
 `--tapclock` 的 ATBF 仍是 type 3、flags 0 的 JPEG，头部没有来源字段。多路画面会先后推到同一条 TCP；日志写明这一帧的镜像数据对端 IP。要按手机分开保存，用 `--tapclock-dir`：文件名是 `mirror-192.168.5.20.jpg`（IP 来自镜像数据套接字的对端，不是控制连接）。IPv6 里的 `:` 会换成 `-`。还没有数据对端时（例如 `--demo-frame`）写 `mirror-unknown.jpg`。两台手机不会互相覆盖。
 
-`GET /api/status` 的顶层字段仍是第一路的快照。多路时多一个 `sessions` 数组，每项仍是 `connected`、`since`、`name`、`session_id`、`disconnect_pending`。每一路各自 POST `POST {base}/api/integrations/airplay/events`，`session_id` 不同。断连防抖按路计算。
+`GET /api/status` 的顶层字段仍是第一路的快照。多路时多一个 `sessions` 数组，每项是 `connected`、`since`、`name`、`source_ip`、`session_id`、`disconnect_pending`。`source_ip` 是这一路的对端 IP，不带端口；还没有对端时为空字符串。每一路各自 POST `POST {base}/api/integrations/airplay/events`，`session_id`、`device`、`source_ip` 都按这一路填写。断连防抖按路计算。
 
 Several phones can mirror at once. There is no default cap. `--max-mirrors N` (any positive count) is an optional limit; one more session then gets HTTP 503. Memory and CPU are the practical limit. Each IPv4 gets its own data port, decoder, frame slot, `session_id`, and Avalonia window. The same address reconnects that session instead of opening another. JPEG files are `mirror-<data-peer-ip>.jpg`. ATBF stays a type-3 flags-0 JPEG; the log records the data peer because the header has no source field.
 
@@ -55,15 +55,17 @@ X-TapClock-Token: <共享密钥，可省略>
 {
   "event": "connected",
   "at": "2026-10-19T14:30:00.0000000+00:00",
+  "device": "客厅的 iPhone",
+  "source_ip": "192.168.5.20",
   "session_id": "32位十六进制，可省略",
   "reason": "mirror-data",
   "source": "AirPlayServer.NET"
 }
 ```
 
-`event` 是 `connected` 或 `disconnected`。`at` 是带时区偏移的 ISO-8601。`reason` 可能是 `mirror-data`、`data-closed`、`video-teardown`、`session-teardown`。非 2xx（包括 202、409、400 以外的失败）只记日志，不让宿主退出。重试、冷却和「控制中心 → 屏幕镜像 → AirPlay → 上一台设备」的点击都由 TapClock 做。
+`event` 是 `connected` 或 `disconnected`。`at` 是带时区偏移的 ISO-8601。`device` 是发送端在会话 SETUP 里报的名字，不知道时为空字符串。`source_ip` 是镜像数据套接字的对端 IP（不带端口）；数据口还没连上时用控制连接的 IPv4。两者都没有时为空字符串。`reason` 可能是 `mirror-data`、`data-closed`、`video-teardown`、`session-teardown`。非 2xx（包括 202、409、400 以外的失败）只记日志，不让宿主退出。重试、冷却和「控制中心 → 屏幕镜像 → AirPlay → 上一台设备」的点击都由 TapClock 做。
 
-通用 Webhook 另有连接地址和断开地址。正文是 `event`、`at`、`device`、`session_id`、`reason`。可选一个自定义头带共享密钥。
+通用 Webhook 另有连接地址和断开地址。正文是 `event`、`at`、`device`、`source_ip`、`session_id`、`reason`。`device` 和 `source_ip` 与 TapClock 相同。可选一个自定义头带共享密钥。
 
 镜像窗口的按下和抬起走另一份地址列表 `webhook_urls`（命令行 `--webhook`，可重复；配置页「点击地址」，每行一个）。启用 Webhook 之后才会 POST。连接和断开地址不会收到点击。事件名是 `mirror.click`，`phase` 是 `down` 或 `up`（没有合成的 click，订阅方自己配对）。字段：
 
@@ -123,12 +125,12 @@ curl -sS -X POST http://127.0.0.1:9/mirror/click \
 `GET http://127.0.0.1:7099/api/status`：
 
 ```json
-{ "connected": true, "since": "2026-10-19T14:30:00.0000000+00:00", "name": "设备名或接收端名", "session_id": "...", "disconnect_pending": false }
+{ "connected": true, "since": "2026-10-19T14:30:00.0000000+00:00", "name": "设备名或接收端名", "source_ip": "192.168.5.20", "session_id": "...", "disconnect_pending": false }
 ```
 
 `connected` 在防抖期间仍为 true，`disconnect_pending` 为 true。`since` 在未连接时为 null。
 
-Connected means a parsed 128-byte mirror data header, not RTSP SETUP by itself. Disconnect is posted only after the debounce (default 3000 ms) if no replacement data client appears. TapClock receives `POST {base}/api/integrations/airplay/events`. This process does not synthesize Control Center clicks.
+Connected means a parsed 128-byte mirror data header, not RTSP SETUP by itself. Disconnect is posted only after the debounce (default 3000 ms) if no replacement data client appears. TapClock and the generic webhook both post `device` and `source_ip` (IP without a port; empty when unknown). `GET /api/status` includes `source_ip` on the primary snapshot and on each `sessions` entry. This process does not synthesize Control Center clicks.
 
 ## 镜像伴音和音量
 

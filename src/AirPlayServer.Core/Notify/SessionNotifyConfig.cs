@@ -242,6 +242,12 @@ public sealed class TapClockEventBody
     [JsonPropertyName("at")]
     public string At { get; set; } = "";
 
+    [JsonPropertyName("device")]
+    public string Device { get; set; } = "";
+
+    [JsonPropertyName("source_ip")]
+    public string SourceIp { get; set; } = "";
+
     [JsonPropertyName("session_id")]
     public string? SessionId { get; set; }
 
@@ -263,6 +269,9 @@ public sealed class WebhookEventBody
     [JsonPropertyName("device")]
     public string Device { get; set; } = "";
 
+    [JsonPropertyName("source_ip")]
+    public string SourceIp { get; set; } = "";
+
     [JsonPropertyName("session_id")]
     public string? SessionId { get; set; }
 
@@ -281,6 +290,9 @@ public sealed class MirrorStatusBody
 
     [JsonPropertyName("name")]
     public string Name { get; set; } = "";
+
+    [JsonPropertyName("source_ip")]
+    public string SourceIp { get; set; } = "";
 
     [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     [JsonPropertyName("session_id")]

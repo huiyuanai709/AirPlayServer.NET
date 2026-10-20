@@ -123,6 +123,10 @@ public sealed class MultiMirrorTests
         var connected = ConnectedIds(events);
         Assert.Contains(idA, connected);
         Assert.Contains(idB, connected);
+        Assert.Equal("Phone A", EventFor(events, MirrorSessionPhase.Connected, idA).DeviceName);
+        Assert.Equal("127.0.0.1", EventFor(events, MirrorSessionPhase.Connected, idA).SourceIp);
+        Assert.Equal("Phone B", EventFor(events, MirrorSessionPhase.Connected, idB).DeviceName);
+        Assert.Equal("127.0.0.2", EventFor(events, MirrorSessionPhase.Connected, idB).SourceIp);
 
         var generationA = framesA.Generation;
         await clientA.GetStream().WriteAsync(VideoPacket(lab, secretA, 11, skip: 5));
@@ -146,6 +150,9 @@ public sealed class MultiMirrorTests
         Assert.Equal(200, mirror.HandleMedia(Request("TEARDOWN", []), pairingA, endpointA).Status);
         Assert.True(await WaitUntilAsync(() => HasDisconnect(events, idA)));
         Assert.False(HasDisconnect(events, idB));
+        var disconnectA = EventFor(events, MirrorSessionPhase.Disconnected, idA);
+        Assert.Equal("Phone A", disconnectA.DeviceName);
+        Assert.Equal("127.0.0.1", disconnectA.SourceIp);
         Assert.Equal(idB, pipeB.Sessions.GetSnapshot().SessionId);
         Assert.True(clientB.Connected);
 
@@ -415,6 +422,14 @@ public sealed class MultiMirrorTests
         lock (events)
         {
             return events.Any(item => item.Phase == MirrorSessionPhase.Disconnected && item.SessionId == sessionId);
+        }
+    }
+
+    private static MirrorSessionEventArgs EventFor(List<MirrorSessionEventArgs> events, MirrorSessionPhase phase, string? sessionId)
+    {
+        lock (events)
+        {
+            return events.Single(item => item.Phase == phase && item.SessionId == sessionId);
         }
     }
 

@@ -52,6 +52,10 @@ Windows：从 https://github.com/BtbN/FFmpeg-Builds/releases 下载 win64-lgpl-s
 （n9.0 或 master）都可以。把 bin 里的 DLL 全部拷到本目录。
 至少要有同一版本的 avcodec-*.dll、avutil-*.dll、swresample-*.dll。
 当前这组是 avcodec-63.dll、avutil-61.dll、swresample-7.dll。
+HEVC 按名字 "hevc" 打开。FFmpeg 9（avcodec-63）里数字 id 173 是 FIC 不是 HEVC。
+若日志出现 [fic @ ...] Zero slices found 和 ffmpeg-hevc send failed (Invalid data)，
+DecodedFrames 会停在 0，窗口是黑的。那是旧二进制写死了 173，换这一版即可。
+--h265 仍要加。--screen 1290x2796 只决定广告分辨率；实际帧高差 2 像素（1290x2794）不会让画面变黑。
 Linux：sudo apt-get install ffmpeg
 也可以把 libavcodec.so.N、libavutil.so.N、libswresample.so.N 放在本目录。
 当前主版本是 libavcodec.so.63、libavutil.so.61、libswresample.so.7。

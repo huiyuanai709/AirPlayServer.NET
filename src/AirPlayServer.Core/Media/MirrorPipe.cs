@@ -39,9 +39,13 @@ internal sealed class MirrorPipe : IAsyncDisposable
     private readonly Queue<PendingCipher> _pending = new();
     private readonly Task _acceptLoop;
     private readonly Task _timingLoop;
+    private readonly IPAddress? _listenAddress;
     private Socket? _client;
     private IPAddress? _peer;
     private IPAddress? _dataPeer;
+    private IPAddress? _reportedDataPeer;
+    private IPAddress? _peerName;
+    private bool _dataPeerSeen;
     private IPAddress? _claimedAddress;
     private int _remoteTimingPort;
     private byte[]? _sequence;
@@ -96,6 +100,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
     {
         _data = data;
         _timing = timing;
+        _listenAddress = data.LocalEndPoint is IPEndPoint listenEndpoint ? listenEndpoint.Address : null;
         _frames = frames;
         _decoder = decoder;
         _hevc = hevcDecoder;
@@ -151,9 +156,30 @@ internal sealed class MirrorPipe : IAsyncDisposable
     internal void Claim(IPAddress address)
     {
         ArgumentNullException.ThrowIfNull(address);
+        IPAddress? before;
+        IPAddress? after = null;
+        var corrected = false;
         lock (_gate)
         {
+            before = _dataPeer;
             _claimedAddress = address;
+            if (!_dataPeerSeen)
+            {
+                return;
+            }
+
+            after = MirrorDataPeer.Resolve(_reportedDataPeer, _listenAddress, _claimedAddress, _peerName);
+            _dataPeer = after;
+            corrected = before is not null && after is not null && !before.Equals(after);
+        }
+
+        if (corrected)
+        {
+            _log.Log(
+                AirPlayLogLevel.Information,
+                "镜像数据来源更正为 " + after + "。套接字 RemoteEndPoint 报告的是监听地址 " + before
+                + "。 Mirror data peer corrected to " + after
+                + ". RemoteEndPoint reported the listen address " + before + ".");
         }
     }
 
@@ -620,14 +646,25 @@ internal sealed class MirrorPipe : IAsyncDisposable
             }
 
             client.NoDelay = true;
-            var dataPeer = client.RemoteEndPoint is IPEndPoint remote ? remote.Address : null;
+            var reported = client.RemoteEndPoint is IPEndPoint remote ? remote.Address : null;
+            IPAddress? peerName = null;
+            if (MirrorDataPeer.ReportsListenAddress(reported, _listenAddress))
+            {
+                peerName = SocketPeerName.TryRead(client);
+            }
+
             // Only this device's previous data socket is replaced. Another device
             // listens on its own port and is not closed here.
             DropClient();
             CancellationToken clientToken;
+            IPAddress? dataPeer;
             lock (_gate)
             {
-                _dataPeer = dataPeer;
+                _reportedDataPeer = reported;
+                _peerName = peerName;
+                _dataPeerSeen = true;
+                _dataPeer = MirrorDataPeer.Resolve(reported, _listenAddress, _claimedAddress, peerName);
+                dataPeer = _dataPeer;
                 if (_clientStop.IsCancellationRequested)
                 {
                     _clientStop.Dispose();
@@ -641,7 +678,19 @@ internal sealed class MirrorPipe : IAsyncDisposable
             _log.Log(AirPlayLogLevel.Information, "Mirror data client connected.");
             if (dataPeer is not null)
             {
-                _log.Log(AirPlayLogLevel.Information, "镜像数据来源 " + dataPeer + "。 Mirror data peer " + dataPeer + ".");
+                if (reported is not null && !reported.Equals(dataPeer))
+                {
+                    _log.Log(
+                        AirPlayLogLevel.Information,
+                        "镜像数据来源 " + dataPeer + "。套接字 RemoteEndPoint 报告的是监听地址 " + reported
+                        + "，已改用 getpeername 或这条镜像的控制连接地址。 Mirror data peer " + dataPeer
+                        + ". RemoteEndPoint reported the listen address " + reported
+                        + "; using getpeername or this mirror's control peer.");
+                }
+                else
+                {
+                    _log.Log(AirPlayLogLevel.Information, "镜像数据来源 " + dataPeer + "。 Mirror data peer " + dataPeer + ".");
+                }
             }
             try
             {

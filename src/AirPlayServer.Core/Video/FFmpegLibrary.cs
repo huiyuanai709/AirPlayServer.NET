@@ -12,7 +12,19 @@ namespace AirPlayServer.Core.Video;
 internal sealed unsafe class FFmpegLibrary
 {
     internal const int CodecH264 = 27;
-    internal const int CodecHevc = 173;
+
+    /// <summary>
+    /// <c>AV_CODEC_ID_HEVC</c> on libavcodec 58–62 (FFmpeg 4.4–8).
+    /// </summary>
+    internal const int CodecHevcThroughAvcodec62 = 173;
+
+    /// <summary>
+    /// <c>AV_CODEC_ID_HEVC</c> on libavcodec 63 (FFmpeg 9). That release removed
+    /// <c>AV_CODEC_ID_V410</c>, so every video id after it moved down by one.
+    /// 173 is <c>AV_CODEC_ID_FIC</c> there. Opening 173 feeds Annex-B HEVC to the
+    /// FIC decoder, which logs "Zero slices found" and returns invalid data.
+    /// </summary>
+    internal const int CodecHevcFromAvcodec63 = 172;
     internal const int PixelYuv420P = 0;
     internal const int PixelYuvJ420P = 12;
     internal const int PixelNv12 = 23;
@@ -41,6 +53,7 @@ internal sealed unsafe class FFmpegLibrary
     private readonly delegate* unmanaged[Cdecl]<nint, nint, nint, int, int> _optSet;
     private readonly delegate* unmanaged[Cdecl]<nint, nint, long, int, int> _optSetInt;
     private readonly delegate* unmanaged[Cdecl]<int, nint> _findDecoder;
+    private readonly delegate* unmanaged[Cdecl]<nint, nint> _findDecoderByName;
     private readonly delegate* unmanaged[Cdecl]<nint, nint> _allocContext;
     private readonly delegate* unmanaged[Cdecl]<nint*, void> _freeContext;
     private readonly delegate* unmanaged[Cdecl]<nint, nint, nint, int> _open;
@@ -68,6 +81,8 @@ internal sealed unsafe class FFmpegLibrary
         delegate* unmanaged[Cdecl]<nint, nint, nint, int, int> optSet,
         delegate* unmanaged[Cdecl]<nint, nint, long, int, int> optSetInt,
         delegate* unmanaged[Cdecl]<int, nint> findDecoder,
+        delegate* unmanaged[Cdecl]<nint, nint> findDecoderByName,
+        int avcodecMajor,
         delegate* unmanaged[Cdecl]<nint, nint> allocContext,
         delegate* unmanaged[Cdecl]<nint*, void> freeContext,
         delegate* unmanaged[Cdecl]<nint, nint, nint, int> open,
@@ -94,6 +109,8 @@ internal sealed unsafe class FFmpegLibrary
         _optSet = optSet;
         _optSetInt = optSetInt;
         _findDecoder = findDecoder;
+        _findDecoderByName = findDecoderByName;
+        AvcodecMajor = avcodecMajor;
         _allocContext = allocContext;
         _freeContext = freeContext;
         _open = open;
@@ -111,6 +128,31 @@ internal sealed unsafe class FFmpegLibrary
     }
 
     internal string Description { get; }
+
+    /// <summary>libavcodec SONAME major, or 0 when the file name has none.</summary>
+    internal int AvcodecMajor { get; }
+
+    internal static int HevcCodecId(int avcodecMajor)
+        => avcodecMajor >= 63 ? CodecHevcFromAvcodec63 : CodecHevcThroughAvcodec62;
+
+    internal static int TryParseAvcodecMajor(string fileName)
+    {
+        var name = Path.GetFileName(fileName);
+        const string windows = "avcodec-";
+        if (name.StartsWith(windows, StringComparison.Ordinal)
+            && name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseLeadingInt(name[windows.Length..^4]);
+        }
+
+        const string linux = "libavcodec.so.";
+        if (name.StartsWith(linux, StringComparison.Ordinal))
+        {
+            return ParseLeadingInt(name[linux.Length..]);
+        }
+
+        return 0;
+    }
 
     internal static FFmpegLibrary? TryLoad(IAirPlayLog? log)
     {
@@ -149,6 +191,79 @@ internal sealed unsafe class FFmpegLibrary
     }
 
     internal nint FindDecoder(int codecId) => _findDecoder(codecId);
+
+    /// <summary>
+    /// Opens the decoder named <paramref name="codecName"/> (<c>hevc</c> or
+    /// <c>h264</c>). The name lookup is stable across the FFmpeg 9 codec-id
+    /// shift. A numeric id is used only when its <c>AVCodec.name</c> matches,
+    /// so id 173 cannot come back as FIC.
+    /// </summary>
+    internal unsafe nint FindNamedDecoder(string codecName, int fallbackCodecId)
+    {
+        if (_findDecoderByName != null)
+        {
+            var bytes = Utf8(codecName);
+            fixed (byte* text = bytes)
+            {
+                var found = _findDecoderByName((nint)text);
+                if (found != 0 && CodecNameIs(found, codecName))
+                {
+                    return found;
+                }
+            }
+        }
+
+        if (TryDecoderId(fallbackCodecId, codecName, out var byId))
+        {
+            return byId;
+        }
+
+        if (codecName == "hevc")
+        {
+            var other = fallbackCodecId == CodecHevcFromAvcodec63
+                ? CodecHevcThroughAvcodec62
+                : CodecHevcFromAvcodec63;
+            if (other != fallbackCodecId && TryDecoderId(other, codecName, out var alternate))
+            {
+                return alternate;
+            }
+        }
+
+        return 0;
+    }
+
+    internal static bool CodecNameIs(nint codec, string expected)
+    {
+        var actual = ReadCodecName(codec);
+        return actual is not null && actual.Equals(expected, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <c>AVCodec.name</c> is the first field on FFmpeg 4.4 through 9.
+    /// </summary>
+    internal static string? ReadCodecName(nint codec)
+    {
+        if (codec == 0)
+        {
+            return null;
+        }
+
+        var pointer = Marshal.ReadIntPtr(codec);
+        return pointer == 0 ? null : Marshal.PtrToStringUTF8(pointer);
+    }
+
+    /// <summary>
+    /// <c>AVCodec.id</c> follows two pointers and <c>AVMediaType</c> on 64-bit
+    /// FFmpeg 4.4 through 9.
+    /// </summary>
+    internal static int ReadCodecId(nint codec)
+        => Marshal.ReadInt32(codec, (nint.Size * 2) + sizeof(int));
+
+    private bool TryDecoderId(int codecId, string codecName, out nint codec)
+    {
+        codec = _findDecoder(codecId);
+        return codec != 0 && CodecNameIs(codec, codecName);
+    }
 
     internal nint AllocContext(nint codec) => _allocContext(codec);
 
@@ -346,6 +461,7 @@ internal sealed unsafe class FFmpegLibrary
             return false;
         }
 
+        TryExport(avcodec, "avcodec_find_decoder_by_name", out var findDecoderByName);
         TryExport(avutil, "av_version_info", out var versionInfo);
         TryExport(avutil, "av_strerror", out var strerror);
         TryExport(avutil, "av_dict_set", out var dictSet);
@@ -370,6 +486,8 @@ internal sealed unsafe class FFmpegLibrary
             (delegate* unmanaged[Cdecl]<nint, nint, nint, int, int>)optSet,
             (delegate* unmanaged[Cdecl]<nint, nint, long, int, int>)optSetInt,
             (delegate* unmanaged[Cdecl]<int, nint>)findDecoder,
+            findDecoderByName == 0 ? null : (delegate* unmanaged[Cdecl]<nint, nint>)findDecoderByName,
+            TryParseAvcodecMajor(avcodecName),
             (delegate* unmanaged[Cdecl]<nint, nint>)allocContext,
             (delegate* unmanaged[Cdecl]<nint*, void>)freeContext,
             (delegate* unmanaged[Cdecl]<nint, nint, nint, int>)open,
@@ -516,4 +634,17 @@ internal sealed unsafe class FFmpegLibrary
     }
 
     private static byte[] Utf8(string text) => Encoding.UTF8.GetBytes(text + "\0");
+
+    private static int ParseLeadingInt(string text)
+    {
+        var end = 0;
+        while (end < text.Length && text[end] is >= '0' and <= '9')
+        {
+            end++;
+        }
+
+        return end > 0 && int.TryParse(text[..end], NumberStyles.None, CultureInfo.InvariantCulture, out var value)
+            ? value
+            : 0;
+    }
 }

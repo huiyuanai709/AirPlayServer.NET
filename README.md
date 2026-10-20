@@ -309,7 +309,9 @@ Windows 上的顺序：
 | Windows | Media Foundation。打不开才试 FFmpeg。 | 先 Media Foundation（同步硬件 MFT，否则 `CLSID_CMSH265DecoderMFT`）。打不开再试 FFmpeg。 |
 | Linux | FFmpeg。 | FFmpeg。 |
 
-认这些共享库主版本：FFmpeg 4.4 到 9（libavcodec 58–63，libavutil 56–61，libswresample 3–7）。BtbN 的 n7、n8，以及当前带 avcodec-63 的构建（n9.0 或 master）都在这个范围内。软件解码输出 NV12、NV21 或 YUV420P（含 10-bit LE）时，进程内转成 BGRA。SPS 里的矩阵和范围优先；都没写时按 AirPlay 的 BT.709 全范围。自更新只替换发布包里的文件，不会删掉你另外拷进去的这些库。
+认这些共享库主版本：FFmpeg 4.4 到 9（libavcodec 58–63，libavutil 56–61，libswresample 3–7）。BtbN 的 n7、n8，以及当前带 avcodec-63 的构建（n9.0 或 master）都在这个范围内。HEVC 和 H.264 按解码器名字打开（`hevc` / `h264`），不写死 `AVCodecID`。FFmpeg 9 删掉了 `AV_CODEC_ID_V410`，libavcodec 63 里 HEVC 是 172，173 变成了 FIC。旧二进制用 173 时，日志是 `[fic @ ...] Zero slices found` 和 `ffmpeg-hevc send failed (Invalid data found when processing input)`，`DecodedFrames` 停在 0，窗口是黑的。软件解码输出 NV12、NV21 或 YUV420P（含 10-bit LE）时，进程内转成 BGRA。SPS 里的矩阵和范围优先；都没写时按 AirPlay 的 BT.709 全范围。自更新只替换发布包里的文件，不会删掉你另外拷进去的这些库。
+
+`--h265` 仍然要加，才会宣告 features 第 42 位。不加时手机继续发 H.264；Windows 上那条路径用 Media Foundation，不需要这些 DLL。`--screen 1290x2796` 只是广告分辨率。手机实际送出的高度可以少几个像素（例如 1290×2794），这不是黑屏的原因。较新的苹果设备只有在广告分辨率够高、并且第 42 位已宣告时才会改发 HEVC。
 
 ### Windows（没有商店 HEVC 扩展）
 

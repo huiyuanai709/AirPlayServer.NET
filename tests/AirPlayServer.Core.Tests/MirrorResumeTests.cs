@@ -147,14 +147,17 @@ public sealed class MirrorResumeTests
         Assert.Equal(new byte[] { 0, 0, 0, 1, 0x45 }, decoder.Snapshot()[1]);
 
         var embedded = EmbeddedParameterSets();
+        var resets = decoder.Resets;
         await SendAsync(
             mirror,
-            () => decoder.Snapshot().Length >= 3 && decoder.Resets >= 1,
+            () => decoder.Snapshot().Length >= 3,
             CodecPacket(0x16),
             Packet(0, 0x10, 0, Encrypt(lab, secret, streamId, embedded, skip: idr.Length + later.Length)));
         var third = decoder.Snapshot()[2];
         Assert.Equal(1, CountNal(third, 7));
         Assert.Equal(0x67, third[4]);
+        // 0x16 without a preceding 0x56 is an ordinary SPS/PPS packet.
+        Assert.Equal(resets, decoder.Resets);
     }
 
     [Fact]
@@ -216,6 +219,7 @@ public sealed class MirrorResumeTests
         var idr = AccessUnit(0x65);
         var delta = AccessUnit(0x41);
         var after = AccessUnit(0x21);
+        var next = AccessUnit(0x45);
         await SendAsync(
             mirror,
             () => decoder.Snapshot().Length >= 2,
@@ -223,14 +227,174 @@ public sealed class MirrorResumeTests
             Packet(0, 0x10, 0, Encrypt(lab, secret, streamId, idr, skip: 0)),
             Packet(0, 0, 0, Encrypt(lab, secret, streamId, delta, skip: idr.Length)));
         var resets = decoder.Resets;
+        var skip = idr.Length + delta.Length;
 
         await SendAsync(
             mirror,
-            () => decoder.Resets > resets && decoder.Snapshot().Length >= 3,
+            () => decoder.Resets == resets + 1 && mirror.Activity.AcceptedAccessUnits >= 3,
             CodecPacket(0x56),
             CodecPacket(0x16),
-            Packet(0, 0, 0, Encrypt(lab, secret, streamId, after, skip: idr.Length + delta.Length)));
-        Assert.Equal(new byte[] { 0, 0, 0, 1, 0x21 }, decoder.Snapshot()[^1]);
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, after, skip: skip)));
+        Assert.Equal(2, decoder.Snapshot().Length);
+        Assert.Equal(resets + 1, decoder.Resets);
+        Assert.Equal(0, mirror.Activity.RejectedPayloads);
+
+        skip += after.Length;
+        await SendAsync(
+            mirror,
+            () => decoder.Snapshot().Length >= 4,
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, next, skip: skip)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, after, skip: skip + next.Length)));
+        Assert.Equal(resets + 1, decoder.Resets);
+        Assert.Equal(0x67, decoder.Snapshot()[2][4]);
+        Assert.Equal(0x45, decoder.Snapshot()[2][^1]);
+        Assert.Equal(new byte[] { 0, 0, 0, 1, 0x21 }, decoder.Snapshot()[3]);
+        Assert.Equal(0, mirror.Activity.RejectedPayloads);
+    }
+
+    [Fact]
+    public async Task Idr_while_paused_is_kept_when_the_resume_packet_follows()
+    {
+        var lab = new byte[16];
+        lab[10] = 4;
+        var secret = new byte[32];
+        secret[11] = 6;
+        const ulong streamId = 34;
+        var decoder = new SpyDecoder();
+        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, NullAirPlayLog.Instance);
+        mirror.ArmForStream(lab, secret, streamId);
+
+        var idr = AccessUnit(0x65);
+        var during = AccessUnit(0x45);
+        var after = AccessUnit(0x21);
+        await SendAsync(
+            mirror,
+            () => decoder.Snapshot().Length >= 1,
+            CodecPacket(0),
+            Packet(0, 0x10, 0, Encrypt(lab, secret, streamId, idr, skip: 0)));
+        var resets = decoder.Resets;
+
+        await SendAsync(
+            mirror,
+            () => decoder.Snapshot().Length >= 3,
+            CodecPacket(0x56),
+            Packet(0, 0x10, 0, Encrypt(lab, secret, streamId, during, skip: idr.Length)),
+            CodecPacket(0x16),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, after, skip: idr.Length + during.Length)));
+        Assert.Equal(resets + 1, decoder.Resets);
+        Assert.Equal(0x45, decoder.Snapshot()[1][^1]);
+        Assert.Equal(new byte[] { 0, 0, 0, 1, 0x21 }, decoder.Snapshot()[2]);
+        Assert.Equal(0, mirror.Activity.RejectedPayloads);
+    }
+
+    [Fact]
+    public async Task Unflagged_idr_is_the_sync_point_after_pause()
+    {
+        var lab = new byte[16];
+        lab[11] = 8;
+        var secret = new byte[32];
+        secret[12] = 3;
+        const ulong streamId = 35;
+        var decoder = new SpyDecoder();
+        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, NullAirPlayLog.Instance);
+        mirror.ArmForStream(lab, secret, streamId);
+
+        var idr = AccessUnit(0x65);
+        var delta = AccessUnit(0x41);
+        var bare = AccessUnit(0x65);
+        await SendAsync(
+            mirror,
+            () => decoder.Snapshot().Length >= 2,
+            CodecPacket(0),
+            Packet(0, 0x10, 0, Encrypt(lab, secret, streamId, idr, skip: 0)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, delta, skip: idr.Length)));
+        var resets = decoder.Resets;
+        var skip = idr.Length + delta.Length;
+
+        await SendAsync(
+            mirror,
+            () => decoder.Snapshot().Length >= 3,
+            CodecPacket(0x56),
+            CodecPacket(0x16),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, bare, skip: skip)));
+        Assert.Equal(resets + 1, decoder.Resets);
+        Assert.Equal(0x67, decoder.Snapshot()[2][4]);
+        Assert.Equal(0x65, decoder.Snapshot()[2][^1]);
+        Assert.Equal(1, CountNal(decoder.Snapshot()[2], 5));
+    }
+
+    [Fact]
+    public async Task Two_decode_misses_stop_feeding_until_the_next_idr()
+    {
+        var lab = new byte[16];
+        lab[12] = 2;
+        var secret = new byte[32];
+        secret[13] = 9;
+        const ulong streamId = 36;
+        var decoder = new SilentDecoder();
+        var log = new CountingLog();
+        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, log);
+        mirror.ArmForStream(lab, secret, streamId);
+
+        var first = AccessUnit(0x41);
+        var second = AccessUnit(0x21);
+        var third = AccessUnit(0x01);
+        var idr = AccessUnit(0x65);
+        await SendAsync(
+            mirror,
+            () => mirror.Activity.AcceptedAccessUnits >= 3 && decoder.Resets >= 1,
+            CodecPacket(0),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, first, skip: 0)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, second, skip: first.Length)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, third, skip: first.Length + second.Length)));
+        Assert.Equal(2, decoder.Decodes);
+        Assert.Equal(1, log.Count("did not return a picture"));
+
+        await SendAsync(
+            mirror,
+            () => decoder.Decodes >= 3,
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, idr, skip: first.Length + second.Length + third.Length)));
+        Assert.Equal(3, decoder.Decodes);
+        Assert.Equal(1, log.Count("did not return a picture"));
+    }
+
+    [Fact]
+    public async Task Video_teardown_drops_a_non_sync_unit_until_the_next_idr()
+    {
+        var lab = new byte[16];
+        lab[13] = 7;
+        var secret = new byte[32];
+        secret[14] = 2;
+        const ulong firstId = 44;
+        const ulong secondId = 45;
+        var decoder = new SpyDecoder();
+        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, NullAirPlayLog.Instance);
+        mirror.ArmForStream(lab, secret, firstId);
+        using var session = new PairingSession(PairingIdentity.Generate());
+
+        var idr = AccessUnit(0x65);
+        var early = AccessUnit(0x21);
+        var next = AccessUnit(0x45);
+        await SendAsync(
+            mirror,
+            () => mirror.Activity.DecodedFrames == 1,
+            CodecPacket(0),
+            Packet(0, 0x10, 0, Encrypt(lab, secret, firstId, idr, skip: 0)));
+        Assert.Equal(200, mirror.HandleMedia(Request("TEARDOWN", StreamBody(firstId)), session, null).Status);
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", StreamBody(secondId)), session, null).Status);
+        var before = decoder.Snapshot().Length;
+
+        await SendAsync(
+            mirror,
+            () => mirror.Activity.AcceptedAccessUnits >= 2 && decoder.Snapshot().Length == before,
+            Packet(0, 0, 0, Encrypt(lab, secret, secondId, early, skip: 0)));
+        Assert.Equal(before, decoder.Snapshot().Length);
+
+        await SendAsync(
+            mirror,
+            () => decoder.Snapshot().Length >= before + 1,
+            Packet(0, 0x10, 0, Encrypt(lab, secret, secondId, next, skip: early.Length)));
+        Assert.Equal(Prefixed(next), decoder.Snapshot()[^1]);
         Assert.Equal(0, mirror.Activity.RejectedPayloads);
     }
 
@@ -637,6 +801,40 @@ public sealed class MirrorResumeTests
         }
 
         return count;
+    }
+
+    private sealed class SilentDecoder : IH264Decoder
+    {
+        private int _decodes;
+        private int _resets;
+        private int _configures;
+
+        public int Decodes => Volatile.Read(ref _decodes);
+
+        public int Resets => Volatile.Read(ref _resets);
+
+        public bool IsAvailable => true;
+
+        public string Name => "silent";
+
+        public void Configure(ReadOnlySpan<byte> sequenceParameterSet, ReadOnlySpan<byte> pictureParameterSet)
+            => Interlocked.Increment(ref _configures);
+
+        public void Reset() => Interlocked.Increment(ref _resets);
+
+        public bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
+        {
+            _ = annexB;
+            _ = keyFrame;
+            frame = default;
+            if (Volatile.Read(ref _configures) == 0)
+            {
+                return false;
+            }
+
+            Interlocked.Increment(ref _decodes);
+            return false;
+        }
     }
 
     private sealed class SpyDecoder : IH264Decoder

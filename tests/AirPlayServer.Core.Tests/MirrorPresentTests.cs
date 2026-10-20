@@ -17,35 +17,26 @@ public sealed class MirrorPresentTests
     }
 
     [Fact]
-    public void Resume_software_drain_replaces_the_transform_instead_of_flushing_it()
+    public void Resume_does_not_drain_the_software_transform_that_is_holding_the_idr()
     {
         // Mirror sender resumed, geometry 720x1560, then a new software MFT
         // (pictures == 0). The first keyframe has not produced a picture yet.
-        var resume = MediaFoundationDrainRestart.For(
-            allowDrain: true,
-            outputUnsupported: false,
-            producedPicture: false,
-            keyFrame: true,
-            picturesProduced: 0,
-            hardware: false);
-        Assert.True(resume.Drain);
-        Assert.True(resume.ReplaceTransform);
-        Assert.True(resume.MarkDiscontinuity);
-        Assert.Equal(new Guid("9cdf01d9-a0f0-43ba-b077-eaa06cbd728a"), MediaFoundationDrainRestart.DiscontinuityAttribute);
-
-        var steady = MediaFoundationDrainRestart.For(true, false, false, true, picturesProduced: 1, hardware: false);
-        Assert.False(steady.Drain);
-        Assert.False(steady.ReplaceTransform);
-        var hardware = MediaFoundationDrainRestart.For(true, false, false, true, picturesProduced: 0, hardware: true);
-        Assert.False(hardware.Drain);
-        Assert.False(hardware.ReplaceTransform);
-        Assert.False(MediaFoundationDrainRestart.For(true, false, producedPicture: true, true, 0, false).Drain);
-        var held = MediaFoundationDrainRestart.For(allowDrain: false, false, false, true, 0, false);
-        Assert.False(held.Drain);
-        Assert.False(held.ReplaceTransform);
-        Assert.False(MediaFoundationDrainRestart.For(true, outputUnsupported: true, false, true, 0, false).Drain);
-        Assert.False(MediaFoundationDrainRestart.For(true, false, false, keyFrame: false, 0, false).Drain);
-        Assert.False(MediaFoundationDrainRestart.For(true, false, false, true, picturesProduced: -1, hardware: false).Drain);
+        // v0.1.12 flushed that object. v0.1.14 released it and resubmitted the
+        // keyframe. Both left the window on one frame. Drain stays off.
+        Assert.False(MediaFoundationDrainRestart.ShouldDrain(true, false, false, true, picturesProduced: 0, hardware: false));
+        Assert.True(MediaFoundationDrainRestart.HoldsFirstKeyframe(false, false, true, picturesProduced: 0, hardware: false));
+        Assert.False(MediaFoundationDrainRestart.ShouldDrain(true, false, false, true, picturesProduced: 1, hardware: false));
+        Assert.False(MediaFoundationDrainRestart.HoldsFirstKeyframe(false, false, true, picturesProduced: 1, hardware: false));
+        Assert.False(MediaFoundationDrainRestart.ShouldDrain(true, false, false, true, picturesProduced: 0, hardware: true));
+        Assert.False(MediaFoundationDrainRestart.HoldsFirstKeyframe(false, false, true, picturesProduced: 0, hardware: true));
+        Assert.False(MediaFoundationDrainRestart.ShouldDrain(true, false, producedPicture: true, true, 0, false));
+        Assert.False(MediaFoundationDrainRestart.HoldsFirstKeyframe(false, producedPicture: true, true, 0, false));
+        Assert.False(MediaFoundationDrainRestart.ShouldDrain(false, false, false, true, 0, false));
+        Assert.False(MediaFoundationDrainRestart.ShouldDrain(true, outputUnsupported: true, false, true, 0, false));
+        Assert.False(MediaFoundationDrainRestart.HoldsFirstKeyframe(outputUnsupported: true, false, true, 0, false));
+        Assert.False(MediaFoundationDrainRestart.ShouldDrain(true, false, false, keyFrame: false, 0, false));
+        Assert.False(MediaFoundationDrainRestart.HoldsFirstKeyframe(false, false, keyFrame: false, 0, false));
+        Assert.False(MediaFoundationDrainRestart.ShouldDrain(true, false, false, true, picturesProduced: -1, hardware: false));
     }
 
     [Fact]
@@ -70,48 +61,19 @@ public sealed class MirrorPresentTests
     }
 
     [Fact]
-    public void Resume_drain_then_a_new_transform_keeps_publishing()
+    public void Resume_leaves_the_idr_in_the_open_transform_until_the_next_access_unit()
     {
+        // The Microsoft software decoder holds the first sample and emits when
+        // the next access unit arrives. Drain would end that object. Linux CI
+        // cannot load CLSID_CMSH264DecoderMFT, so this stand-in is the policy.
         var mft = new SoftwareDecoderStandIn();
         Assert.Equal(0, mft.ProcessInput());
         Assert.False(mft.Pull());
-        var restart = MediaFoundationDrainRestart.ContinueAfterSoftwareDrain(
-            mft.ProcessMessage,
-            mft.Pull,
-            mft.Release,
-            () => mft.SubmitReplacement());
-        Assert.DoesNotContain(MediaFoundationDrainRestart.MessageFlush, mft.Messages);
-        Assert.DoesNotContain(MediaFoundationDrainRestart.MessageBeginStreaming, mft.Messages);
-        Assert.DoesNotContain(MediaFoundationDrainRestart.MessageStartOfStream, mft.Messages);
-        Assert.Equal([MediaFoundationDrainRestart.MessageDrain], mft.Messages);
-        Assert.Equal(1, mft.Releases);
-        Assert.True(restart.DrainedPicture);
-        Assert.True(restart.ReplacementAccepted);
-        Assert.False(restart.ReplacementPicture);
-        Assert.True(restart.PublishDrainedPicture);
-        Assert.False(restart.UseReplacementPicture);
-        Assert.True(mft.Discontinuity);
+        Assert.Empty(mft.Messages);
+        Assert.Equal(0, mft.Releases);
         Assert.True(mft.SubmitFollowingFrame());
-        Assert.Equal(2, mft.Pictures);
-
-        var rejected = MediaFoundationDrainRestart.ContinueAfterSoftwareDrain(
-            _ => 0,
-            () => true,
-            () => { },
-            () => new MediaFoundationDrainRestart.SubmitResult { Accepted = false, Picture = false });
-        Assert.True(rejected.DrainedPicture);
-        Assert.False(rejected.ReplacementAccepted);
-        Assert.False(rejected.PublishDrainedPicture);
-        Assert.False(rejected.UseReplacementPicture);
-
-        var failedDrain = MediaFoundationDrainRestart.ContinueAfterSoftwareDrain(
-            _ => unchecked((int)0x80004001),
-            () => false,
-            () => { },
-            () => new MediaFoundationDrainRestart.SubmitResult { Accepted = true, Picture = true });
-        Assert.True(failedDrain.DrainHresult < 0);
-        Assert.True(failedDrain.UseReplacementPicture);
-        Assert.False(failedDrain.PublishDrainedPicture);
+        Assert.Equal(1, mft.Pictures);
+        Assert.False(mft.Pull());
     }
 
     [Fact]
@@ -131,10 +93,10 @@ public sealed class MirrorPresentTests
 
     /// <summary>
     /// Behavior measured on the Microsoft software H.264 decoder: the first
-    /// sample is held, drain forces that picture out, and the same object then
-    /// refuses input. Flush, begin-streaming, and start-of-stream do not revive
-    /// it. A new object holds the replacement keyframe and emits on the next
-    /// access unit. Media Foundation cannot run on Linux CI.
+    /// sample is held until the next access unit. Drain forces that picture
+    /// out and the same object then refuses input. Flush, begin-streaming,
+    /// and start-of-stream do not revive it. Media Foundation cannot run on
+    /// Linux CI.
     /// </summary>
     private sealed class SoftwareDecoderStandIn
     {
@@ -147,8 +109,6 @@ public sealed class MirrorPresentTests
         public int Pictures { get; private set; }
 
         public int Releases { get; private set; }
-
-        public bool Discontinuity { get; private set; }
 
         public int ProcessInput()
         {
@@ -200,18 +160,6 @@ public sealed class MirrorPresentTests
             _alive = true;
             _holding = false;
             _picturePending = false;
-        }
-
-        public MediaFoundationDrainRestart.SubmitResult SubmitReplacement()
-        {
-            if (!_alive)
-            {
-                return new MediaFoundationDrainRestart.SubmitResult();
-            }
-
-            Discontinuity = true;
-            _holding = true;
-            return new MediaFoundationDrainRestart.SubmitResult { Accepted = true, Picture = false };
         }
 
         public bool SubmitFollowingFrame()

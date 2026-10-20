@@ -262,7 +262,10 @@ public sealed class AirPlayReceiver : IAsyncDisposable
             var receiving = false;
             if (options.EnableDiscovery)
             {
-                announcer = MdnsAnnouncer.Start(advertisement, log);
+                announcer = MdnsAnnouncer.Start(
+                    advertisement,
+                    log,
+                    () => LocalNetwork.SelectAdvertisedNics(options.ListenAddress));
                 receiving = announcer.IsReceivingQueries;
             }
 

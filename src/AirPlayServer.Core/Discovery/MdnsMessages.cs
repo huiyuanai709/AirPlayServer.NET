@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Net;
 using System.Text;
 
 namespace AirPlayServer.Core.Discovery;
@@ -6,17 +7,18 @@ namespace AirPlayServer.Core.Discovery;
 internal static class MdnsMessages
 {
     public const ushort AuthoritativeResponse = 0x8400;
-    public const uint TtlSeconds = 4500;
+    public const uint TtlSeconds = MdnsCadence.TtlSeconds;
 
-    public static byte[] BuildAnnouncement(ReceiverAdvertisement advertisement)
-        => BuildResponse(advertisement, id: 0, includeAirPlay: true, includeRaop: true);
+    public static byte[] BuildAnnouncement(ReceiverAdvertisement advertisement, IPAddress? address = null)
+        => BuildResponse(advertisement, id: 0, includeAirPlay: true, includeRaop: true, address);
 
     public static bool TryBuildQueryResponse(
         ReadOnlySpan<byte> query,
         ReceiverAdvertisement advertisement,
         Span<byte> destination,
         out int written,
-        out bool unicast)
+        out bool unicast,
+        IPAddress? address = null)
     {
         written = 0;
         unicast = false;
@@ -52,7 +54,7 @@ internal static class MdnsMessages
             raop = true;
         }
 
-        var packet = BuildResponse(advertisement, id, airPlay, raop);
+        var packet = BuildResponse(advertisement, id, airPlay, raop, address);
         if (packet.Length > destination.Length)
         {
             return false;
@@ -71,20 +73,21 @@ internal static class MdnsMessages
         return writer.ToArray();
     }
 
-    private static byte[] BuildResponse(ReceiverAdvertisement advertisement, ushort id, bool includeAirPlay, bool includeRaop)
+    private static byte[] BuildResponse(ReceiverAdvertisement advertisement, ushort id, bool includeAirPlay, bool includeRaop, IPAddress? address)
     {
+        address ??= advertisement.Address;
         var answerCount = 0;
         if (includeAirPlay)
         {
-            answerCount += advertisement.Address is null ? 3 : 4;
+            answerCount += address is null ? 3 : 4;
         }
 
         if (includeRaop)
         {
-            answerCount += advertisement.Address is null ? 3 : 4;
+            answerCount += address is null ? 3 : 4;
         }
 
-        if (includeAirPlay && includeRaop && advertisement.Address is not null)
+        if (includeAirPlay && includeRaop && address is not null)
         {
             // The host A record is shared. Count it once.
             answerCount--;
@@ -95,12 +98,12 @@ internal static class MdnsMessages
         var wroteAddress = false;
         if (includeAirPlay)
         {
-            WriteService(writer, advertisement, "_airplay", advertisement.InstanceName, advertisement.AirPlayPort, ServiceText.AirPlay(advertisement), ref wroteAddress);
+            WriteService(writer, advertisement, address, "_airplay", advertisement.InstanceName, advertisement.AirPlayPort, ServiceText.AirPlay(advertisement), ref wroteAddress);
         }
 
         if (includeRaop)
         {
-            WriteService(writer, advertisement, "_raop", advertisement.RaopInstance, advertisement.RaopPort, ServiceText.Raop(advertisement), ref wroteAddress);
+            WriteService(writer, advertisement, address, "_raop", advertisement.RaopInstance, advertisement.RaopPort, ServiceText.Raop(advertisement), ref wroteAddress);
         }
 
         return writer.ToArray();
@@ -109,6 +112,7 @@ internal static class MdnsMessages
     private static void WriteService(
         DnsWriter writer,
         ReceiverAdvertisement advertisement,
+        IPAddress? address,
         string service,
         string instance,
         ushort port,
@@ -118,9 +122,9 @@ internal static class MdnsMessages
         writer.WritePtr(service, instance, TtlSeconds);
         writer.WriteSrv(instance, service, port, advertisement.HostLabel, TtlSeconds);
         writer.WriteTxt(instance, service, text, TtlSeconds);
-        if (!wroteAddress && advertisement.Address is not null)
+        if (!wroteAddress && address is not null)
         {
-            writer.WriteAddress(advertisement.HostLabel, advertisement.Address, TtlSeconds);
+            writer.WriteAddress(advertisement.HostLabel, address, TtlSeconds);
             wroteAddress = true;
         }
     }
@@ -242,6 +246,43 @@ internal static class MdnsMessages
         }
 
         return answers;
+    }
+
+    internal static uint[] AnswerTtls(ReadOnlySpan<byte> message)
+    {
+        if (message.Length < 12)
+        {
+            throw new FormatException("DNS message is shorter than a header.");
+        }
+
+        var answers = BinaryPrimitives.ReadUInt16BigEndian(message[6..]);
+        var ttls = new uint[answers];
+        var position = 12;
+        for (var i = 0; i < answers; i++)
+        {
+            if (!TryReadName(message, ref position, out _))
+            {
+                throw new FormatException("DNS record name is truncated.");
+            }
+
+            if (position + 10 > message.Length)
+            {
+                throw new FormatException("DNS record header is truncated.");
+            }
+
+            ttls[i] = BinaryPrimitives.ReadUInt32BigEndian(message[(position + 4)..]);
+            position += 8;
+            var dataLength = BinaryPrimitives.ReadUInt16BigEndian(message[position..]);
+            position += 2;
+            if (position + dataLength > message.Length)
+            {
+                throw new FormatException("DNS rdata is truncated.");
+            }
+
+            position += dataLength;
+        }
+
+        return ttls;
     }
 
     private static bool TryReadName(ReadOnlySpan<byte> message, ref int position, out string name)

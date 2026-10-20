@@ -16,7 +16,7 @@ internal sealed class ReceiverAdvertisement
 
     public required ushort RaopPort { get; init; }
 
-    public IPAddress? Address { get; init; }
+    public IPAddress? Address { get; set; }
 
     public required string PublicKeyBase64 { get; init; }
 

@@ -116,6 +116,80 @@ public sealed class LocalNetworkTests
     }
 
     [Fact]
+    public void Any_advertises_every_real_lan_and_skips_hyperv()
+    {
+        var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any,
+        [
+            Nic("vEthernet (Default Switch)", "172.17.96.1", gateway: true, description: "Hyper-V Virtual Ethernet Adapter"),
+            Nic("Ethernet", "192.168.5.15", gateway: true, description: "Realtek PCIe GbE Family Controller"),
+            Nic("Wi-Fi", "192.168.1.20", type: NetworkInterfaceType.Wireless80211, gateway: true),
+        ]);
+
+        Assert.Equal(2, nics.Count);
+        Assert.Equal(IPAddress.Parse("192.168.5.15"), nics[0].Address);
+        Assert.Equal(IPAddress.Parse("192.168.1.20"), nics[1].Address);
+        Assert.Equal(IPAddress.Parse("192.168.5.15"), LocalNetwork.SelectAdvertisementAddress(IPAddress.Any,
+        [
+            Nic("vEthernet (Default Switch)", "172.17.96.1", gateway: true, description: "Hyper-V Virtual Ethernet Adapter"),
+            Nic("Ethernet", "192.168.5.15", gateway: true),
+            Nic("Wi-Fi", "192.168.1.20", type: NetworkInterfaceType.Wireless80211, gateway: true),
+        ]));
+    }
+
+    [Fact]
+    public void Preferred_lan_stays_primary_and_a_second_real_nic_is_still_advertised()
+    {
+        var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any,
+        [
+            Nic("Ethernet", "192.168.5.15"),
+            Nic("Wi-Fi", "192.168.1.20", type: NetworkInterfaceType.Wireless80211, gateway: true),
+        ]);
+
+        Assert.Equal(IPAddress.Parse("192.168.1.20"), nics[0].Address);
+        Assert.Equal(IPAddress.Parse("192.168.5.15"), nics[1].Address);
+    }
+
+    [Fact]
+    public void Explicit_listen_does_not_add_other_nics()
+    {
+        var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Parse("192.168.5.15"), HyperVThenLan());
+
+        Assert.Single(nics);
+        Assert.Equal(IPAddress.Parse("192.168.5.15"), nics[0].Address);
+    }
+
+    [Fact]
+    public void Virtual_only_advertises_one_fallback_not_every_hyperv_nic()
+    {
+        var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any,
+        [
+            Nic("vEthernet (Default Switch)", "172.17.96.1", gateway: true, description: "Hyper-V Virtual Ethernet Adapter"),
+            Nic("vEthernet (Wi-Fi)", "172.17.112.1", gateway: true, description: "Hyper-V Virtual Ethernet Adapter"),
+        ]);
+
+        Assert.Single(nics);
+        Assert.Equal(IPAddress.Parse("172.17.96.1"), nics[0].Address);
+    }
+
+    [Fact]
+    public void Query_response_uses_the_nic_on_the_querier_subnet()
+    {
+        AdvertisedNic[] nics =
+        [
+            new(IPAddress.Parse("192.168.5.15"), 24, "Ethernet"),
+            new(IPAddress.Parse("10.1.2.3"), 24, "Wi-Fi"),
+            new(IPAddress.Parse("10.1.2.1"), 16, "Other"),
+        ];
+
+        Assert.Equal(IPAddress.Parse("10.1.2.3"), LocalNetwork.MatchRemote(IPAddress.Parse("10.1.2.50"), nics));
+        Assert.Equal(IPAddress.Parse("192.168.5.15"), LocalNetwork.MatchRemote(IPAddress.Parse("192.168.5.40"), nics));
+        Assert.Equal(IPAddress.Parse("192.168.5.15"), LocalNetwork.MatchRemote(IPAddress.Parse("8.8.8.8"), nics));
+        Assert.True(LocalNetwork.SharesPrefix(IPAddress.Parse("172.16.5.10"), IPAddress.Parse("172.16.1.1"), 20));
+        Assert.False(LocalNetwork.SharesPrefix(IPAddress.Parse("172.16.5.10"), IPAddress.Parse("172.16.16.1"), 20));
+        Assert.False(LocalNetwork.SharesPrefix(IPAddress.Parse("192.168.1.2"), IPAddress.Parse("192.168.1.2"), 0));
+    }
+
+    [Fact]
     public void Link_local_is_used_when_it_is_the_only_address()
     {
         AdvertisementCandidate[] candidates =

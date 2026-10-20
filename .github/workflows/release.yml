@@ -116,6 +116,7 @@ jobs:
             -p:DebugSymbols=false \
             -p:NativeDebugSymbols=false \
             --output "artifacts/$RID"
+          ./packaging/strip-publish-symbols.sh "artifacts/$RID"
           ./packaging/assert-no-publish-symbols.sh "artifacts/$RID"
 
       - name: Smoke the published binary (linux-x64)

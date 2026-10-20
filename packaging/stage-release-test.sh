@@ -213,4 +213,22 @@ if "$assert" "$tmp/dirty-case" >/dev/null 2>"$tmp/dirty-case.err"; then
   fail "assert-no-publish-symbols should fail when a .DBG is present"
 fi
 
+strip="$root/packaging/strip-publish-symbols.sh"
+mkdir -p "$tmp/strip/nested"
+printf 'binary' > "$tmp/strip/AirPlayServer.Host"
+printf 'so' > "$tmp/strip/libSkiaSharp.so"
+printf 'pdb' > "$tmp/strip/libHarfBuzzSharp.pdb"
+printf 'dbg' > "$tmp/strip/nested/libHarfBuzzSharp.DBG"
+"$strip" "$tmp/strip" >"$tmp/strip.out"
+if [ -e "$tmp/strip/libHarfBuzzSharp.pdb" ] || [ -e "$tmp/strip/nested/libHarfBuzzSharp.DBG" ]; then
+  fail "strip-publish-symbols left a debug symbol"
+fi
+if [ ! -f "$tmp/strip/AirPlayServer.Host" ] || [ ! -f "$tmp/strip/libSkiaSharp.so" ]; then
+  fail "strip-publish-symbols removed a runtime file"
+fi
+"$assert" "$tmp/strip"
+if ! grep -q "libHarfBuzzSharp.pdb" "$tmp/strip.out"; then
+  fail "strip log was: $(cat "$tmp/strip.out")"
+fi
+
 echo "stage-release-test ok"

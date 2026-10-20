@@ -140,8 +140,9 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
                 if (epochChanged || steadyDue)
                 {
                     // One read after the flap goes quiet. Idle mirrors do not enumerate
-                    // on every NetworkChange callback, and a hotspot-only change does
-                    // not send. This task never resets a decoder or an RTSP session.
+                    // on every NetworkChange callback. An unchanged address set does
+                    // not send, including a hotspot NIC that settles on the same
+                    // address. This task never resets a decoder or an RTSP session.
                     if (epochChanged)
                     {
                         await Task.Delay(MdnsCadence.NetworkChangeDebounce, cancellationToken).ConfigureAwait(false);
@@ -356,10 +357,11 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
             return;
         }
 
-        // One packet per non-hotspot NIC, and that packet names only that NIC.
+        // One packet per NIC, and that packet names only that NIC.
         // mDNSResponder registers records on a single interface the same way.
-        // Putting every LAN in every packet, or adding the hotspot, is the
-        // second A record that left RTSP up and stalled the picture.
+        // The hotspot is its own target: IP_MULTICAST_IF pins that packet to
+        // the SoftAP. A second A in the LAN packet is what left RTSP up and
+        // stalled the picture.
         var sent = 0;
         var port = 0;
         string? lastError = null;
@@ -596,8 +598,9 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
                 }
             }
 
-            // One socket per non-hotspot NIC when 0.0.0.0:5353 is unavailable.
-            // Joining only the first NIC dropped queries that arrived on another LAN.
+            // One socket per advertised NIC, including the hotspot, when
+            // 0.0.0.0:5353 is unavailable. Joining only the first NIC dropped
+            // queries that arrived on another LAN or on the SoftAP.
             foreach (var nic in nics)
             {
                 if (ContainsBound(nic.Address))

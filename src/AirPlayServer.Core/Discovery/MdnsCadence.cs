@@ -53,9 +53,9 @@ internal static class MdnsCadence
     public static TimeSpan AddressPollInterval => TimeSpan.FromMilliseconds(AddressPollMilliseconds);
 
     /// <summary>
-    /// True only when the published address set changed. Hotspot-only flaps are
-    /// absent from both lists once selection has run, so they return false.
-    /// A true result is one mDNS announcement. It does not reset a mirror.
+    /// True only when the published address set changed. A hotspot NIC whose
+    /// address is unchanged is the same set and returns false. A true result
+    /// is one mDNS announcement. It does not reset a mirror.
     /// </summary>
     public static bool ShouldRefreshAnnouncement(IReadOnlyList<AdvertisedNic> previous, IReadOnlyList<AdvertisedNic> next)
         => !SameAddresses(previous, next);

@@ -157,8 +157,9 @@ internal static class MdnsMessages
             return;
         }
 
-        // One cache-flush set. Separate packets each flushing a different A record
-        // are what replaced the LAN address with the hotspot and stalled the picture.
+        // One cache-flush set for this packet. A second A for the same hostname
+        // in the same datagram is what let phones prefer the hotspot and stall
+        // the picture. Each NIC, including SoftAP, gets its own packet.
         foreach (var address in addresses)
         {
             writer.WriteAddress(advertisement.HostLabel, address, TtlSeconds);

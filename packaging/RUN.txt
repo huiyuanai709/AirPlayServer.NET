@@ -73,7 +73,7 @@ Linux：sudo apt-get install ffmpeg
 这些库是 LGPL-2.1-or-later，带 GPL 组件的构建则是 GPL。分发它们时要遵守该构建的许可证。
 本程序是 GPL-3.0-only。更新不会删除你另外拷进来的 DLL / SO。
 
-Linux 包不创建窗口，也不包含 Media Foundation。没有 FFmpeg 时可以用 --demo-frame 检查导出。
+Linux 包用 Avalonia / X11 打开镜像窗口，不包含 Media Foundation。没有图形会话时加 --no-window。没有 FFmpeg 时可以用 --demo-frame 检查导出。窗口旁边的 libSkiaSharp / HarfBuzz 原生库要留在程序目录里。
 linux-x64 包里的 airplayserver.service 是 systemd 草稿，不含 --seed。
 把 AirPlayServer.Host 拷到 /usr/local/bin/ 后再启用。
 这个二进制在 GitHub 的 ubuntu-latest 上构建，需要兼容的 glibc。

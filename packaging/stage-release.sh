@@ -3,6 +3,8 @@
 # Usage: stage-release.sh <rid> <tag> <publish-dir> <zip-path>
 # The zip contains the binary, RUN.txt, LICENSE, NOTICE.md, and VERSION.txt.
 # linux-x64 also gets airplayserver.service.
+# osx-arm64 and osx-x64 pack the same Mach-O name as linux, plus any
+# Avalonia Skia/HarfBuzz .dylib files sitting next to the binary.
 # Runtime *.dll, *.so, and *.dylib are kept. Debug symbols are not.
 # No secrets are copied.
 set -euo pipefail
@@ -19,7 +21,7 @@ zip_path="$4"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 case "$rid" in
-  linux-x64) binary="AirPlayServer.Host" ;;
+  linux-x64|osx-arm64|osx-x64) binary="AirPlayServer.Host" ;;
   win-x64) binary="AirPlayServer.Host.exe" ;;
   *)
     echo "unsupported rid: ${rid}" >&2
@@ -78,8 +80,10 @@ if [ "$copied_binary" != true ]; then
   exit 1
 fi
 
-if [ "$rid" = "linux-x64" ]; then
+if [ "$rid" = "linux-x64" ] || [ "$rid" = "osx-arm64" ] || [ "$rid" = "osx-x64" ]; then
   chmod +x "$stage/$binary"
+fi
+if [ "$rid" = "linux-x64" ]; then
   cp "$root/packaging/airplayserver.service" "$stage/"
 fi
 
@@ -103,8 +107,10 @@ fi
 
 expect_exec=0
 expect_service=0
-if [ "$rid" = "linux-x64" ]; then
+if [ "$rid" = "linux-x64" ] || [ "$rid" = "osx-arm64" ] || [ "$rid" = "osx-x64" ]; then
   expect_exec=1
+fi
+if [ "$rid" = "linux-x64" ]; then
   expect_service=1
 fi
 

@@ -5,6 +5,7 @@
     <RootNamespace>AirPlayServer.Host</RootNamespace>
     <AssemblyName>AirPlayServer.Host</AssemblyName>
     <PublishAot>true</PublishAot>
+    <IsAotCompatible>true</IsAotCompatible>
     <InvariantGlobalization>true</InvariantGlobalization>
     <OptimizationPreference>Speed</OptimizationPreference>
     <EventSourceSupport>false</EventSourceSupport>
@@ -17,6 +18,30 @@
     <ApplicationIcon>Assets/AirPlayServer.ico</ApplicationIcon>
   </PropertyGroup>
 
+  <!-- Avalonia 12.1 Native AOT. The mirror UI is code-only: no XAML, no compiled
+       bindings, no reflection control lookup. Avalonia's own ILLink descriptors
+       root Skia and HarfBuzz. BuiltInComInteropSupport is left at the SDK default;
+       that switch was only required before Avalonia 12.
+       The window system is chosen here, not by UsePlatformDetect, so a linux-x64
+       publish does not root Win32/user32 and a win-x64 publish does not root X11. -->
+  <PropertyGroup>
+    <_AvaloniaOs Condition="$(RuntimeIdentifier.StartsWith('win'))">win</_AvaloniaOs>
+    <_AvaloniaOs Condition="$(RuntimeIdentifier.StartsWith('osx'))">osx</_AvaloniaOs>
+    <_AvaloniaOs Condition="$(RuntimeIdentifier.StartsWith('linux'))">linux</_AvaloniaOs>
+    <_AvaloniaOs Condition="'$(_AvaloniaOs)' == '' and $([MSBuild]::IsOSPlatform('Windows'))">win</_AvaloniaOs>
+    <_AvaloniaOs Condition="'$(_AvaloniaOs)' == '' and $([MSBuild]::IsOSPlatform('OSX'))">osx</_AvaloniaOs>
+    <_AvaloniaOs Condition="'$(_AvaloniaOs)' == ''">linux</_AvaloniaOs>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_AvaloniaOs)' == 'win'">
+    <DefineConstants>$(DefineConstants);AVALONIA_WIN</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_AvaloniaOs)' == 'osx'">
+    <DefineConstants>$(DefineConstants);AVALONIA_OSX</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_AvaloniaOs)' == 'linux'">
+    <DefineConstants>$(DefineConstants);AVALONIA_LINUX</DefineConstants>
+  </PropertyGroup>
+
   <!-- Release publish is the shipping binary. DebugType=none keeps the
        Native AOT linker from writing a .pdb (Windows) or .dbg (Linux). -->
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
@@ -27,6 +52,12 @@
 
   <ItemGroup>
     <ProjectReference Include="..\AirPlayServer.Core\AirPlayServer.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.4" />
   </ItemGroup>
 
   <ItemGroup>

@@ -16,10 +16,10 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 - `ANNOUNCE`、镜像 `SETUP`（会话 + type 110）、`RECORD`、`GET_PARAMETER`（volume）、`SET_PARAMETER`、`PAUSE`、`FLUSH`、`TEARDOWN` 已接通。音频 type 96 仍返回 501。
 - 镜像画面走 TCP，不是 UDP RTP。每个包是 128 字节小端头加负载。Type 0 是 AES-128-CTR 的 AVCC；type 1 是明文 SPS/PPS 和几何信息。
 - 宿主默认用进程内 `FairPlayKeys` 回答 `POST /fp-setup`，并在握手之后解开 72 字节 `ekey`。同一次 `FairPlaySession` 同时服务这两步。没有完成握手时，SETUP 仍然 200，随后的加密包只计数、不解码。`/pair-setup-pin`、`/play` 仍返回 501。`--media-key-plugin` 是可选的原生覆盖，FairPlay 不再依赖它。
-- Windows 上用 Media Foundation 把 H.264 解成 BGRA，GDI 窗口显示最新一帧。HEVC 先试 Media Foundation，打不开时用程序旁边的 FFmpeg。Linux 上不创建窗口，也不把 `mfplat` / `user32` 编进 linux-x64 的 AOT 二进制；H.264 / HEVC 在运行时加载 FFmpeg（`libavcodec` / `libavutil`）。没有解码器时可以用 `--demo-frame`。`--h265` 只有在 HEVC 解码器真能打开时才宣告 features 第 42 位。
+- Windows 上用 Media Foundation 把 H.264 解成 BGRA。HEVC 先试 Media Foundation，打不开时用程序旁边的 FFmpeg。最新一帧画在 Avalonia 窗口里（Windows、macOS、Linux 各一路一个窗口）。linux-x64 的 Native AOT 不链 `mfplat` / `user32`；H.264 / HEVC 在运行时加载 FFmpeg（`libavcodec` / `libavutil`）。没有解码器时可以用 `--demo-frame`。`--h265` 只有在 HEVC 解码器真能打开时才宣告 features 第 42 位。无图形会话时加 `--no-window`。
 - 可选地把最新帧编码成 JPEG，按 TapClock ATBF type 3 推到 `host:42125`，或原子写入监视目录。默认关闭。
 - 镜像数据连上或断开时，可以 POST Webhook，并按 TapClock 的集成接口通知它重连。配置页默认开在 `127.0.0.1:7099`。本程序不点击控制中心。
-- 多台手机可以同时镜像。默认不限制路数。需要上限时用 `--max-mirrors N`（N 为正整数，没有硬上限；内存和 CPU 才是限制）。每一路有自己的数据端口、计时端口、解密、解码器、画面、`session_id`，Windows 上还有自己的窗口。新手机不会断开已经连上的那一路。同一 IPv4 再次 `SETUP` 仍是原来那一路（锁屏后重连）。进程内 FairPlay 每路一次握手。`--media-key-plugin` 的原生库在各路之间共用。
+- 多台手机可以同时镜像。默认不限制路数。需要上限时用 `--max-mirrors N`（N 为正整数，没有硬上限；内存和 CPU 才是限制）。每一路有自己的数据端口、计时端口、解密、解码器、画面、`session_id` 和窗口。新手机不会断开已经连上的那一路。同一 IPv4 再次 `SETUP` 仍是原来那一路（锁屏后重连）。进程内 FairPlay 每路一次握手。`--media-key-plugin` 的原生库在各路之间共用。
 
 ## 多设备镜像
 
@@ -31,7 +31,7 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 
 `GET /api/status` 的顶层字段仍是第一路的快照。多路时多一个 `sessions` 数组，每项仍是 `connected`、`since`、`name`、`session_id`、`disconnect_pending`。每一路各自 POST `POST {base}/api/integrations/airplay/events`，`session_id` 不同。断连防抖按路计算。
 
-Several phones can mirror at once. There is no default cap. `--max-mirrors N` (any positive count) is an optional limit; one more session then gets HTTP 503. Memory and CPU are the practical limit. Each IPv4 gets its own data port, decoder, frame slot, `session_id`, and Windows window. The same address reconnects that session instead of opening another. JPEG files are `mirror-<data-peer-ip>.jpg`. ATBF stays a type-3 flags-0 JPEG; the log records the data peer because the header has no source field.
+Several phones can mirror at once. There is no default cap. `--max-mirrors N` (any positive count) is an optional limit; one more session then gets HTTP 503. Memory and CPU are the practical limit. Each IPv4 gets its own data port, decoder, frame slot, `session_id`, and Avalonia window. The same address reconnects that session instead of opening another. JPEG files are `mirror-<data-peer-ip>.jpg`. ATBF stays a type-3 flags-0 JPEG; the log records the data peer because the header has no source field.
 
 ## 镜像连接通知
 
@@ -93,7 +93,7 @@ mDNS announcer                         control listeners :7001 and :5001
                  FairPlayKeys (fp-setup + 72-byte ekey) -> AES-CTR
                  IH264Decoder  ->  FrameSlot (latest BGRA)
                     |                         |
-                    |                         +-- Windows GDI window
+                    |                         +-- Avalonia window (one per session; Win32 / X11 / AppKit)
                     |                         +-- ATBF type 3 JPEG -> TapClock :42125
                     |                         +-- temp file -> mirror-<data-peer-ip>.jpg
                     +-- Windows: Media Foundation H.264 / HEVC -> BGRA
@@ -109,7 +109,7 @@ mDNS announcer                         control listeners :7001 and :5001
 | `tests/AirPlayServer.Core.Tests` | 握手、镜像包、解密、SETUP plist、ATBF 与目录改名、机型表与 `/info` 广告尺寸、会话通知与防抖。 |
 | `tests/AirPlayServer.Host.Tests` | `--model` 解析 UIKit 点，`--screen` 单独决定广告分辨率。版本比较、发布资源名、SHA256 和自更新替换也在这里。 |
 | `packaging/` | 本地 AOT 发布脚本、systemd 草稿，以及 Release 包里的 `RUN.txt`。脚本本身不创建 GitHub Release。 |
-| `.github/workflows/ci.yml` | PR 和 push 上的 restore、build、test，以及 linux-x64 / win-x64 的 AOT 发布冒烟。 |
+| `.github/workflows/ci.yml` | PR 和 push 上的 restore、build、test，以及 linux-x64 / win-x64 / osx-arm64 的 AOT 发布冒烟。 |
 | `.github/workflows/release.yml` | `v*` tag 或手动触发时构建两个 RID，并创建 GitHub Release。 |
 
 握手用的是运行时的 X25519 和 AES（平台会走 AES-NI 或等价指令），外加一份 RFC 8032 Ed25519。Ed25519 的域运算走 `BigInteger`。镜像 CTR 使用同一套 AES-128-CTR，密钥按 `AirPlayStreamKey` / `AirPlayStreamIV` 和 `streamConnectionID` 的十进制文本从内容密钥与 pair-verify 的 X25519 共享秘密派生。像素路径目前是 BGRA 帧槽；还没有 SIMD YUV 转换。
@@ -142,7 +142,9 @@ Windows（需要 Visual Studio 的 C++ 生成工具，AOT 用它做链接）：
 ./artifacts/win-x64/AirPlayServer.Host.exe --help
 ```
 
-`--self-check` 在发布出的原生二进制里重跑 RFC 7748、RFC 8032、一次 pair-verify，以及一张 JPEG 的 ATBF 封装，用来确认 AOT 之后这些路径还在。`--seed` 是 32 字节十六进制，只留在内存里，仓库和单元文件都不写种子。宿主默认 `--screen 480x1040`（这是 `/info` 里的广告分辨率），并打开窗口标志；在 Linux 上窗口不会创建。`--model` 另选 TapClock 点击对齐的 UIKit 逻辑点，不改这个广告尺寸。`--list-models` 打印 slug。
+`--self-check` 在发布出的原生二进制里重跑 RFC 7748、RFC 8032、一次 pair-verify，以及一张 JPEG 的 ATBF 封装，用来确认 AOT 之后这些路径还在。`--seed` 是 32 字节十六进制，只留在内存里，仓库和单元文件都不写种子。宿主默认 `--screen 480x1040`（这是 `/info` 里的广告分辨率），并打开 Avalonia 窗口。没有 `DISPLAY`（或 macOS 图形会话）时窗口打不开，接收端继续跑，日志会写明；这种机器加 `--no-window`。`--model` 另选 TapClock 点击对齐的 UIKit 逻辑点，不改这个广告尺寸。`--list-models` 打印 slug。
+
+macOS 上 Avalonia 占用进程主线程（AppKit 的要求），接收循环在线程池里。Windows 和 Linux 把 Avalonia 放在单独的 UI 线程。画面是代码建的窗口，没有 XAML。Native AOT 按 RID 只编进一个窗口系统：win 用 Win32，linux 用 X11，osx 用 Avalonia.Native。Skia 和 HarfBuzz 的原生库跟在程序旁边，第一次打开窗口时才加载。`--help` 和 `--self-check` 不加载它们。
 
 ## 更新
 
@@ -251,7 +253,7 @@ int AirPlay_FairPlaySetup(const uint8_t* request, int requestLength,
 
 Windows 上 Media Foundation 把 Annex-B 访问单元变成 BGRA，写入 `FrameSlot`（只保留最新一帧）。同步硬件变换如果还能锁定 NV12、RGB32 或 ARGB32 缓冲就优先用它。变换列出 RGB 时，由 Media Foundation 做 YUV 转换，输出类型上写着解析出来的矩阵和范围。微软 H.264 解码器本身只出 NV12 这一类 YUV，那种帧在进程内转换：SPS 的 VUI 优先，其次是媒体类型上的矩阵和 nominal range，都没有时按 iPhone 镜像的 BT.709 全范围。硬件变换的输出如果是 DXGI 表面，或者只有异步硬件变换时，退回系统自带的软件解码器。HEVC 同样先走 Media Foundation。`CLSID_CMSH265DecoderMFT` 不在时改用 FFmpeg。Linux 上 H.264 和 HEVC 都只走 FFmpeg。没有画面时，访问单元仍然计数，但不会冒充成手机屏幕。Linux 上继续可以用 `--demo-frame` 检查导出。
 
-Windows 宿主默认打开 GDI 窗口，把最新一帧按比例放进客户区（比例不同时留黑边，不拉变形）。目标尺寸和帧不一样时用 HALFTONE。`--no-window` 关掉它。鼠标悬停时，标题和左上角显示 TapClock 绝对屏幕坐标，和 TapClock 日志里的「屏幕坐标」用同一套整数除法：客户区上的点先换成解码帧像素（画面按比例居中，黑边和画面矩形之外不算），再 `screen = 帧像素 * --model 宽高 / 帧宽高`，X 和 Y 各算各的。例如 `--model iphone-15-pro-max` 是 430×932；480×1040 的帧上，像素 (323, 850) 读成 `TapClock 289, 761`。没写 `--model` 时，图像尺寸就是屏幕，标签退回 `像素 x, y`。悬停不读 `--screen`。窗口里的鼠标点击不会发给手机，也不改 HID。
+宿主默认打开 Avalonia 窗口，把最新一帧按比例放进客户区（比例不同时留黑边，不拉变形）。缩放是最近邻，和以前的 GDI 软件缩放同一套整数格子，alpha 写成不透明。`--no-window` 关掉它。鼠标悬停时，标题和左上角显示 TapClock 绝对屏幕坐标，和 TapClock 日志里的「屏幕坐标」用同一套整数除法：客户区上的点先换成解码帧像素（画面按比例居中，黑边和画面矩形之外不算），再 `screen = 帧像素 * --model 宽高 / 帧宽高`，X 和 Y 各算各的。例如 `--model iphone-15-pro-max` 是 430×932；480×1040 的帧上，像素 (323, 850) 读成 `TapClock 289, 761`。没写 `--model` 时，图像尺寸就是屏幕，标签退回 `像素 x, y`。悬停不读 `--screen`。窗口里的鼠标点击不会发给手机，也不改 HID。Linux 窗口走 X11，运行时需要 `libX11`。macOS 走 Avalonia.Native。
 
 TapClock 的点击留在它自己的主机 TCP `42123`（ATB/1）。坐标是板上的 HID 计数（AssistiveTouch），不是这台电脑窗口里的像素。点击对齐和镜像广告是两套尺寸，写在不同的参数上：
 

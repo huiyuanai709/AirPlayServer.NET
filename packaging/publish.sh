@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Publish a self-contained Native AOT build. Default RID is linux-x64.
 # Cross-publishing win-x64 needs a Windows toolchain; use publish.ps1 there.
-# Release builds pass DebugType=none so the output has no .pdb or .dbg.
+# Release builds pass DebugType=none. Third-party native .pdb/.dbg files
+# (HarfBuzz, Skia, Avalonia) are removed before the symbol assert.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 rid="${1:-linux-x64}"
@@ -21,6 +22,7 @@ if [ "$configuration" = "Release" ]; then
 fi
 dotnet publish "${args[@]}" --output "$root/artifacts/$rid"
 if [ "$configuration" = "Release" ]; then
+  "$root/packaging/strip-publish-symbols.sh" "$root/artifacts/$rid"
   "$root/packaging/assert-no-publish-symbols.sh" "$root/artifacts/$rid"
 fi
 echo "Published $rid to $root/artifacts/$rid"

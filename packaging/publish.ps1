@@ -1,5 +1,6 @@
 # Publish a self-contained Native AOT build. Default RID is win-x64.
-# Release builds pass DebugType=none so the output has no .pdb or .dbg.
+# Release builds pass DebugType=none. Third-party native .pdb/.dbg files
+# (HarfBuzz, Skia, Avalonia) are removed before the symbol check.
 param(
     [string]$Runtime = "win-x64",
     [string]$Configuration = "Release"
@@ -26,10 +27,17 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 if ($Configuration -eq "Release") {
-    $symbols = Get-ChildItem -Path $output -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -match '^\.(pdb|dbg|dwo|debug|sym|dsym)$' }
-    if ($symbols) {
-        $symbols | ForEach-Object { Write-Error "publish directory contains debug symbols: $($_.FullName)" }
+    $symbolPattern = '(?i)\.(pdb|dbg|dwo|debug|sym|dsym)$'
+    $symbols = @(Get-ChildItem -Path $output -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $symbolPattern })
+    foreach ($symbol in $symbols) {
+        Write-Host "removing debug symbol: $($symbol.FullName)"
+        Remove-Item -LiteralPath $symbol.FullName -Force
+    }
+    $left = @(Get-ChildItem -Path $output -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $symbolPattern })
+    if ($left.Count -gt 0) {
+        $left | ForEach-Object { Write-Error "publish directory contains debug symbols: $($_.FullName)" }
         exit 1
     }
 }

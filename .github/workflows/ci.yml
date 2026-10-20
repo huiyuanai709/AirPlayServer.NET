@@ -33,10 +33,49 @@ jobs:
       - name: Native AOT publish (linux-x64)
         run: ./packaging/publish.sh linux-x64
 
+      - name: Avalonia native libraries are in the linux publish
+        run: |
+          set -euo pipefail
+          found=$(find artifacts/linux-x64 -type f \( -name '*.so' -o -name '*.so.*' \) | wc -l)
+          if [ "$found" -lt 1 ]; then
+            echo "linux-x64 publish has no Avalonia/Skia native library" >&2
+            find artifacts/linux-x64 -type f >&2
+            exit 1
+          fi
+          find artifacts/linux-x64 -type f \( -name '*.so' -o -name '*.so.*' \)
+
       - name: Smoke the published binary
         run: |
           artifacts/linux-x64/AirPlayServer.Host --help
           artifacts/linux-x64/AirPlayServer.Host --self-check
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.x
+          dotnet-quality: preview
+
+      - name: Native AOT publish (osx-arm64)
+        run: ./packaging/publish.sh osx-arm64
+
+      - name: Avalonia native libraries are in the macOS publish
+        run: |
+          set -euo pipefail
+          found=$(find artifacts/osx-arm64 -type f -name '*.dylib' | wc -l)
+          if [ "$found" -lt 1 ]; then
+            echo "osx-arm64 publish has no Avalonia native library" >&2
+            find artifacts/osx-arm64 -type f >&2
+            exit 1
+          fi
+
+      - name: Smoke the published binary
+        run: |
+          artifacts/osx-arm64/AirPlayServer.Host --help
+          artifacts/osx-arm64/AirPlayServer.Host --self-check
 
   windows:
     runs-on: windows-latest

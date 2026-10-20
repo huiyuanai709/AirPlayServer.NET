@@ -46,7 +46,8 @@ public sealed class AirPlayReceiverOptions
 
     /// <summary>
     /// How many phones may mirror at once. Each one gets its own data port,
-    /// frame slot, session id, and on Windows its own window.
+    /// frame slot, session id, and its own mirror window when
+    /// <see cref="OpenMirrorSurface"/> is set.
     /// <see cref="int.MaxValue"/> (the default) means no cap.
     /// <c>--max-mirrors N</c> with N ≥ 1 is an optional cap. Zero and
     /// negatives are rejected. Memory and CPU are the practical limit.
@@ -58,10 +59,19 @@ public sealed class AirPlayReceiverOptions
     public IAirPlayLog? Log { get; set; }
 
     /// <summary>
-    /// Open the latest-frame window. The window is created only on Windows.
-    /// Clicks in that window are not forwarded to the phone.
+    /// Ask the host to open one latest-frame window per mirror session.
+    /// The window itself comes from <see cref="OpenMirrorSurface"/>. Clicks in
+    /// that window are not forwarded to the phone. Headless hosts leave the
+    /// factory null, or pass <c>--no-window</c>.
     /// </summary>
     public bool ShowWindow { get; set; }
+
+    /// <summary>
+    /// Opens one display surface per mirror session. The host assigns the
+    /// Avalonia opener. Null leaves the receiver headless even when
+    /// <see cref="ShowWindow"/> is true.
+    /// </summary>
+    public MirrorSurfaceFactory? OpenMirrorSurface { get; set; }
 
     /// <summary>Publish one synthetic BGRA frame after start. It is not a mirrored screen.</summary>
     public bool PublishDemoFrame { get; set; }

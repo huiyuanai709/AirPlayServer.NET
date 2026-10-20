@@ -284,7 +284,24 @@ public sealed class H264AndMediaKeyTests
         }
         finally
         {
-            Directory.Delete(directory, recursive: true);
+            // Windows keeps the DLL mapped for a moment after NativeLibrary.Free.
+            // One delete then fails the whole job with "being used by another process".
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    if (Directory.Exists(directory))
+                    {
+                        Directory.Delete(directory, recursive: true);
+                    }
+
+                    break;
+                }
+                catch (Exception ex) when (attempt < 20 && ex is IOException or UnauthorizedAccessException)
+                {
+                    Thread.Sleep(100);
+                }
+            }
         }
     }
 

@@ -23,6 +23,45 @@ internal static class HevcSequence
         var offset = 0;
         while (offset + 3 < annexB.Length)
         {
+            if (!TryReadNalHeader(annexB, ref offset, out var type))
+            {
+                break;
+            }
+
+            if (type == nalType)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>HEVC VCL is nal_unit_type 0–31. Parameter sets, SEI, and AUD are 32 and above.</summary>
+    public static bool ContainsVcl(ReadOnlySpan<byte> annexB)
+    {
+        var offset = 0;
+        while (offset + 3 < annexB.Length)
+        {
+            if (!TryReadNalHeader(annexB, ref offset, out var type))
+            {
+                break;
+            }
+
+            if (type <= 31)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryReadNalHeader(ReadOnlySpan<byte> annexB, ref int offset, out int nalType)
+    {
+        nalType = 0;
+        while (offset + 3 < annexB.Length)
+        {
             int header;
             if (annexB[offset] == 0 && annexB[offset + 1] == 0 && annexB[offset + 2] == 1)
             {
@@ -42,12 +81,14 @@ internal static class HevcSequence
                 continue;
             }
 
-            if (header < annexB.Length && NalType(annexB[header]) == nalType)
+            offset = header + 1;
+            if (header >= annexB.Length)
             {
-                return true;
+                return false;
             }
 
-            offset = header + 1;
+            nalType = NalType(annexB[header]);
+            return true;
         }
 
         return false;

@@ -975,6 +975,16 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 return;
             }
 
+            // SEI, AUD, filler, and in-band parameter sets are not slices.
+            // Media Foundation accepts them and returns no picture. Counting
+            // that as a miss resets a live H.264 decoder and then drops every
+            // P-frame until an IDR, which the phone does not send before the
+            // next SETUP.
+            if (!MirrorDiscontinuity.HasCodedSlice(hevc, accessUnit))
+            {
+                return;
+            }
+
             if (PresentAnnexLocked(accessUnit, keyFrame))
             {
                 return;
@@ -991,7 +1001,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 return;
             }
 
-            NoteDecodeMissLocked();
+            NoteDecodeMissLocked(accessUnit);
         }
         finally
         {
@@ -1178,24 +1188,43 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
         if (!PresentAnnexLocked(held, keyFrame: true))
         {
-            NoteDecodeMissLocked();
+            NoteDecodeMissLocked(held);
         }
     }
 
-    private void NoteDecodeMissLocked()
+    private void NoteDecodeMissLocked(ReadOnlySpan<byte> accessUnit)
     {
-        // One access unit with no picture is normal decoder latency. Two misses
-        // after a picture has already been published means the references no
-        // longer match the phone. Rebuild and wait for an IDR instead of feeding
-        // every later P-frame to FFmpeg (that is the "Could not find ref with POC"
-        // flood, and DecodedFrames stops moving).
-        // Misses before the first picture are not that break. The software
-        // transform holds the opening IDR until a later access unit, and the
-        // phone may send SEI first. Resetting there discards the IDR, every
-        // following slice is dropped, and the phone tears the session down.
-        _consecutiveDecodeMisses++;
-        if (!MirrorDiscontinuity.MissesRequireSync(_hasPicture, _consecutiveDecodeMisses))
+        if (!MirrorDiscontinuity.HasCodedSlice(_codec == MirrorVideoCodec.Hevc, accessUnit))
         {
+            return;
+        }
+
+        // One coded slice with no picture is normal decoder latency. HEVC
+        // treats two of those, after a picture, as a broken RPS and waits for
+        // an IRAP so FFmpeg does not log "Could not find ref with POC" on
+        // every later P-frame.
+        // H.264 does not wait. The Media Foundation software decoder holds a
+        // sample or misses a slice without dropping the references the phone
+        // is still using. Resetting it and discarding P-frames leaves the
+        // session on the last picture until the next SETUP, which is the
+        // freeze reported with DecodedFrames already past zero. A reconnect
+        // paints again only because that SETUP is followed by a new IDR.
+        // Misses before the first picture are startup latency for both.
+        _consecutiveDecodeMisses++;
+        var hevc = _codec == MirrorVideoCodec.Hevc;
+        if (!MirrorDiscontinuity.MissesRequireSync(hevc, _hasPicture, _consecutiveDecodeMisses))
+        {
+            if (!hevc && _hasPicture && _consecutiveDecodeMisses == HardwareDecodeStall.MissesWithNoPicture)
+            {
+                _log.Log(
+                    AirPlayLogLevel.Information,
+                    "H.264 连续没有画面，解码器保持打开，下一帧继续解。参考帧没有丢掉。H.264 decoder \""
+                    + _decoder.Name
+                    + "\" returned no picture for consecutive coded slices. The decoder stays open so the next slice is still decoded. DecodedFrames="
+                    + Activity.DecodedFrames
+                    + ".");
+            }
+
             return;
         }
 

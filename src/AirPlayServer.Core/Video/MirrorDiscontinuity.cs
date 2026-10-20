@@ -16,13 +16,47 @@ internal static class MirrorDiscontinuity
         => wasPaused && (senderResumed || !senderPaused);
 
     /// <summary>
-    /// Two access units with no picture mean the references are gone only after
-    /// this stream has already published a frame. Before that, the software
-    /// decoder is still holding the opening IDR, or the phone sent SEI. Treating
-    /// those misses as a pause drops that GOP and the phone tears the session down.
+    /// HEVC only. Two coded slices with no picture, after a picture was already
+    /// published, are treated as a broken reference picture set. FFmpeg then
+    /// logs "Could not find ref with POC" on every later P-frame, so those
+    /// slices wait for an IRAP.
+    /// H.264 does not. Media Foundation returns no picture for a held sample
+    /// and for a transient miss while the DPB is still valid. Resetting on
+    /// that and discarding every later P-frame waits for an IDR the phone
+    /// does not send until the next SETUP, which is the freeze after
+    /// <c>DecodedFrames</c> has already moved. The open H.264 decoder keeps
+    /// those slices.
+    /// Misses before the first picture are startup latency for both codecs.
     /// </summary>
-    internal static bool MissesRequireSync(bool picturePublished, int consecutiveMisses)
-        => picturePublished && consecutiveMisses >= HardwareDecodeStall.MissesWithNoPicture;
+    internal static bool MissesRequireSync(bool hevc, bool picturePublished, int consecutiveMisses)
+        => hevc && picturePublished && consecutiveMisses >= HardwareDecodeStall.MissesWithNoPicture;
+
+    /// <summary>
+    /// True when the access unit contains a coded slice. SEI, AUD, filler,
+    /// and parameter sets are not evidence that a reference was dropped.
+    /// </summary>
+    internal static bool HasCodedSlice(bool hevc, ReadOnlySpan<byte> annexB)
+    {
+        if (annexB.IsEmpty)
+        {
+            return false;
+        }
+
+        if (hevc)
+        {
+            return HevcSequence.ContainsVcl(annexB);
+        }
+
+        for (var type = 1; type <= 5; type++)
+        {
+            if (AvccAnnexB.ContainsNalType(annexB, type))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     internal static bool IsSync(bool hevc, bool keyFrameFlag, ReadOnlySpan<byte> annexB)
     {

@@ -841,11 +841,11 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
             if (_senderPaused)
             {
-                // Video resumed without a codec packet. One reset, then only an
-                // IDR is fed. A P-frame here used to land in an empty DPB.
+                // Video resumed without a 0x16/0x1e codec packet. Clear the flag
+                // and feed this access unit, including a P-frame. Reopening the
+                // decoder here drops the references the phone still uses.
                 _senderPaused = false;
                 _prependParameterSets = true;
-                BeginDiscontinuityLocked();
             }
 
             if (!_decryptor.MediaKeysReady && !TryFinishArmLocked())
@@ -880,9 +880,9 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
             _consecutiveBadAvcc = 0;
             Activity.AcceptAccessUnit();
+            var hevc = _codec == MirrorVideoCodec.Hevc;
             if (_awaitSync)
             {
-                var hevc = _codec == MirrorVideoCodec.Hevc;
                 if (!MirrorDiscontinuity.IsSync(hevc, keyFrame, accessUnit))
                 {
                     // Not a decode miss. The decoder must not see this slice.
@@ -890,6 +890,12 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 }
 
                 _awaitSync = false;
+                keyFrame = true;
+            }
+            else if (!keyFrame && MirrorDiscontinuity.IsSync(hevc, keyFrameFlag: false, accessUnit))
+            {
+                // An IDR/IRAP without the 0x10 flag still carries the parameter
+                // sets that were stored on the resume packet. A P-frame does not.
                 keyFrame = true;
             }
 
@@ -949,7 +955,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
         lock (_media)
         {
-            var resume = NoteSenderPauseLocked(header);
+            NoteSenderPauseLocked(header);
             if (_codec == MirrorVideoCodec.Hevc)
             {
                 _log.Log(AirPlayLogLevel.Information, "Mirror codec switched from HEVC to H.264.");
@@ -976,13 +982,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 _decoder.Configure(sequence, picture);
             }
 
-            if (MirrorDiscontinuity.ShouldResetDecoder(resume, _awaitSync))
-            {
-                // Same SPS as before the lock. Configure would keep the open
-                // decoder, whose references no longer match the phone.
-                BeginDiscontinuityLocked();
-            }
-
+            // Pause/resume keeps this decoder. The next access unit, including
+            // a P-frame, is fed below. Waiting for an IDR here never paints.
             PresentHeldKeyframeLocked();
         }
     }
@@ -1029,7 +1030,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
         lock (_media)
         {
-            var resume = NoteSenderPauseLocked(header);
+            NoteSenderPauseLocked(header);
             if (_codec == MirrorVideoCodec.H264)
             {
                 _log.Log(AirPlayLogLevel.Information, "Mirror codec switched from H.264 to HEVC.");
@@ -1054,22 +1055,17 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 _hevc.Configure(video, sequence, picture);
             }
 
-            if (MirrorDiscontinuity.ShouldResetDecoder(resume, _awaitSync))
-            {
-                // avcodec_flush_buffers is not enough: HEVC keeps POC/RPS and
-                // then logs "Could not find ref with POC" on every P-frame.
-                // Reset recreates the context. Slices wait for the next IRAP.
-                BeginDiscontinuityLocked();
-            }
-
+            // Same as H.264: the open HEVC context keeps its DPB across pause.
+            // Recreating it on 0x5e/0x1e drops the POC state the next P-frame
+            // still needs, and the wait for an IRAP then never clears.
             PresentHeldKeyframeLocked();
         }
     }
 
-    private bool NoteSenderPauseLocked(MirrorHeader header)
+    private void NoteSenderPauseLocked(MirrorHeader header)
     {
-        // 0x16 / 0x1e is also the ordinary parameter-set packet. Reset only
-        // on the edge out of pause. Resetting every 0x16 drops a live DPB.
+        // 0x16 / 0x1e is also the ordinary parameter-set packet. Leaving pause
+        // only clears the flag. The decoder stays open.
         var resume = MirrorDiscontinuity.LeavingPause(_senderPaused, header.SenderPaused, header.SenderResumed);
         if (header.SenderPaused)
         {
@@ -1079,8 +1075,6 @@ internal sealed class MirrorPipe : IAsyncDisposable
         {
             _senderPaused = false;
         }
-
-        return resume;
     }
 
     private void BeginDiscontinuityLocked()
@@ -1094,7 +1088,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
         ResetDecodersLocked(waitForSync: true);
         _log.Log(
             AirPlayLogLevel.Information,
-            "镜像要等下一个关键帧再解码，锁屏前的参考帧已丢掉。Waiting for the next keyframe before decoding. Pre-lock reference frames were dropped.");
+            "连续没有画面，参考帧已丢掉，要等下一个关键帧再解码。No picture from consecutive access units. Reference frames were dropped. Waiting for the next keyframe before decoding.");
     }
 
     private void PresentHeldKeyframeLocked()
@@ -1579,12 +1573,14 @@ internal sealed class MirrorPipe : IAsyncDisposable
     {
         // The decoded picture buffer is empty after this. A following P-frame
         // keeps the window on the last picture (Media Foundation) or logs
-        // "Could not find ref with POC" (FFmpeg HEVC) when the phone had already
-        // been sending a GOP. Callers that just left a pause, or tore the video
-        // stream down, pass waitForSync so those slices are dropped until the
-        // next IDR. A brand-new session does not: the opening IDR has to reach
-        // the decoder, and the next access unit is what pulls that picture out
-        // of the software transform.
+        // "Could not find ref with POC" (FFmpeg HEVC). Callers that tore the
+        // video stream down, or that already published a picture and then saw
+        // consecutive access units with no picture, pass waitForSync so those
+        // slices are dropped until the next IDR. Pause/resume does not call
+        // this: the phone keeps using the references still in the decoder.
+        // A brand-new session does not wait either. The opening IDR has to
+        // reach the decoder, and the next access unit is what pulls that
+        // picture out of the software transform.
         if (waitForSync)
         {
             _awaitSync = true;

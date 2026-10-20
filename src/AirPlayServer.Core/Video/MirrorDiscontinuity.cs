@@ -4,25 +4,16 @@ namespace AirPlayServer.Core.Video;
 
 /// <summary>
 /// What to do with the decoder when the phone locks and then resumes.
-/// A 0x16/0x1e codec packet is the normal SPS/PPS (or VPS) packet, not by
-/// itself a stream break. It means resume only when the sender was paused.
-/// Resetting on every one of those packets releases a working decoder, and
-/// the next P-frame then has no reference: Media Foundation stays on the
-/// last picture, and FFmpeg HEVC logs "Could not find ref with POC".
+/// A 0x16/0x1e codec packet is the normal SPS/PPS (or VPS) packet. It means
+/// resume only when the sender was paused. Pause and resume do not reset
+/// the decoder: the phone keeps the same references and the next access
+/// unit is often a P-frame. Reopening and then waiting for an IDR drops
+/// those units, so the window stays on the last picture.
 /// </summary>
 internal static class MirrorDiscontinuity
 {
     internal static bool LeavingPause(bool wasPaused, bool senderPaused, bool senderResumed)
         => wasPaused && (senderResumed || !senderPaused);
-
-    /// <summary>
-    /// The pause→resume edge resets the decoder once. A later codec packet
-    /// while that wait is still open must not reset again: that drops the
-    /// IDR the fresh decoder just accepted, and the following P-frames paint
-    /// nothing.
-    /// </summary>
-    internal static bool ShouldResetDecoder(bool leavingPause, bool alreadyWaitingForSync)
-        => leavingPause && !alreadyWaitingForSync;
 
     /// <summary>
     /// Two access units with no picture mean the references are gone only after

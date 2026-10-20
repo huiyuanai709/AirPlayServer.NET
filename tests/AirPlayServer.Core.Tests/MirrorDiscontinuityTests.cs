@@ -5,17 +5,13 @@ namespace AirPlayServer.Core.Tests;
 public sealed class MirrorDiscontinuityTests
 {
     [Fact]
-    public void Pause_resume_edge_resets_once()
+    public void Pause_resume_edge_is_only_the_flag()
     {
         Assert.False(MirrorDiscontinuity.LeavingPause(wasPaused: false, senderPaused: false, senderResumed: true));
         Assert.False(MirrorDiscontinuity.LeavingPause(wasPaused: false, senderPaused: true, senderResumed: false));
         Assert.False(MirrorDiscontinuity.LeavingPause(wasPaused: true, senderPaused: true, senderResumed: false));
         Assert.True(MirrorDiscontinuity.LeavingPause(wasPaused: true, senderPaused: false, senderResumed: true));
         Assert.True(MirrorDiscontinuity.LeavingPause(wasPaused: true, senderPaused: false, senderResumed: false));
-
-        Assert.True(MirrorDiscontinuity.ShouldResetDecoder(leavingPause: true, alreadyWaitingForSync: false));
-        Assert.False(MirrorDiscontinuity.ShouldResetDecoder(leavingPause: true, alreadyWaitingForSync: true));
-        Assert.False(MirrorDiscontinuity.ShouldResetDecoder(leavingPause: false, alreadyWaitingForSync: false));
     }
 
     [Fact]

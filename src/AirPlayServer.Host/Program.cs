@@ -134,8 +134,11 @@ await using (notify)
             + arguments.Options.DisplayWidth + "x" + arguments.Options.DisplayHeight + "。");
     }
     Console.WriteLine("镜像数据端口: " + receiver.Mirror.DataPort + "，计时端口: " + receiver.Mirror.TimingPort);
-    Console.WriteLine("同时镜像: 最多 " + arguments.Options.MaxMirrors
-        + " 路。每路独立数据端口、会话和窗口。导出文件为 mirror-<来源IP>.jpg。");
+    var mirrorLimit = arguments.Options.MaxMirrors == AirPlayReceiverOptions.DefaultMaxMirrors
+        ? "不限制路数"
+        : "最多 " + arguments.Options.MaxMirrors.ToString(CultureInfo.InvariantCulture) + " 路";
+    Console.WriteLine("同时镜像: " + mirrorLimit
+        + "。每路独立数据端口、会话和窗口。导出文件为 mirror-<来源IP>.jpg。");
     var windowLine = "显示: 当前进程没有打开窗口。";
     if (arguments.Options.ShowWindow && OperatingSystem.IsWindows())
     {

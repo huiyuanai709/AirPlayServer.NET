@@ -158,6 +158,123 @@ public sealed class MultiMirrorTests
     }
 
     [Fact]
+    public async Task Shared_pool_reuses_the_displayed_frame_and_a_lease_stays_private()
+    {
+        var pool = BgraBufferPool.CreateShared();
+        var framesA = new FrameSlot(pool);
+        var framesB = new FrameSlot(pool);
+        var decoderA = new PoolDecoder(pool, 0x11);
+        var decoderB = new PoolDecoder(pool, 0x22);
+        Assert.Same(framesA.Buffers, framesB.Buffers);
+        var lab = new byte[16];
+        lab[0] = 4;
+        var secretA = new byte[32];
+        secretA[0] = 1;
+        var secretB = new byte[32];
+        secretB[0] = 2;
+        await using var mirror = MirrorRuntime.Start(
+            IPAddress.Loopback,
+            9,
+            framesA,
+            decoderA,
+            null,
+            lab,
+            NullAirPlayLog.Instance,
+            maxMirrors: 4,
+            extra: () => new MirrorEndpointResources
+            {
+                Frames = framesB,
+                Decoder = decoderB,
+            });
+
+        var endpointA = new IPEndPoint(IPAddress.Parse("10.4.0.1"), 7000);
+        var endpointB = new IPEndPoint(IPAddress.Parse("10.4.0.2"), 7000);
+        using var pairingA = new PairingSession(PairingIdentity.Generate());
+        using var pairingB = new PairingSession(PairingIdentity.Generate());
+        mirror.NotePairingSecret(secretA, endpointA);
+        mirror.NotePairingSecret(secretB, endpointB);
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", SessionBody("Phone A")), pairingA, endpointA).Status);
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", SessionBody("Phone B")), pairingB, endpointB).Status);
+        var streamA = mirror.HandleMedia(Request("SETUP", StreamBody(11)), pairingA, endpointA);
+        var streamB = mirror.HandleMedia(Request("SETUP", StreamBody(22)), pairingB, endpointB);
+        var portA = DataPort(streamA);
+        var portB = DataPort(streamB);
+        Assert.NotEqual(portA, portB);
+
+        using var clientA = ConnectFrom("127.0.0.1", portA);
+        using var clientB = ConnectFrom("127.0.0.2", portB);
+        await clientA.GetStream().WriteAsync(VideoPacket(lab, secretA, 11, skip: 0));
+        await clientB.GetStream().WriteAsync(VideoPacket(lab, secretB, 22, skip: 0));
+        Assert.True(await WaitUntilAsync(() => framesA.Generation > 0 && framesB.Generation > 0));
+        Assert.Equal(2, pool.Allocations);
+        Assert.Equal(1, decoderA.Rents);
+        Assert.Equal(1, decoderB.Rents);
+
+        var generationA = framesA.Generation;
+        var generationB = framesB.Generation;
+        await clientA.GetStream().WriteAsync(VideoPacket(lab, secretA, 11, skip: 5));
+        await clientB.GetStream().WriteAsync(VideoPacket(lab, secretB, 22, skip: 5));
+        Assert.True(await WaitUntilAsync(() => framesA.Generation > generationA && framesB.Generation > generationB));
+        Assert.Equal(2, pool.Allocations);
+        Assert.Equal(1, decoderA.Rents);
+        Assert.Equal(1, decoderB.Rents);
+        Assert.True(framesA.TryLease(out _, out _, out _, out var heldA, out _, out var leaseA));
+        Assert.True(framesB.TryLease(out _, out _, out _, out var pixelsB, out _, out var seenB));
+        Assert.NotSame(heldA, pixelsB);
+        Assert.Equal(0x11, heldA[0]);
+        Assert.Equal(0x22, pixelsB[0]);
+        var snapshot = heldA.AsSpan(0, 4).ToArray();
+        seenB.Dispose();
+
+        generationA = framesA.Generation;
+        await clientA.GetStream().WriteAsync(VideoPacket(lab, secretA, 11, skip: 10));
+        Assert.True(await WaitUntilAsync(() => framesA.Generation > generationA));
+        Assert.Equal(snapshot, heldA.AsSpan(0, 4).ToArray());
+        Assert.Equal(0x11, heldA[0]);
+        Assert.Equal(3, pool.Allocations);
+        Assert.Equal(2, decoderA.Rents);
+        Assert.True(framesB.TryLease(out _, out _, out _, out pixelsB, out _, out var leaseB));
+        Assert.Equal(0x22, pixelsB[0]);
+        Assert.NotSame(heldA, pixelsB);
+        leaseB.Dispose();
+        leaseA.Dispose();
+
+        var rentsBefore = decoderB.Rents;
+        var allocations = pool.Allocations;
+        generationB = framesB.Generation;
+        await clientB.GetStream().WriteAsync(VideoPacket(lab, secretB, 22, skip: 10));
+        Assert.True(await WaitUntilAsync(() => framesB.Generation > generationB));
+        Assert.Equal(rentsBefore, decoderB.Rents);
+        Assert.Equal(allocations, pool.Allocations);
+    }
+
+    [Fact]
+    public async Task Default_max_mirrors_has_no_cap_and_accepts_more_than_four()
+    {
+        Assert.Equal(int.MaxValue, MirrorRuntime.DefaultMaxMirrors);
+        await using var mirror = MirrorRuntime.Start(
+            IPAddress.Loopback,
+            9,
+            new FrameSlot(),
+            new MarkDecoder(1),
+            null,
+            ReadOnlySpan<byte>.Empty,
+            NullAirPlayLog.Instance);
+        using var pairing = new PairingSession(PairingIdentity.Generate());
+        for (var n = 1; n <= 5; n++)
+        {
+            var remote = new IPEndPoint(IPAddress.Parse("10.21.0." + n.ToString(System.Globalization.CultureInfo.InvariantCulture)), 7000);
+            var response = mirror.HandleMedia(
+                Request("SETUP", SessionBody("Phone " + n.ToString(System.Globalization.CultureInfo.InvariantCulture))),
+                pairing,
+                remote);
+            Assert.Equal(200, response.Status);
+        }
+
+        Assert.Equal(5, mirror.Snapshot().Length);
+    }
+
+    [Fact]
     public async Task Configured_max_above_eight_accepts_that_many_and_refuses_the_next()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => MirrorRuntime.Start(
@@ -390,6 +507,58 @@ public sealed class MultiMirrorTests
         }
 
         return true;
+    }
+
+    private sealed class PoolDecoder(BgraBufferPool pool, byte mark) : IH264Decoder, IBgraReuseTarget
+    {
+        private byte[]? _offer;
+        private int _offerWidth;
+        private int _offerHeight;
+        private int _offerStride;
+        private int _rents;
+
+        public int Rents => Volatile.Read(ref _rents);
+
+        public bool IsAvailable => true;
+
+        public string Name => "pool-" + mark.ToString("x2");
+
+        public void Configure(ReadOnlySpan<byte> sequenceParameterSet, ReadOnlySpan<byte> pictureParameterSet)
+        {
+        }
+
+        public void Reset()
+        {
+        }
+
+        public void OfferReuse(byte[] buffer, int width, int height, int stride)
+        {
+            _offer = buffer;
+            _offerWidth = width;
+            _offerHeight = height;
+            _offerStride = stride;
+        }
+
+        public void ClearReuse() => _offer = null;
+
+        public bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
+        {
+            _ = annexB;
+            _ = keyFrame;
+            if (_offer is not null)
+            {
+                _offer[0] = mark;
+                var bytes = _offerStride * _offerHeight;
+                frame = new DecodedFrame(_offerWidth, _offerHeight, _offer.AsMemory(0, bytes), _offerStride);
+                return true;
+            }
+
+            var pixels = pool.Rent(16);
+            Interlocked.Increment(ref _rents);
+            pixels[0] = mark;
+            frame = DecodedFrame.Own(2, 2, pixels, 8);
+            return true;
+        }
     }
 
     private sealed class MarkDecoder(byte mark) : IH264Decoder

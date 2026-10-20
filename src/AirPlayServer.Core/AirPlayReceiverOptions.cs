@@ -46,10 +46,12 @@ public sealed class AirPlayReceiverOptions
 
     /// <summary>
     /// How many phones may mirror at once. Each one gets its own data port,
-    /// frame slot, session id, and on Windows its own window. Default is 4.
-    /// Any positive count is accepted; memory and CPU are the limit.
+    /// frame slot, session id, and on Windows its own window.
+    /// <see cref="int.MaxValue"/> (the default) means no cap.
+    /// <c>--max-mirrors N</c> with N ≥ 1 is an optional cap. Zero and
+    /// negatives are rejected. Memory and CPU are the practical limit.
     /// </summary>
-    public const int DefaultMaxMirrors = 4;
+    public const int DefaultMaxMirrors = int.MaxValue;
 
     public int MaxMirrors { get; set; } = DefaultMaxMirrors;
 

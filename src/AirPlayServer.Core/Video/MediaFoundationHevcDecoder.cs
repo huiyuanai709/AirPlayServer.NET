@@ -13,7 +13,7 @@ namespace AirPlayServer.Core.Video;
 /// BGRA for the existing window and TapClock path. This file is compiled only
 /// into a Windows host.
 /// </summary>
-internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposable
+internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IBgraReuseTarget, IDisposable
 {
     private const uint MfVersion = 0x00020070;
     private const uint MfStartupLite = 1;
@@ -61,6 +61,7 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
     private readonly IAirPlayLog _log;
     private readonly BgraBufferPool _buffers;
     private readonly object _gate = new();
+    private BgraReuseSlot _reuse;
     private byte[]? _vps;
     private byte[]? _sps;
     private byte[]? _pps;
@@ -189,6 +190,11 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
             }
         }
     }
+
+    public void OfferReuse(byte[] buffer, int width, int height, int stride)
+        => _reuse.Offer(buffer, width, height, stride);
+
+    public void ClearReuse() => _reuse.Clear();
 
     public void Reset()
     {
@@ -571,7 +577,12 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
         var visibleWidth = _visibleWidth > 0 && _visibleWidth <= codedWidth ? _visibleWidth : codedWidth;
         var visibleHeight = _visibleHeight > 0 && _visibleHeight <= codedHeight ? _visibleHeight : codedHeight;
         var byteCount = visibleWidth * visibleHeight * 4;
-        var tight = _buffers.Rent(byteCount);
+        var reused = _reuse.TryTake(visibleWidth, visibleHeight, byteCount, out var tight);
+        if (!reused)
+        {
+            tight = _buffers.Rent(byteCount);
+        }
+
         var wrote = false;
         if (_rgb32)
         {
@@ -586,11 +597,17 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IDisposa
 
         if (!wrote)
         {
-            _buffers.Return(tight);
+            if (!reused)
+            {
+                _buffers.Return(tight);
+            }
+
             return false;
         }
 
-        frame = DecodedFrame.Own(visibleWidth, visibleHeight, tight, visibleWidth * 4);
+        frame = reused
+            ? new DecodedFrame(visibleWidth, visibleHeight, tight.AsMemory(0, byteCount), visibleWidth * 4)
+            : DecodedFrame.Own(visibleWidth, visibleHeight, tight, visibleWidth * 4);
         return true;
     }
 

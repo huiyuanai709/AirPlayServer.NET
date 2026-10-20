@@ -1061,13 +1061,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
             }
         }
 
-        if (!_decoder.TryDecode(presented, keyFrame, out var frame))
-        {
-            return false;
-        }
-
-        PublishDecodedLocked(frame);
-        return true;
+        return DecodeAndPublish(hevc: false, presented, keyFrame);
     }
 
     private bool PresentHevcLocked(ReadOnlySpan<byte> annexB, bool keyFrame)
@@ -1089,13 +1083,72 @@ internal sealed class MirrorPipe : IAsyncDisposable
             }
         }
 
-        if (!_hevc.TryDecode(presented, keyFrame, out var frame))
+        return DecodeAndPublish(hevc: true, presented, keyFrame);
+    }
+
+    private bool DecodeAndPublish(bool hevc, ReadOnlySpan<byte> presented, bool keyFrame)
+    {
+        var target = hevc ? _hevc as IBgraReuseTarget : _decoder as IBgraReuseTarget;
+        byte[]? reuse = null;
+        var offered = false;
+        if (target is not null && _frames.TryPrepareReuse(out reuse, out var reuseWidth, out var reuseHeight, out var reuseStride))
         {
-            return false;
+            offered = true;
+            target.OfferReuse(reuse, reuseWidth, reuseHeight, reuseStride);
         }
 
-        PublishDecodedLocked(frame);
-        return true;
+        var finished = false;
+        try
+        {
+            bool produced;
+            DecodedFrame frame = default;
+            if (hevc)
+            {
+                produced = _hevc is not null && _hevc.TryDecode(presented, keyFrame, out frame);
+            }
+            else
+            {
+                produced = _decoder.TryDecode(presented, keyFrame, out frame);
+            }
+
+            if (!produced)
+            {
+                return false;
+            }
+
+            if (offered && reuse is not null && frame.Owned is null && frame.RefersTo(reuse))
+            {
+                if (_frames.TryCompleteReuse(frame.Width, frame.Height, frame.Stride, out _))
+                {
+                    finished = true;
+                    NoteDecoded(frame.Width, frame.Height);
+                    return true;
+                }
+
+                _frames.CancelReuse();
+                offered = false;
+                finished = true;
+                return false;
+            }
+
+            if (offered)
+            {
+                _frames.CancelReuse();
+                offered = false;
+            }
+
+            PublishDecodedLocked(frame);
+            finished = true;
+            return true;
+        }
+        finally
+        {
+            target?.ClearReuse();
+            if (offered && !finished)
+            {
+                _frames.CancelReuse();
+            }
+        }
     }
 
     private void PublishDecodedLocked(DecodedFrame frame)
@@ -1110,11 +1163,17 @@ internal sealed class MirrorPipe : IAsyncDisposable
         {
             _frames.Publish(frame.Width, frame.Height, frame.Bgra.Span, frame.Stride);
         }
+
+        NoteDecoded(frame.Width, frame.Height);
+    }
+
+    private void NoteDecoded(int width, int height)
+    {
         _consecutiveDecodeMisses = 0;
         Activity.DecodeFrame();
         if (Interlocked.Exchange(ref _loggedDecoded, 1) == 0)
         {
-            _log.Log(AirPlayLogLevel.Information, "Decoded mirror frame " + frame.Width + "x" + frame.Height + " published for the window and TapClock.");
+            _log.Log(AirPlayLogLevel.Information, "Decoded mirror frame " + width + "x" + height + " published for the window and TapClock.");
         }
     }
 

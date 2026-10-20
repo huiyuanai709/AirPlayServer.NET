@@ -98,6 +98,23 @@ public sealed class FFmpegDecoderTests
     }
 
     [Fact]
+    public void Ffmpeg_9_hevc_id_is_not_the_fic_slot()
+    {
+        Assert.Equal(173, FFmpegLibrary.HevcCodecId(58));
+        Assert.Equal(173, FFmpegLibrary.HevcCodecId(62));
+        Assert.Equal(172, FFmpegLibrary.HevcCodecId(63));
+        Assert.Equal(173, FFmpegLibrary.CodecHevcThroughAvcodec62);
+        Assert.Equal(172, FFmpegLibrary.CodecHevcFromAvcodec63);
+
+        Assert.Equal(63, FFmpegLibrary.TryParseAvcodecMajor("avcodec-63.dll"));
+        Assert.Equal(63, FFmpegLibrary.TryParseAvcodecMajor("libavcodec.so.63"));
+        Assert.Equal(63, FFmpegLibrary.TryParseAvcodecMajor("libavcodec.so.63.1.102"));
+        Assert.Equal(60, FFmpegLibrary.TryParseAvcodecMajor("/usr/lib/libavcodec.so.60"));
+        Assert.Equal(0, FFmpegLibrary.TryParseAvcodecMajor("libavcodec.so"));
+        Assert.Equal(0, FFmpegLibrary.TryParseAvcodecMajor("avcodec.dll"));
+    }
+
+    [Fact]
     public void Probe_order_tries_ffmpeg_9_sonames_before_older_majors()
     {
         Assert.Equal(
@@ -116,7 +133,8 @@ public sealed class FFmpegDecoderTests
     [Fact]
     public void Ffmpeg_decodes_annex_b_fixtures_when_the_libraries_are_present()
     {
-        var library = FFmpegLibrary.TryLoad(NullAirPlayLog.Instance);
+        var log = new ListLog();
+        var library = FFmpegLibrary.TryLoad(log);
         if (library is null)
         {
             // CI does not install FFmpeg. This environment must, so a silent skip
@@ -133,8 +151,17 @@ public sealed class FFmpegDecoderTests
         var hevcPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "red-64x64.hevc");
         Assert.True(File.Exists(h264Path), "Missing H.264 fixture " + h264Path);
         Assert.True(File.Exists(hevcPath), "Missing HEVC fixture " + hevcPath);
-        AssertDecodedRed(FFmpegH264Decoder.TryCreate(library, NullAirPlayLog.Instance, out var h264) ? h264 : null, File.ReadAllBytes(h264Path));
-        AssertDecodedRed(FFmpegHevcDecoder.TryCreate(library, NullAirPlayLog.Instance, out var hevc) ? hevc : null, File.ReadAllBytes(hevcPath));
+        AssertDecodedRed(FFmpegH264Decoder.TryCreate(library, log, out var h264) ? h264 : null, File.ReadAllBytes(h264Path));
+        AssertDecodedRed(FFmpegHevcDecoder.TryCreate(library, log, out var hevc) ? hevc : null, File.ReadAllBytes(hevcPath));
+        Assert.Contains("opened decoder \"h264\"", log.Text, StringComparison.Ordinal);
+        Assert.Contains("opened decoder \"hevc\"", log.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("decoder \"fic\"", log.Text, StringComparison.Ordinal);
+        if (library.AvcodecMajor >= 63)
+        {
+            // FFmpeg 9: 173 is FIC. A hardcoded 173 would not produce this line.
+            Assert.Contains("AVCodecID 172", log.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("Zero slices found", log.Text, StringComparison.Ordinal);
+        }
     }
 
     private static void AssertDecodedRed(IDisposable? decoder, byte[] annexB)

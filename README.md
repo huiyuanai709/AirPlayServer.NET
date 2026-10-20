@@ -281,6 +281,17 @@ Windows 上的顺序：
 
 3. iPhone 在同一局域网里发现接收端并镜像。锁屏再解锁后，带 type 110 的 TEARDOWN（即使同一条里还有 type 96）只停视频：FairPlay 内容密钥和上一组 SPS/PPS 保留，下一次 type-110 SETUP 从计数器 0 重新开始，并丢掉锁屏前积压的密文。解不开的重复会话 SETUP 不会清掉正在用的密钥。Windows 上 Media Foundation 会释放当前解码器，下一帧重建，避免画面停在锁屏前的最后一帧。
 
+   暂停后再出现 `Mirror sender resumed`，而 SPS/PPS 没变时，也会释放当前变换，下一帧重建。下面这段是软件 H.264，不是 HEVC，不需要 `--h265`：
+
+   ```
+   Mirror sender resumed.
+   Mirror geometry 720x1560 source 720x1560
+   NV12 to BGRA is BT.709 full range (matrix: sequence parameter set, range: sequence parameter set).
+   H.264 decoder is the Microsoft Media Foundation software decoder.
+   ```
+
+   `720x1560` 是手机这次送出的尺寸，比 `--screen 1290x2796` 小是正常的，窗口按这个尺寸缩放。软件解码器为了逼出第一帧会 drain。drain 之后要先 flush，再把同一个关键帧送回去，后续 P 帧才有参考帧。只发 start-of-stream 时，变换不再收后面的帧，窗口停在刚恢复的那一帧，会话本身还在。硬件变换仍然不 drain。
+
 `POST /fp-setup` 如果比带 `ekey` 的 SETUP 晚到，72 字节 `ekey` 会留着，握手完成后重试解开，这段时间的密文会按到达顺序补解密，而不是直接丢掉。关键帧如果比 SPS/PPS 早到，会留到 codec 数据到达后再解码。Hold 缓冲溢出会让这一条流保持丢弃，直到手机重新开一次镜像。`Mirror.DecodedFrames` 只在真正写出 BGRA 时增加；`DroppedEncryptedPayloads` 只计被丢掉的密文；`PendingEncryptedPayloads` 是还在等密钥的包。连不上 TapClock 时，控制台会写出 `TapClock connect to host:port failed` 并继续重试。
 
 合同：
@@ -309,7 +320,9 @@ Windows 上的顺序：
 | Windows | Media Foundation。打不开才试 FFmpeg。 | 先 Media Foundation（同步硬件 MFT，否则 `CLSID_CMSH265DecoderMFT`）。打不开再试 FFmpeg。 |
 | Linux | FFmpeg。 | FFmpeg。 |
 
-认这些共享库主版本：FFmpeg 4.4 到 9（libavcodec 58–63，libavutil 56–61，libswresample 3–7）。BtbN 的 n7、n8，以及当前带 avcodec-63 的构建（n9.0 或 master）都在这个范围内。软件解码输出 NV12、NV21 或 YUV420P（含 10-bit LE）时，进程内转成 BGRA。SPS 里的矩阵和范围优先；都没写时按 AirPlay 的 BT.709 全范围。自更新只替换发布包里的文件，不会删掉你另外拷进去的这些库。
+认这些共享库主版本：FFmpeg 4.4 到 9（libavcodec 58–63，libavutil 56–61，libswresample 3–7）。BtbN 的 n7、n8，以及当前带 avcodec-63 的构建（n9.0 或 master）都在这个范围内。HEVC 和 H.264 按解码器名字打开（`hevc` / `h264`），不写死 `AVCodecID`。FFmpeg 9 删掉了 `AV_CODEC_ID_V410`，libavcodec 63 里 HEVC 是 172，173 变成了 FIC。旧二进制用 173 时，日志是 `[fic @ ...] Zero slices found` 和 `ffmpeg-hevc send failed (Invalid data found when processing input)`，`DecodedFrames` 停在 0，窗口是黑的。软件解码输出 NV12、NV21 或 YUV420P（含 10-bit LE）时，进程内转成 BGRA。SPS 里的矩阵和范围优先；都没写时按 AirPlay 的 BT.709 全范围。自更新只替换发布包里的文件，不会删掉你另外拷进去的这些库。
+
+`--h265` 仍然要加，才会宣告 features 第 42 位。不加时手机继续发 H.264；Windows 上那条路径用 Media Foundation，不需要这些 DLL。`--screen 1290x2796` 只是广告分辨率。手机实际送出的高度可以少几个像素（例如 1290×2794），这不是黑屏的原因。较新的苹果设备只有在广告分辨率够高、并且第 42 位已宣告时才会改发 HEVC。
 
 ### Windows（没有商店 HEVC 扩展）
 

@@ -9,7 +9,9 @@ namespace AirPlayServer.Core.Video;
 /// transform that accepts input and then stops producing pictures is released
 /// once and replaced by the Microsoft software decoder
 /// (CLSID_CMSH265DecoderMFT). Hardware transforms are not drained: that flush
-/// drops reference frames and leaves the window on the last picture. Output is
+/// drops reference frames and leaves the window on the last picture. A software
+/// drain is flushed and the keyframe is submitted again so later frames paint.
+/// Output is
 /// BGRA for the existing window and TapClock path. This file is compiled only
 /// into a Windows host.
 /// </summary>
@@ -24,9 +26,6 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IBgraReu
     private const int RpcChangedMode = unchecked((int)0x80010106);
     private const uint OutputProvidesSamples = 0x100;
     private const uint OutputCanProvideSamples = 0x200;
-    private const int MessageDrain = 1;
-    private const int MessageBeginStreaming = 0x10000000;
-    private const int MessageStartOfStream = 0x10000003;
 
     private static readonly Guid Video = Guid.Parse("73646976-0000-0010-8000-00aa00389b71");
     private static readonly Guid Hevc = Guid.Parse("43564548-0000-0010-8000-00aa00389b71");
@@ -309,11 +308,32 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IBgraReu
         }
 
         var produced = Pull(ref frame);
-        if (allowDrain && produced != PullResult.Unsupported && frame.Width == 0 && keyFrame && _pictures == 0 && !_hardware)
+        var drain = MediaFoundationDrainRestart.For(
+            allowDrain,
+            produced == PullResult.Unsupported,
+            frame.Width != 0,
+            keyFrame,
+            _pictures,
+            _hardware);
+        if (drain.Drain)
         {
-            Slots.ProcessMessage(_transform, MessageDrain, 0);
+            // Same restart as H.264. A drained software HEVC MFT that only
+            // receives start-of-stream stops publishing while the session stays up.
+            Slots.ProcessMessage(_transform, MediaFoundationDrainRestart.MessageDrain, 0);
             produced = Pull(ref frame);
-            Slots.ProcessMessage(_transform, MessageStartOfStream, 0);
+            foreach (var message in MediaFoundationDrainRestart.MessagesAfterDrain)
+            {
+                Slots.ProcessMessage(_transform, message, 0);
+            }
+
+            if (drain.ResubmitKeyframe
+                && DecodeLocked(annexB, keyFrame: true, out var restored, allowHardwareFallback: false, allowDrain: false)
+                && restored.Width != 0)
+            {
+                ReleasePicture(ref frame);
+                frame = restored;
+                return true;
+            }
         }
 
         if (produced == PullResult.Unsupported && _hardware && allowHardwareFallback)
@@ -378,6 +398,16 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IBgraReu
     {
         _pictures++;
         _consecutiveMisses = 0;
+    }
+
+    private void ReleasePicture(ref DecodedFrame frame)
+    {
+        if (frame.Owned is not null)
+        {
+            _buffers.Return(frame.Owned);
+        }
+
+        frame = default;
     }
 
     private PullResult Pull(ref DecodedFrame frame)
@@ -899,8 +929,8 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IBgraReu
             return false;
         }
 
-        Slots.ProcessMessage(_transform, MessageBeginStreaming, 0);
-        Slots.ProcessMessage(_transform, MessageStartOfStream, 0);
+        Slots.ProcessMessage(_transform, MediaFoundationDrainRestart.MessageBeginStreaming, 0);
+        Slots.ProcessMessage(_transform, MediaFoundationDrainRestart.MessageStartOfStream, 0);
         _typesReady = true;
         return true;
     }

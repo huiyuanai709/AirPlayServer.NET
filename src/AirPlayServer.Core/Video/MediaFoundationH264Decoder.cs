@@ -11,6 +11,9 @@ namespace AirPlayServer.Core.Video;
 /// (CLSID_CMSH264DecoderMFT). Draining the hardware transform to force the
 /// first picture is not used: that flush drops reference frames and the DXGI
 /// worker threads keep spinning while the window stays on the last picture.
+/// The software decoder may drain that first IDR. It then flushes and submits
+/// the same keyframe again; start-of-stream alone freezes the window after
+/// resume while the session stays up. See <see cref="MediaFoundationDrainRestart"/>.
 /// The software decoder's documented outputs are NV12, YUY2, and planar 4:2:0, not RGB.
 /// RGB32/ARGB32 are taken when a transform lists them, and the output type is
 /// stamped with the resolved matrix and range so Media Foundation converts.
@@ -30,9 +33,6 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReu
     private const int RpcChangedMode = unchecked((int)0x80010106);
     private const uint OutputProvidesSamples = 0x100;
     private const uint OutputCanProvideSamples = 0x200;
-    private const int MessageDrain = 1;
-    private const int MessageBeginStreaming = 0x10000000;
-    private const int MessageStartOfStream = 0x10000003;
 
     private static readonly Guid Video = Guid.Parse("73646976-0000-0010-8000-00aa00389b71");
     private static readonly Guid H264 = Guid.Parse("34363248-0000-0010-8000-00aa00389b71");
@@ -318,14 +318,35 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReu
         }
 
         var produced = Pull(ref frame);
-        if (allowDrain && produced != PullResult.Unsupported && frame.Width == 0 && keyFrame && _pictures == 0 && !_hardware)
+        var drain = MediaFoundationDrainRestart.For(
+            allowDrain,
+            produced == PullResult.Unsupported,
+            frame.Width != 0,
+            keyFrame,
+            _pictures,
+            _hardware);
+        if (drain.Drain)
         {
             // A single IDR can sit inside the software transform until it is told
             // the stream paused. Hardware transforms are not drained: the flush
             // drops reference pictures and later access units never paint.
-            Slots.ProcessMessage(_transform, MessageDrain, 0);
+            // Resume builds a new software MFT (picture count 0), so this path
+            // runs again. Drain plus start-of-stream alone stops accepting input.
+            Slots.ProcessMessage(_transform, MediaFoundationDrainRestart.MessageDrain, 0);
             produced = Pull(ref frame);
-            Slots.ProcessMessage(_transform, MessageStartOfStream, 0);
+            foreach (var message in MediaFoundationDrainRestart.MessagesAfterDrain)
+            {
+                Slots.ProcessMessage(_transform, message, 0);
+            }
+
+            if (drain.ResubmitKeyframe
+                && DecodeLocked(annexB, keyFrame: true, out var restored, allowHardwareFallback: false, allowDrain: false)
+                && restored.Width != 0)
+            {
+                ReleasePicture(ref frame);
+                frame = restored;
+                return true;
+            }
         }
 
         if (produced == PullResult.Unsupported && _hardware && allowHardwareFallback)
@@ -392,6 +413,16 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReu
     {
         _pictures++;
         _consecutiveMisses = 0;
+    }
+
+    private void ReleasePicture(ref DecodedFrame frame)
+    {
+        if (frame.Owned is not null)
+        {
+            _buffers.Return(frame.Owned);
+        }
+
+        frame = default;
     }
 
     private PullResult Pull(ref DecodedFrame frame)
@@ -894,8 +925,8 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReu
             return false;
         }
 
-        Slots.ProcessMessage(_transform, MessageBeginStreaming, 0);
-        Slots.ProcessMessage(_transform, MessageStartOfStream, 0);
+        Slots.ProcessMessage(_transform, MediaFoundationDrainRestart.MessageBeginStreaming, 0);
+        Slots.ProcessMessage(_transform, MediaFoundationDrainRestart.MessageStartOfStream, 0);
         _typesReady = true;
         return true;
     }

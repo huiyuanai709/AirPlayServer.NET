@@ -17,6 +17,41 @@ public sealed class MirrorPresentTests
     }
 
     [Fact]
+    public void Resume_software_drain_flushes_and_resubmits_the_keyframe()
+    {
+        // Mirror sender resumed, geometry 720x1560, then a new software MFT
+        // (pictures == 0). The first keyframe has not produced a picture yet.
+        var resume = MediaFoundationDrainRestart.For(
+            allowDrain: true,
+            outputUnsupported: false,
+            producedPicture: false,
+            keyFrame: true,
+            picturesProduced: 0,
+            hardware: false);
+        Assert.True(resume.Drain);
+        Assert.True(resume.ResubmitKeyframe);
+        Assert.Equal(
+            [
+                MediaFoundationDrainRestart.MessageFlush,
+                MediaFoundationDrainRestart.MessageBeginStreaming,
+                MediaFoundationDrainRestart.MessageStartOfStream,
+            ],
+            MediaFoundationDrainRestart.MessagesAfterDrain);
+        Assert.Equal(0, MediaFoundationDrainRestart.MessagesAfterDrain[0]);
+        Assert.NotEqual(
+            MediaFoundationDrainRestart.MessageStartOfStream,
+            MediaFoundationDrainRestart.MessagesAfterDrain[0]);
+
+        Assert.False(MediaFoundationDrainRestart.For(true, false, false, true, picturesProduced: 1, hardware: false).Drain);
+        Assert.False(MediaFoundationDrainRestart.For(true, false, false, true, picturesProduced: 0, hardware: true).Drain);
+        Assert.False(MediaFoundationDrainRestart.For(true, false, producedPicture: true, true, 0, false).Drain);
+        Assert.False(MediaFoundationDrainRestart.For(allowDrain: false, false, false, true, 0, false).Drain);
+        Assert.False(MediaFoundationDrainRestart.For(true, outputUnsupported: true, false, true, 0, false).Drain);
+        Assert.False(MediaFoundationDrainRestart.For(true, false, false, keyFrame: false, 0, false).Drain);
+        Assert.False(MediaFoundationDrainRestart.For(true, false, false, true, picturesProduced: -1, hardware: false).Drain);
+    }
+
+    [Fact]
     public void Letterboxed_bgra_lands_upright_and_leaves_the_bars_black()
     {
         var source = new byte[4 * 2 * 4];

@@ -52,6 +52,21 @@ Windows：从 https://github.com/BtbN/FFmpeg-Builds/releases 下载 win64-lgpl-s
 （n9.0 或 master）都可以。把 bin 里的 DLL 全部拷到本目录。
 至少要有同一版本的 avcodec-*.dll、avutil-*.dll、swresample-*.dll。
 当前这组是 avcodec-63.dll、avutil-61.dll、swresample-7.dll。
+HEVC 按名字 "hevc" 打开。FFmpeg 9（avcodec-63）里数字 id 173 是 FIC 不是 HEVC。
+若日志出现 [fic @ ...] Zero slices found 和 ffmpeg-hevc send failed (Invalid data)，
+DecodedFrames 会停在 0，窗口是黑的。那是旧二进制写死了 173，换这一版即可。
+--h265 仍要加。--screen 1290x2796 只决定广告分辨率；实际帧高差 2 像素（1290x2794）不会让画面变黑。
+
+暂停后窗口不再刷新、会话还在，并且日志是：
+
+  Mirror sender resumed.
+  Mirror geometry 720x1560 source 720x1560
+  NV12 to BGRA is BT.709 full range (...)
+  H.264 decoder is the Microsoft Media Foundation software decoder.
+
+这是 Windows 软件 H.264，不是 HEVC，不需要 --h265，也不依赖旁边的 FFmpeg DLL。
+720x1560 是手机这次的画面尺寸。软件解码器 drain 出第一帧之后会 flush，
+再送回同一个关键帧，后面的帧继续画。旧版本只发 start-of-stream，窗口会停在这一帧。
 Linux：sudo apt-get install ffmpeg
 也可以把 libavcodec.so.N、libavutil.so.N、libswresample.so.N 放在本目录。
 当前主版本是 libavcodec.so.63、libavutil.so.61、libswresample.so.7。

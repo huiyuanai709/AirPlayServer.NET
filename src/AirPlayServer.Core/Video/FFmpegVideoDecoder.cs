@@ -70,17 +70,27 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
 
     internal string Name { get; }
 
-    internal static bool TryOpen(FFmpegLibrary library, int codecId, string name, IAirPlayLog? log, BgraBufferPool? buffers, out FFmpegDecodeSession? session)
+    internal static bool TryOpen(FFmpegLibrary library, string codecName, int fallbackCodecId, string name, IAirPlayLog? log, BgraBufferPool? buffers, out FFmpegDecodeSession? session)
     {
         session = null;
-        var codec = library.FindDecoder(codecId);
+        var codec = library.FindNamedDecoder(codecName, fallbackCodecId);
         if (codec == 0)
         {
+            var shifted = codecName == "hevc"
+                ? " libavcodec 63 (FFmpeg 9) 上数字 id 173 是 FIC 不是 HEVC，所以这里按名字 \"hevc\" 找解码器。"
+                    + " On libavcodec 63 (FFmpeg 9) numeric id 173 is FIC, not HEVC, so the decoder is selected by the name \"hevc\"."
+                : "";
             log?.Log(
                 AirPlayLogLevel.Warning,
-                "已加载 FFmpeg，但这份 libavcodec 没有 " + name + " 解码器。This libavcodec build has no " + name + " decoder.");
+                "已加载 FFmpeg，但这份 libavcodec 没有 " + codecName + " 解码器。" + shifted
+                + " This libavcodec build has no " + codecName + " decoder." + shifted);
             return false;
         }
+
+        log?.Log(
+            AirPlayLogLevel.Information,
+            name + " opened decoder \"" + codecName + "\" (AVCodecID "
+            + FFmpegLibrary.ReadCodecId(codec).ToString(System.Globalization.CultureInfo.InvariantCulture) + ").");
 
         var context = library.AllocContext(codec);
         if (context == 0)
@@ -430,7 +440,7 @@ internal sealed class FFmpegH264Decoder : IH264Decoder, IBgraReuseTarget, IDispo
     internal static bool TryCreate(FFmpegLibrary library, IAirPlayLog? log, BgraBufferPool? buffers, out FFmpegH264Decoder? decoder)
     {
         decoder = null;
-        if (!FFmpegDecodeSession.TryOpen(library, FFmpegLibrary.CodecH264, "ffmpeg-h264", log, buffers, out var session) || session is null)
+        if (!FFmpegDecodeSession.TryOpen(library, "h264", FFmpegLibrary.CodecH264, "ffmpeg-h264", log, buffers, out var session) || session is null)
         {
             return false;
         }
@@ -483,7 +493,7 @@ internal sealed class FFmpegHevcDecoder : IHevcDecoder, IBgraReuseTarget, IDispo
     internal static bool TryCreate(FFmpegLibrary library, IAirPlayLog? log, BgraBufferPool? buffers, out FFmpegHevcDecoder? decoder)
     {
         decoder = null;
-        if (!FFmpegDecodeSession.TryOpen(library, FFmpegLibrary.CodecHevc, "ffmpeg-hevc", log, buffers, out var session) || session is null)
+        if (!FFmpegDecodeSession.TryOpen(library, "hevc", FFmpegLibrary.HevcCodecId(library.AvcodecMajor), "ffmpeg-hevc", log, buffers, out var session) || session is null)
         {
             return false;
         }

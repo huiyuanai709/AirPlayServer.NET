@@ -16,7 +16,8 @@ namespace AirPlayServer.Host.Display;
 /// <summary>
 /// One mirror session. The picture is the latest BGRA frame, letterboxed into
 /// the client. Hover text is TapClock UIKit points when <c>--model</c> is set.
-/// Presses and releases are mapped and reported. They are not sent to the phone.
+/// Presses, captured drags, and releases are mapped and reported. Hover is not.
+/// They are not sent to the phone.
 /// </summary>
 internal sealed class MirrorWindow : Window, IMirrorSurface
 {
@@ -25,6 +26,7 @@ internal sealed class MirrorWindow : Window, IMirrorSurface
     private readonly int _tapClockScreenWidth;
     private readonly int _tapClockScreenHeight;
     private readonly Action<MirrorPointerGesture>? _reportPointer;
+    private readonly MirrorPointerDrag _drag = new();
     private readonly Panel _root;
     private readonly Image _image;
     private readonly Border _chip;
@@ -186,6 +188,7 @@ internal sealed class MirrorWindow : Window, IMirrorSurface
         _pointerX = MirrorViewMath.DevicePixels(point.X, scale);
         _pointerY = MirrorViewMath.DevicePixels(point.Y, scale);
         UpdateHover();
+        PublishMove(e);
     }
 
     private void OnPointerExited(object? sender, PointerEventArgs e)
@@ -200,8 +203,7 @@ internal sealed class MirrorWindow : Window, IMirrorSurface
 
     private void PublishPointer(PointerEventArgs e, bool pressed)
     {
-        var report = _reportPointer;
-        if (report is null)
+        if (_reportPointer is null)
         {
             return;
         }
@@ -212,24 +214,71 @@ internal sealed class MirrorWindow : Window, IMirrorSurface
             return;
         }
 
+        var scale = RenderScale();
+        var windowX = MirrorViewMath.DevicePixels(point.Position.X, scale);
+        var windowY = MirrorViewMath.DevicePixels(point.Position.Y, scale);
+        var at = DateTimeOffset.UtcNow;
         if (pressed)
         {
             e.Pointer.Capture(_root);
+            _drag.NoteDown(button, windowX, windowY, at);
         }
-        else if (Equals(e.Pointer.Captured, _root))
+        else
         {
-            e.Pointer.Capture(null);
+            // Any release drops capture, so the drag ends even if another button
+            // is still physically down. Hover after that must not emit moves.
+            if (Equals(e.Pointer.Captured, _root))
+            {
+                e.Pointer.Capture(null);
+            }
+
+            _drag.NoteUp(button);
+            _drag.Clear();
+        }
+
+        Report(MapGesture(pressed ? MirrorPointerPhase.Down : MirrorPointerPhase.Up, button, windowX, windowY, at));
+    }
+
+    private void PublishMove(PointerEventArgs e)
+    {
+        if (_reportPointer is null || _drag.HeldButton is not { } held)
+        {
+            return;
+        }
+
+        if (!Equals(e.Pointer.Captured, _root))
+        {
+            return;
+        }
+
+        var point = e.GetCurrentPoint(_root);
+        if (!ButtonIsPressed(point.Properties, held))
+        {
+            _drag.Clear();
+            return;
         }
 
         var scale = RenderScale();
         var windowX = MirrorViewMath.DevicePixels(point.Position.X, scale);
         var windowY = MirrorViewMath.DevicePixels(point.Position.Y, scale);
+        var at = DateTimeOffset.UtcNow;
+        var gesture = MapGesture(MirrorPointerPhase.Move, held, windowX, windowY, at);
+        if (!_drag.TryMove(windowX, windowY, at, gesture.OnContent, out _))
+        {
+            return;
+        }
+
+        Report(gesture);
+    }
+
+    private MirrorPointerGesture MapGesture(MirrorPointerPhase phase, MirrorPointerButton button, int windowX, int windowY, DateTimeOffset at)
+    {
         var client = ClientPixels();
         _frames.TryReadSize(out var frameWidth, out var frameHeight);
-        var gesture = MirrorClickMap.Map(
-            pressed ? MirrorPointerPhase.Down : MirrorPointerPhase.Up,
+        return MirrorClickMap.Map(
+            phase,
             button,
-            DateTimeOffset.UtcNow,
+            at,
             windowX,
             windowY,
             client.Width,
@@ -238,6 +287,16 @@ internal sealed class MirrorWindow : Window, IMirrorSurface
             frameHeight,
             _tapClockScreenWidth,
             _tapClockScreenHeight);
+    }
+
+    private void Report(MirrorPointerGesture gesture)
+    {
+        var report = _reportPointer;
+        if (report is null)
+        {
+            return;
+        }
+
         try
         {
             report(gesture);
@@ -247,6 +306,15 @@ internal sealed class MirrorWindow : Window, IMirrorSurface
             _log.Log(AirPlayLogLevel.Warning, "镜像点击没有发布: " + ex.Message + " The mirror click was not published: " + ex.Message);
         }
     }
+
+    private static bool ButtonIsPressed(PointerPointProperties properties, MirrorPointerButton button) => button switch
+    {
+        MirrorPointerButton.Right => properties.IsRightButtonPressed,
+        MirrorPointerButton.Middle => properties.IsMiddleButtonPressed,
+        MirrorPointerButton.X1 => properties.IsXButton1Pressed,
+        MirrorPointerButton.X2 => properties.IsXButton2Pressed,
+        _ => properties.IsLeftButtonPressed,
+    };
 
     private static bool TryButton(PointerUpdateKind kind, bool pressed, out MirrorPointerButton button)
     {

@@ -67,7 +67,7 @@ X-TapClock-Token: <共享密钥，可省略>
 
 通用 Webhook 另有连接地址和断开地址。正文是 `event`、`at`、`device`、`source_ip`、`session_id`、`reason`。`device` 和 `source_ip` 与 TapClock 相同。可选一个自定义头带共享密钥。
 
-镜像窗口的按下和抬起走另一份地址列表 `webhook_urls`（命令行 `--webhook`，可重复；配置页「点击地址」，每行一个）。启用 Webhook 之后才会 POST。连接和断开地址不会收到点击。事件名是 `mirror.click`，`phase` 是 `down` 或 `up`（没有合成的 click，订阅方自己配对）。字段：
+镜像窗口的按下、按住移动和抬起走另一份地址列表 `webhook_urls`（命令行 `--webhook`，可重复；配置页「点击地址」，每行一个）。启用 Webhook 之后才会 POST。连接和断开地址不会收到这些指针事件。事件名仍是 `mirror.click`（不另起一个 move 事件），`phase` 是 `down`、`move` 或 `up`（没有合成的 click，订阅方自己配对）。`down` 和 `up` 与以前相同，黑边也会发。`move` 只在某个鼠标键已被窗口捕获（按住）时跟着指针移动发送；悬停不发。`button` 是当前按住的那个键。点不在画面上（`on_content` 为 false，黑边或还没有帧）时不发 `move`。设备像素没变不重复发。按下之后第一次离开该像素会马上发一条，之后大约每 1/60 秒最多一条。字段与按下、抬起相同。`logical_x` / `logical_y` 只在命令行或配置给出了 `--model` 逻辑屏幕、并且点在画面上时出现；TapClock 应优先用这对逻辑点。`--screen` 只是向手机宣告的分辨率，不填逻辑坐标。字段：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -121,6 +121,8 @@ curl -sS -X POST http://127.0.0.1:9/mirror/click \
   -H 'Content-Type: application/json' \
   -d '{"event":"mirror.click","phase":"down","at":"2026-10-20T07:40:00.0000000+00:00","device":"客厅的 iPhone","button":"left","window_x":240,"window_y":400,"on_content":true,"content_x":120,"content_y":260,"content_width":480,"content_height":1040}'
 ```
+
+Pointer webhooks stay on `mirror.click`. `phase` is `down`, `move`, or `up`. `move` is posted only while a mouse button is captured, the point is on the picture (`on_content` true), and the device-pixel position changed. The first move after the press goes out immediately; later moves are capped at 60 Hz. Hover does not post. `button` is the captured button. Fields match press and release. `logical_x` / `logical_y` are present when `--model` sets a logical screen and the point is on the picture; that is the pair TapClock should prefer. `--screen` is only the advertised mirror size and does not fill logical coordinates. Nothing here is sent to the phone.
 
 `GET http://127.0.0.1:7099/api/status`：
 
@@ -324,7 +326,7 @@ int AirPlay_FairPlaySetup(const uint8_t* request, int requestLength,
 
 Windows 上 Media Foundation 把 Annex-B 访问单元变成 BGRA，写入 `FrameSlot`（只保留最新一帧）。同步硬件变换如果还能锁定 NV12、RGB32 或 ARGB32 缓冲就优先用它。变换列出 RGB 时，由 Media Foundation 做 YUV 转换，输出类型上写着解析出来的矩阵和范围。微软 H.264 解码器本身只出 NV12 这一类 YUV，那种帧在进程内转换：SPS 的 VUI 优先，其次是媒体类型上的矩阵和 nominal range，都没有时按 iPhone 镜像的 BT.709 全范围。硬件变换的输出如果是 DXGI 表面，或者只有异步硬件变换时，退回系统自带的软件解码器。HEVC 同样先走 Media Foundation。`CLSID_CMSH265DecoderMFT` 不在时改用 FFmpeg。Linux 上 H.264 和 HEVC 都只走 FFmpeg。没有画面时，访问单元仍然计数，但不会冒充成手机屏幕。Linux 上继续可以用 `--demo-frame` 检查导出。
 
-ui 构建默认打开 Avalonia 窗口，把最新一帧按比例放进客户区（比例不同时留黑边，不拉变形）。缩放是最近邻，和以前的 GDI 软件缩放同一套整数格子，alpha 写成不透明。`--no-window` 关掉它。精简构建没有这个窗口，接收和导出不变。鼠标悬停时，标题和左上角显示 TapClock 绝对屏幕坐标，和 TapClock 日志里的「屏幕坐标」用同一套整数除法：客户区上的点先换成解码帧像素（画面按比例居中，黑边和画面矩形之外不算），再 `screen = 帧像素 * --model 宽高 / 帧宽高`，X 和 Y 各算各的。例如 `--model iphone-15-pro-max` 是 430×932；480×1040 的帧上，像素 (323, 850) 读成 `TapClock 289, 761`。没写 `--model` 时，图像尺寸就是屏幕，标签退回 `像素 x, y`。悬停不读 `--screen`。窗口里的鼠标按下和抬起会按上面的 `mirror.click` 发给 `webhook_urls`，不发给手机，也不改 HID。Linux 窗口走 X11，运行时需要 `libX11`。macOS 走 Avalonia.Native。
+ui 构建默认打开 Avalonia 窗口，把最新一帧按比例放进客户区（比例不同时留黑边，不拉变形）。缩放是最近邻，和以前的 GDI 软件缩放同一套整数格子，alpha 写成不透明。`--no-window` 关掉它。精简构建没有这个窗口，接收和导出不变。鼠标悬停时，标题和左上角显示 TapClock 绝对屏幕坐标，和 TapClock 日志里的「屏幕坐标」用同一套整数除法：客户区上的点先换成解码帧像素（画面按比例居中，黑边和画面矩形之外不算），再 `screen = 帧像素 * --model 宽高 / 帧宽高`，X 和 Y 各算各的。例如 `--model iphone-15-pro-max` 是 430×932；480×1040 的帧上，像素 (323, 850) 读成 `TapClock 289, 761`。没写 `--model` 时，图像尺寸就是屏幕，标签退回 `像素 x, y`。悬停不读 `--screen`。窗口里的鼠标按下、按住时的移动和抬起会按上面的 `mirror.click` 发给 `webhook_urls`（`phase` 为 `down`、`move`、`up`），不发给手机，也不改 HID。悬停只更新读数。Linux 窗口走 X11，运行时需要 `libX11`。macOS 走 Avalonia.Native。
 
 TapClock 的点击留在它自己的主机 TCP `42123`（ATB/1）。坐标是板上的 HID 计数（AssistiveTouch），不是这台电脑窗口里的像素。点击对齐和镜像广告是两套尺寸，写在不同的参数上：
 

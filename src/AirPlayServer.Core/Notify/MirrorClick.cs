@@ -7,6 +7,7 @@ public enum MirrorPointerPhase
 {
     Down = 0,
     Up = 1,
+    Move = 2,
 }
 
 public enum MirrorPointerButton
@@ -19,12 +20,14 @@ public enum MirrorPointerButton
 }
 
 /// <summary>
-/// One press or release on a mirror window. Window coordinates are device
-/// pixels of the client, origin at the top left, Y down. Content coordinates
-/// are decoded-frame pixels after letterbox. Bars are not content.
+/// One press, drag sample, or release on a mirror window. Window coordinates
+/// are device pixels of the client, origin at the top left, Y down. Content
+/// coordinates are decoded-frame pixels after letterbox. Bars are not content.
 /// Logical coordinates exist only when a logical screen size was configured
-/// and the point is on the picture: <c>logical = content * logicalSize / frameSize</c>,
-/// integer truncation, each axis on its own. This event is not sent to the phone.
+/// (<c>--model</c>) and the point is on the picture:
+/// <c>logical = content * logicalSize / frameSize</c>, integer truncation, each
+/// axis on its own. <c>--screen</c> does not fill them. This event is not sent
+/// to the phone.
 /// </summary>
 public sealed class MirrorPointerGesture
 {
@@ -125,6 +128,76 @@ public static class MirrorClickMap
             LogicalWidth = mappedLogicalWidth,
             LogicalHeight = mappedLogicalHeight,
         };
+    }
+}
+
+/// <summary>
+/// Which pointer samples become <see cref="MirrorPointerPhase.Move"/>.
+/// Hover never qualifies: a move is accepted only after <see cref="NoteDown"/>
+/// and before the matching <see cref="NoteUp"/> or <see cref="Clear"/>.
+/// Unchanged device pixels are dropped. The first changed point after a press
+/// is accepted immediately; later points wait <see cref="MinInterval"/> (60 Hz).
+/// Bars (on-content false) are not moves and do not consume that interval.
+/// The returned button is the one still held.
+/// </summary>
+public sealed class MirrorPointerDrag
+{
+    /// <summary>Minimum gap between move samples. One second divided by 60.</summary>
+    public static readonly TimeSpan MinInterval = TimeSpan.FromTicks(TimeSpan.TicksPerSecond / 60);
+
+    private MirrorPointerButton? _button;
+    private int _lastX;
+    private int _lastY;
+    private DateTimeOffset _lastEmit;
+    private bool _movedSinceDown;
+
+    public MirrorPointerButton? HeldButton => _button;
+
+    public void NoteDown(MirrorPointerButton button, int windowX, int windowY, DateTimeOffset at)
+    {
+        _button = button;
+        _lastX = windowX;
+        _lastY = windowY;
+        _lastEmit = at;
+        _movedSinceDown = false;
+    }
+
+    /// <summary>Ends the drag when this button is the one that is held.</summary>
+    public void NoteUp(MirrorPointerButton button)
+    {
+        if (_button == button)
+        {
+            _button = null;
+        }
+    }
+
+    /// <summary>Ends the drag when capture is lost or any button release drops it.</summary>
+    public void Clear() => _button = null;
+
+    public bool TryMove(int windowX, int windowY, DateTimeOffset at, bool onContent, out MirrorPointerButton button)
+    {
+        button = default;
+        if (_button is not { } held || !onContent)
+        {
+            return false;
+        }
+
+        if (windowX == _lastX && windowY == _lastY)
+        {
+            return false;
+        }
+
+        if (_movedSinceDown && at - _lastEmit < MinInterval)
+        {
+            return false;
+        }
+
+        _movedSinceDown = true;
+        _lastX = windowX;
+        _lastY = windowY;
+        _lastEmit = at;
+        button = held;
+        return true;
     }
 }
 

@@ -19,6 +19,16 @@ public sealed class MirrorDiscontinuityTests
     }
 
     [Fact]
+    public void Startup_misses_are_not_a_pause()
+    {
+        Assert.False(MirrorDiscontinuity.MissesRequireSync(picturePublished: false, consecutiveMisses: 1));
+        Assert.False(MirrorDiscontinuity.MissesRequireSync(picturePublished: false, consecutiveMisses: 2));
+        Assert.False(MirrorDiscontinuity.MissesRequireSync(picturePublished: false, consecutiveMisses: 8));
+        Assert.False(MirrorDiscontinuity.MissesRequireSync(picturePublished: true, consecutiveMisses: 1));
+        Assert.True(MirrorDiscontinuity.MissesRequireSync(picturePublished: true, consecutiveMisses: 2));
+    }
+
+    [Fact]
     public void Sync_point_is_the_header_flag_or_an_irap_nal()
     {
         Assert.True(MirrorDiscontinuity.IsSync(hevc: false, keyFrameFlag: true, [0, 0, 0, 1, 0x41]));

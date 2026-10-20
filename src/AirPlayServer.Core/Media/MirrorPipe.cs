@@ -73,6 +73,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
     private int _consecutiveBadAvcc;
     private bool _prependParameterSets;
     private bool _awaitSync;
+    private bool _hasPicture;
     private bool _hevcRejected;
     private bool _senderPaused;
     private bool _discardHeld;
@@ -399,13 +400,18 @@ internal sealed class MirrorPipe : IAsyncDisposable
                     _streamIdKnown = false;
                     _hasArmedStream = false;
                     _senderPaused = false;
+                    _awaitSync = false;
                     _prependParameterSets = false;
                     _hevcRejected = false;
                     ClearCodecLocked();
                     ClearStreamHealthLocked();
                 }
 
-                ResetDecodersLocked();
+                // Video teardown leaves an empty picture buffer while the RTSP
+                // session stays up, so the next slices wait for an IDR. A full
+                // teardown is the end of the session. The next connect is a new
+                // mirror and must not inherit that wait.
+                ResetDecodersLocked(waitForSync: kind == TeardownKind.VideoOnly);
             }
 
             if (kind == TeardownKind.VideoOnly)
@@ -564,7 +570,12 @@ internal sealed class MirrorPipe : IAsyncDisposable
             _hasArmedStream = false;
             _streamIdKnown = false;
             ClearStreamHealthLocked();
-            ResetDecodersLocked();
+            // The first session SETUP has never published a frame. Waiting for
+            // a keyframe here drops the opening access units: the software
+            // decoder holds the IDR, the next unit is a second miss, and the
+            // phone tears the mirror down. A later SETUP that replaces a live
+            // picture, or one that follows a video teardown, still waits.
+            ResetDecodersLocked(waitForSync: _awaitSync || _hasPicture);
             if (contentKey is null)
             {
                 _decryptor.SetMaterial([], secret, keepStoredSecret: true);
@@ -1079,10 +1090,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
             return;
         }
 
-        _awaitSync = true;
         _prependParameterSets = true;
-        _consecutiveDecodeMisses = 0;
-        ResetDecodersLocked();
+        ResetDecodersLocked(waitForSync: true);
         _log.Log(
             AirPlayLogLevel.Information,
             "镜像要等下一个关键帧再解码，锁屏前的参考帧已丢掉。Waiting for the next keyframe before decoding. Pre-lock reference frames were dropped.");
@@ -1116,15 +1125,22 @@ internal sealed class MirrorPipe : IAsyncDisposable
     private void NoteDecodeMissLocked()
     {
         // One access unit with no picture is normal decoder latency. Two misses
-        // means the DPB no longer matches the phone. Rebuild and wait for an
-        // IDR instead of feeding every later P-frame to FFmpeg (that is the
-        // "Could not find ref with POC" flood, and DecodedFrames stops moving).
+        // after a picture has already been published means the references no
+        // longer match the phone. Rebuild and wait for an IDR instead of feeding
+        // every later P-frame to FFmpeg (that is the "Could not find ref with POC"
+        // flood, and DecodedFrames stops moving).
+        // Misses before the first picture are not that break. The software
+        // transform holds the opening IDR until a later access unit, and the
+        // phone may send SEI first. Resetting there discards the IDR, every
+        // following slice is dropped, and the phone tears the session down.
         _consecutiveDecodeMisses++;
-        if (_consecutiveDecodeMisses >= HardwareDecodeStall.MissesWithNoPicture)
+        if (!MirrorDiscontinuity.MissesRequireSync(_hasPicture, _consecutiveDecodeMisses))
         {
-            BeginDiscontinuityLocked();
-            LogDecodeMissLocked();
+            return;
         }
+
+        BeginDiscontinuityLocked();
+        LogDecodeMissLocked();
     }
 
     private void LogDecodeMissLocked()
@@ -1300,6 +1316,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
     private void NoteDecoded(int width, int height)
     {
+        _hasPicture = true;
         _consecutiveDecodeMisses = 0;
         Activity.DecodeFrame();
         if (Interlocked.Exchange(ref _loggedDecoded, 1) == 0)
@@ -1371,7 +1388,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 _prependParameterSets = true;
             }
 
-            ResetDecodersLocked();
+            ResetDecodersLocked(waitForSync: true);
         }
         else
         {
@@ -1558,13 +1575,22 @@ internal sealed class MirrorPipe : IAsyncDisposable
         _codec = MirrorVideoCodec.Unknown;
     }
 
-    private void ResetDecodersLocked()
+    private void ResetDecodersLocked(bool waitForSync)
     {
         // The decoded picture buffer is empty after this. A following P-frame
         // keeps the window on the last picture (Media Foundation) or logs
-        // "Could not find ref with POC" (FFmpeg HEVC). The next IDR or IRAP
-        // is the first unit that may be decoded.
-        _awaitSync = true;
+        // "Could not find ref with POC" (FFmpeg HEVC) when the phone had already
+        // been sending a GOP. Callers that just left a pause, or tore the video
+        // stream down, pass waitForSync so those slices are dropped until the
+        // next IDR. A brand-new session does not: the opening IDR has to reach
+        // the decoder, and the next access unit is what pulls that picture out
+        // of the software transform.
+        if (waitForSync)
+        {
+            _awaitSync = true;
+        }
+
+        _hasPicture = false;
         _consecutiveDecodeMisses = 0;
         _decoder.Reset();
         _hevc?.Reset();

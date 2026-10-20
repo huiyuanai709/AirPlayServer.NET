@@ -213,7 +213,8 @@ public sealed class MirrorResumeTests
         secret[9] = 1;
         const ulong streamId = 33;
         var decoder = new SpyDecoder();
-        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, NullAirPlayLog.Instance);
+        var log = new CountingLog();
+        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, log);
         mirror.ArmForStream(lab, secret, streamId);
 
         var idr = AccessUnit(0x65);
@@ -227,6 +228,7 @@ public sealed class MirrorResumeTests
             Packet(0, 0x10, 0, Encrypt(lab, secret, streamId, idr, skip: 0)),
             Packet(0, 0, 0, Encrypt(lab, secret, streamId, delta, skip: idr.Length)));
         var resets = decoder.Resets;
+        Assert.Equal(0, log.Count("下一个关键帧"));
         var skip = idr.Length + delta.Length;
 
         await SendAsync(
@@ -237,6 +239,7 @@ public sealed class MirrorResumeTests
             Packet(0, 0, 0, Encrypt(lab, secret, streamId, after, skip: skip)));
         Assert.Equal(2, decoder.Snapshot().Length);
         Assert.Equal(resets + 1, decoder.Resets);
+        Assert.Equal(1, log.Count("下一个关键帧"));
         Assert.Equal(0, mirror.Activity.RejectedPayloads);
 
         skip += after.Length;
@@ -324,37 +327,112 @@ public sealed class MirrorResumeTests
     }
 
     [Fact]
-    public async Task Two_decode_misses_stop_feeding_until_the_next_idr()
+    public async Task Fresh_session_feeds_slices_while_the_decoder_holds_the_first_frames()
+    {
+        var lab = new byte[16];
+        lab[15] = 4;
+        var decoder = new GatedDecoder { LeadFailures = 2 };
+        var log = new CountingLog();
+        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, log);
+        using var session = FinishPairing(out var secret);
+        const ulong streamId = 81;
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", SessionBody()), session, null).Status);
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", StreamBody(streamId)), session, null).Status);
+        Assert.Equal(1, decoder.Resets);
+
+        // 0x16 is the ordinary SPS/PPS packet on a fresh connect, not a resume.
+        // The software decoder then holds the first access units. Those misses
+        // must not arm the post-pause wait or the following slice never decodes.
+        var first = AccessUnit(0x41);
+        var second = AccessUnit(0x21);
+        var third = AccessUnit(0x01);
+        await SendAsync(
+            mirror,
+            () => decoder.Decodes >= 3 && mirror.Activity.DecodedFrames == 1,
+            CodecPacket(0x16),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, first, skip: 0)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, second, skip: first.Length)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, third, skip: first.Length + second.Length)));
+        Assert.Equal(3, decoder.Decodes);
+        Assert.Equal(1, decoder.Resets);
+        Assert.Equal(1, mirror.Activity.DecodedFrames);
+        Assert.Equal(0, log.Count("下一个关键帧"));
+        Assert.Equal(0, log.Count("did not return a picture"));
+    }
+
+    [Fact]
+    public async Task Full_teardown_starts_the_next_session_without_waiting_for_a_keyframe()
+    {
+        var lab = new byte[16];
+        lab[14] = 9;
+        var decoder = new SpyDecoder();
+        var log = new CountingLog();
+        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, log);
+        using var session = FinishPairing(out var secret);
+        const ulong firstId = 70;
+        const ulong secondId = 71;
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", SessionBody()), session, null).Status);
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", StreamBody(firstId)), session, null).Status);
+        await SendAsync(
+            mirror,
+            () => mirror.Activity.DecodedFrames == 1,
+            CodecPacket(0x16),
+            Packet(0, 0x10, 0, Encrypt(lab, secret, firstId, AccessUnit(0x65), skip: 0)));
+        Assert.Equal(0, log.Count("下一个关键帧"));
+
+        Assert.Equal(200, mirror.HandleMedia(Request("TEARDOWN", []), session, null).Status);
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", SessionBody()), session, null).Status);
+        Assert.Equal(200, mirror.HandleMedia(Request("SETUP", StreamBody(secondId)), session, null).Status);
+        var resets = decoder.Resets;
+        var slice = AccessUnit(0x41);
+        await SendAsync(
+            mirror,
+            () => decoder.Snapshot().Length >= 2,
+            CodecPacket(0x16),
+            Packet(0, 0, 0, Encrypt(lab, secret, secondId, slice, skip: 0)));
+        Assert.Equal(new byte[] { 0, 0, 0, 1, 0x41 }, decoder.Snapshot()[^1]);
+        Assert.Equal(resets, decoder.Resets);
+        Assert.Equal(0, log.Count("下一个关键帧"));
+    }
+
+    [Fact]
+    public async Task Misses_after_a_picture_wait_for_the_next_idr()
     {
         var lab = new byte[16];
         lab[12] = 2;
         var secret = new byte[32];
         secret[13] = 9;
         const ulong streamId = 36;
-        var decoder = new SilentDecoder();
+        var decoder = new GatedDecoder { PicturesBeforeSilence = 1 };
         var log = new CountingLog();
         await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, log);
         mirror.ArmForStream(lab, secret, streamId);
 
+        var idr = AccessUnit(0x65);
         var first = AccessUnit(0x41);
         var second = AccessUnit(0x21);
         var third = AccessUnit(0x01);
-        var idr = AccessUnit(0x65);
+        var again = AccessUnit(0x65);
         await SendAsync(
             mirror,
-            () => mirror.Activity.AcceptedAccessUnits >= 3 && decoder.Resets >= 1,
+            () => mirror.Activity.AcceptedAccessUnits >= 4 && decoder.Decodes >= 3 && decoder.Resets >= 1,
             CodecPacket(0),
-            Packet(0, 0, 0, Encrypt(lab, secret, streamId, first, skip: 0)),
-            Packet(0, 0, 0, Encrypt(lab, secret, streamId, second, skip: first.Length)),
-            Packet(0, 0, 0, Encrypt(lab, secret, streamId, third, skip: first.Length + second.Length)));
-        Assert.Equal(2, decoder.Decodes);
+            Packet(0, 0x10, 0, Encrypt(lab, secret, streamId, idr, skip: 0)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, first, skip: idr.Length)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, second, skip: idr.Length + first.Length)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, third, skip: idr.Length + first.Length + second.Length)));
+        Assert.Equal(3, decoder.Decodes);
+        Assert.Equal(1, decoder.Resets);
+        Assert.Equal(1, log.Count("下一个关键帧"));
         Assert.Equal(1, log.Count("did not return a picture"));
 
         await SendAsync(
             mirror,
-            () => decoder.Decodes >= 3,
-            Packet(0, 0, 0, Encrypt(lab, secret, streamId, idr, skip: first.Length + second.Length + third.Length)));
-        Assert.Equal(3, decoder.Decodes);
+            () => decoder.Decodes >= 4,
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, again, skip: idr.Length + first.Length + second.Length + third.Length)));
+        Assert.Equal(4, decoder.Decodes);
+        Assert.Equal(1, decoder.Resets);
+        Assert.Equal(1, log.Count("下一个关键帧"));
         Assert.Equal(1, log.Count("did not return a picture"));
     }
 
@@ -803,11 +881,17 @@ public sealed class MirrorResumeTests
         return count;
     }
 
-    private sealed class SilentDecoder : IH264Decoder
+    private sealed class GatedDecoder : IH264Decoder
     {
         private int _decodes;
         private int _resets;
         private int _configures;
+        private int _failures;
+        private int _pictures;
+
+        public int LeadFailures { get; init; }
+
+        public int PicturesBeforeSilence { get; init; } = int.MaxValue;
 
         public int Decodes => Volatile.Read(ref _decodes);
 
@@ -815,7 +899,7 @@ public sealed class MirrorResumeTests
 
         public bool IsAvailable => true;
 
-        public string Name => "silent";
+        public string Name => "gated";
 
         public void Configure(ReadOnlySpan<byte> sequenceParameterSet, ReadOnlySpan<byte> pictureParameterSet)
             => Interlocked.Increment(ref _configures);
@@ -833,7 +917,20 @@ public sealed class MirrorResumeTests
             }
 
             Interlocked.Increment(ref _decodes);
-            return false;
+            if (Volatile.Read(ref _failures) < LeadFailures)
+            {
+                Interlocked.Increment(ref _failures);
+                return false;
+            }
+
+            if (Volatile.Read(ref _pictures) >= PicturesBeforeSilence)
+            {
+                return false;
+            }
+
+            Interlocked.Increment(ref _pictures);
+            frame = new DecodedFrame(2, 2, new byte[16], 8);
+            return true;
         }
     }
 

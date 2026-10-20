@@ -116,46 +116,91 @@ public sealed class DiscoveryTests
     }
 
     [Fact]
-    public void Hotspot_flap_does_not_request_another_announcement()
+    public void Unchanged_hotspot_address_does_not_request_another_announcement()
     {
-        AdvertisementCandidate[] withHotspot =
-        [
-            new(
-                "Local Area Connection* 2",
-                "Microsoft Wi-Fi Direct Virtual Adapter",
-                NetworkInterfaceType.Wireless80211,
-                OperationalStatus.Up,
-                IPAddress.Parse("192.168.137.1"),
-                HasGateway: true,
-                PrefixLength: 24),
-            new(
-                "Wi-Fi",
-                "Intel(R) Wi-Fi 6 AX201",
-                NetworkInterfaceType.Wireless80211,
-                OperationalStatus.Up,
-                IPAddress.Parse("172.16.88.168"),
-                HasGateway: true,
-                PrefixLength: 24),
-        ];
-        AdvertisementCandidate[] hotspotMoved =
-        [
-            withHotspot[1],
-            new(
-                "Local Area Connection* 2",
-                "Microsoft Wi-Fi Direct Virtual Adapter",
-                NetworkInterfaceType.Wireless80211,
-                OperationalStatus.Up,
-                IPAddress.Parse("192.168.137.2"),
-                HasGateway: true,
-                PrefixLength: 24),
-        ];
+        var withHotspot = WifiAndHotspot(hotspot: "192.168.137.1");
+        var same = WifiAndHotspot(hotspot: "192.168.137.1");
+        var moved = WifiAndHotspot(hotspot: "192.168.137.2");
 
         var before = LocalNetwork.SelectAdvertisedNics(IPAddress.Any, withHotspot);
-        var after = LocalNetwork.SelectAdvertisedNics(IPAddress.Any, hotspotMoved);
+        var afterSame = LocalNetwork.SelectAdvertisedNics(IPAddress.Any, same);
+        var afterMoved = LocalNetwork.SelectAdvertisedNics(IPAddress.Any, moved);
 
-        Assert.Single(before);
+        Assert.Equal(2, before.Count);
         Assert.Equal(IPAddress.Parse("172.16.88.168"), before[0].Address);
-        Assert.False(MdnsCadence.ShouldRefreshAnnouncement(before, after));
+        Assert.Equal(IPAddress.Parse("192.168.137.1"), before[1].Address);
+        Assert.False(MdnsCadence.ShouldRefreshAnnouncement(before, afterSame));
+        Assert.True(MdnsCadence.ShouldRefreshAnnouncement(before, afterMoved));
+        Assert.Equal(IPAddress.Parse("172.16.88.168"), afterMoved[0].Address);
+        Assert.Equal(IPAddress.Parse("192.168.137.2"), afterMoved[1].Address);
+    }
+
+    [Fact]
+    public void Wifi_and_hotspot_are_separate_packets_and_answers()
+    {
+        var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any, WifiAndHotspot(hotspot: "192.168.137.1", wifiIndex: 12, hotspotIndex: 4));
+        var wifi = IPAddress.Parse("172.16.88.168");
+        var hotspot = IPAddress.Parse("192.168.137.1");
+        var wifiClient = IPAddress.Parse("172.16.88.20");
+        var hotspotClient = IPAddress.Parse("192.168.137.20");
+
+        Assert.Equal(2, nics.Count);
+        Assert.Equal(wifi, nics[0].Address);
+        Assert.Equal(hotspot, nics[1].Address);
+
+        var wifiPacket = MdnsMessages.BuildAnnouncement(Sample(), nics[0].Address);
+        var hotspotPacket = MdnsMessages.BuildAnnouncement(Sample(), nics[1].Address);
+        AssertOnlyAddress(wifiPacket, [172, 16, 88, 168], [192, 168, 137, 1]);
+        AssertOnlyAddress(hotspotPacket, [192, 168, 137, 1], [172, 16, 88, 168]);
+
+        var wifiArrival = LocalNetwork.FindByInterface(12, nics);
+        var hotspotArrival = LocalNetwork.FindByInterface(4, nics);
+        Assert.Equal(wifi, wifiArrival?.Address);
+        Assert.Equal(hotspot, hotspotArrival?.Address);
+        Assert.Equal(wifi, LocalNetwork.AnswerAddress(wifiClient, nics, wifiArrival, boundAddress: null));
+        Assert.Equal(hotspot, LocalNetwork.AnswerAddress(hotspotClient, nics, hotspotArrival, boundAddress: null));
+        Assert.Equal(wifi, LocalNetwork.AnswerAddress(hotspotClient, nics, arrival: null, wifi));
+        Assert.Equal(hotspot, LocalNetwork.AnswerAddress(wifiClient, nics, arrival: null, hotspot));
+        Assert.Equal(wifi, LocalNetwork.AnswerAddress(wifiClient, nics, arrival: null, boundAddress: null));
+        Assert.Equal(hotspot, LocalNetwork.AnswerAddress(hotspotClient, nics, arrival: null, boundAddress: null));
+
+        var query = MdnsMessages.BuildQuery(0x2222, "_airplay");
+        var response = new byte[2048];
+        Assert.True(MdnsMessages.TryBuildQueryResponse(
+            query,
+            Sample(),
+            response,
+            out var hotspotWritten,
+            out _,
+            LocalNetwork.AnswerAddress(hotspotClient, nics, hotspotArrival, boundAddress: null)));
+        var hotspotBody = response.AsSpan(0, hotspotWritten).ToArray();
+        Assert.Equal(4, MdnsMessages.CountWalkableRecords(hotspotBody));
+        Assert.True(ContainsSequence(hotspotBody, [192, 168, 137, 1]));
+        Assert.False(ContainsSequence(hotspotBody, [172, 16, 88, 168]));
+        Assert.False(ContainsSequence(hotspotBody, [10, 1, 2, 3]));
+
+        Assert.True(MdnsMessages.TryBuildQueryResponse(
+            query,
+            Sample(),
+            response,
+            out var wifiWritten,
+            out _,
+            LocalNetwork.AnswerAddress(wifiClient, nics, wifiArrival, boundAddress: null)));
+        var wifiBody = response.AsSpan(0, wifiWritten).ToArray();
+        Assert.Equal(4, MdnsMessages.CountWalkableRecords(wifiBody));
+        Assert.True(ContainsSequence(wifiBody, [172, 16, 88, 168]));
+        Assert.False(ContainsSequence(wifiBody, [192, 168, 137, 1]));
+        Assert.False(ContainsSequence(wifiBody, [10, 1, 2, 3]));
+
+        var onHotspot = LocalNetwork.PlanReply(quBit: true, remotePort: 5353, queryWasMulticast: true, hotspotClient, nics, hotspotArrival);
+        Assert.Equal("qu", onHotspot.Reason);
+        Assert.True(onHotspot.SendUnicast);
+        Assert.False(onHotspot.SendMulticast);
+
+        var overlaid = LocalNetwork.PlanReply(quBit: true, remotePort: 5353, queryWasMulticast: true, IPAddress.Parse("172.16.93.211"), nics, wifiArrival);
+        Assert.Equal("qu-overlaid", overlaid.Reason);
+        Assert.False(overlaid.SendUnicast);
+        Assert.True(overlaid.SendMulticast);
     }
 
     [Fact]
@@ -325,6 +370,37 @@ public sealed class DiscoveryTests
         Assert.InRange(Encoding.UTF8.GetByteCount(instance), 1, 50);
         Assert.Equal("02:11:22:33:44:55", ReceiverNames.FormatDeviceId([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]));
     }
+
+    private static void AssertOnlyAddress(byte[] packet, byte[] present, byte[] absent)
+    {
+        Assert.Equal(7, MdnsMessages.CountWalkableRecords(packet));
+        Assert.True(ContainsSequence(packet, present));
+        Assert.False(ContainsSequence(packet, absent));
+        Assert.False(ContainsSequence(packet, [10, 1, 2, 3]));
+    }
+
+    private static AdvertisementCandidate[] WifiAndHotspot(string hotspot, int wifiIndex = 12, int hotspotIndex = 4)
+        =>
+        [
+            new(
+                "Local Area Connection* 2",
+                "Microsoft Wi-Fi Direct Virtual Adapter",
+                NetworkInterfaceType.Wireless80211,
+                OperationalStatus.Up,
+                IPAddress.Parse(hotspot),
+                HasGateway: true,
+                PrefixLength: 24,
+                InterfaceIndex: hotspotIndex),
+            new(
+                "Wi-Fi",
+                "Intel(R) Wi-Fi 6 AX201",
+                NetworkInterfaceType.Wireless80211,
+                OperationalStatus.Up,
+                IPAddress.Parse("172.16.88.168"),
+                HasGateway: true,
+                PrefixLength: 24,
+                InterfaceIndex: wifiIndex),
+        ];
 
     private static bool ContainsSequence(byte[] haystack, byte[] needle)
     {

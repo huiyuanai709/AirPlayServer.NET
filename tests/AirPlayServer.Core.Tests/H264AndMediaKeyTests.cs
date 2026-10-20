@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Text;
 using AirPlayServer.Core;
 using AirPlayServer.Core.Crypto;
@@ -267,40 +268,88 @@ public sealed class H264AndMediaKeyTests
         try
         {
             var library = CompilePlugin(compiler, directory);
-            var content = new byte[16];
-            content[2] = 0x5A;
-            var ekey = new byte[72];
-            content.CopyTo(ekey.AsSpan(56));
-            await using var receiver = await StartReceiverAsync(null, null, library);
-            using var client = new TcpClient();
-            await client.ConnectAsync(IPAddress.Loopback, receiver.AirPlayEndPoint.Port);
-            await using var conversation = new HttpConversation(client.GetStream());
-            await PairAsync(conversation);
-            var fairPlay = await conversation.ExchangeAsync("POST /fp-setup HTTP/1.1", [9]);
-            Assert.Equal(200, fairPlay.Status);
-            Assert.Equal(new byte[] { 0xA1, 0xB2, 0xC3, 0xD4 }, fairPlay.Body);
-            await SetupMirrorAsync(conversation, ekey);
-            Assert.True(receiver.Mirror.MediaKeysReady);
+            // Returns only after the receiver dispose has called NativeLibrary.Free.
+            // A separate method lets the collected delegates drop before this frame
+            // tries to delete the DLL they were created from.
+            RunNativePlugin(library);
+            CollectAbandonedPlugin();
         }
         finally
         {
-            // Windows keeps the DLL mapped for a moment after NativeLibrary.Free.
-            // One delete then fails the whole job with "being used by another process".
-            for (var attempt = 0; ; attempt++)
-            {
-                try
-                {
-                    if (Directory.Exists(directory))
-                    {
-                        Directory.Delete(directory, recursive: true);
-                    }
+            DeletePluginDirectory(directory);
+        }
+    }
 
-                    break;
-                }
-                catch (Exception ex) when (attempt < 20 && ex is IOException or UnauthorizedAccessException)
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void RunNativePlugin(string library)
+        => ExerciseNativePluginAsync(library).GetAwaiter().GetResult();
+
+    private static async Task ExerciseNativePluginAsync(string library)
+    {
+        var content = new byte[16];
+        content[2] = 0x5A;
+        var ekey = new byte[72];
+        content.CopyTo(ekey.AsSpan(56));
+        await using var receiver = await StartReceiverAsync(null, null, library);
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, receiver.AirPlayEndPoint.Port);
+        await using var conversation = new HttpConversation(client.GetStream());
+        await PairAsync(conversation);
+        var fairPlay = await conversation.ExchangeAsync("POST /fp-setup HTTP/1.1", [9]);
+        Assert.Equal(200, fairPlay.Status);
+        Assert.Equal(new byte[] { 0xA1, 0xB2, 0xC3, 0xD4 }, fairPlay.Body);
+        await SetupMirrorAsync(conversation, ekey);
+        Assert.True(receiver.Mirror.MediaKeysReady);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void CollectAbandonedPlugin()
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+    }
+
+    private static void DeletePluginDirectory(string directory)
+    {
+        // Windows can keep airplay_plugin.dll mapped after NativeLibrary.Free
+        // until the delegates are collected, and Defender can hold the file
+        // longer than a short sleep. Retry with a collect. If it is still
+        // mapped, leave this unique temp directory instead of failing the run.
+        var giveUp = OperatingSystem.IsWindows();
+        var deadline = Environment.TickCount64 + (giveUp ? 8000 : 2000);
+        var pause = 50;
+        while (true)
+        {
+            try
+            {
+                if (Directory.Exists(directory))
                 {
-                    Thread.Sleep(100);
+                    Directory.Delete(directory, recursive: true);
                 }
+
+                return;
+            }
+            catch (IOException) when (Environment.TickCount64 < deadline)
+            {
+            }
+            catch (UnauthorizedAccessException) when (Environment.TickCount64 < deadline)
+            {
+            }
+            catch (IOException) when (giveUp)
+            {
+                return;
+            }
+            catch (UnauthorizedAccessException) when (giveUp)
+            {
+                return;
+            }
+
+            CollectAbandonedPlugin();
+            Thread.Sleep(pause);
+            if (pause < 400)
+            {
+                pause *= 2;
             }
         }
     }

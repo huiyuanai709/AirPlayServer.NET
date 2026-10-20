@@ -27,9 +27,15 @@ internal static class LocalNetwork
         "Teredo",
         "isatap",
         "6to4",
-        // Windows Mobile Hotspot, ICS, and Wi-Fi Direct. The asterisk is part of
-        // the adapter name ("Local Area Connection* 2"); a normal
-        // "Local Area Connection" has no asterisk and is still eligible.
+    ];
+
+    // Windows Mobile Hotspot, ICS, and Wi-Fi Direct. These are real client
+    // networks, so they are advertised on their own NIC. They are not virtual
+    // adapters to drop, and they are not merged into a LAN announcement.
+    // The asterisk is part of the adapter name ("Local Area Connection* 2");
+    // a normal "Local Area Connection" has no asterisk and stays a LAN.
+    private static readonly string[] HotspotInterfaceMarkers =
+    [
         "Local Area Connection*",
         "本地连接*",
         "本地连接＊",
@@ -64,11 +70,11 @@ internal static class LocalNetwork
     /// <summary>
     /// Every IPv4 the announcer should publish. An explicit unicast listen address
     /// stays a single entry. <see cref="IPAddress.Any"/> returns each up, non-virtual
-    /// RFC1918 address, gateway Wi-Fi and Ethernet first. Windows Mobile Hotspot,
-    /// ICS, and Wi-Fi Direct stay out of this list: a second A record for
-    /// <c>192.168.137.1</c> leaves the RTSP session up while the picture waits for
-    /// a keyframe. Virtual, hotspot, and link-local addresses are used only when
-    /// nothing else is up.
+    /// RFC1918 address, gateway Wi-Fi and Ethernet first, then each up Windows
+    /// Mobile Hotspot, ICS, or Wi-Fi Direct adapter. The announcer sends one
+    /// packet per entry and that packet names only that NIC, so
+    /// <c>192.168.137.1</c> is not a second A record in a LAN packet. Virtual and
+    /// link-local addresses are used only when nothing else is up.
     /// </summary>
     internal static IReadOnlyList<AdvertisedNic> SelectAdvertisedNics(
         IPAddress listenAddress,
@@ -133,13 +139,16 @@ internal static class LocalNetwork
 
     internal static IReadOnlyList<AdvertisedNic> ChooseReachableNics(IReadOnlyList<AdvertisementCandidate> candidates)
     {
-        // Gateway LANs first, then any other real RFC1918 NIC. Stopping at the
-        // first gateway (v0.1.21) dropped a second office subnet, so a phone on
-        // that subnet never saw an on-link address. Hotspot and ICS never enter
-        // these lists; they are not a second real LAN.
+        // Gateway LANs first, then any other real RFC1918 NIC, then each up
+        // hotspot. Stopping at the first gateway (v0.1.21) dropped a second
+        // office subnet. Skipping the hotspot whenever a LAN was up (v0.1.22)
+        // dropped phones on the PC Mobile Hotspot. Hotspot stays its own entry
+        // so a LAN packet never lists 192.168.137.1 and a hotspot packet never
+        // lists a LAN address. Hyper-V and other virtual NICs stay out.
         var preferred = new List<AdvertisedNic>();
         var otherLan = new List<AdvertisedNic>();
         var other = new List<AdvertisedNic>();
+        var hotspots = new List<AdvertisedNic>();
         AdvertisedNic? fallback = null;
         var seen = new HashSet<IPAddress>();
 
@@ -157,7 +166,18 @@ internal static class LocalNetwork
 
             var nic = new AdvertisedNic(candidate.Address, candidate.PrefixLength, candidate.Name, candidate.InterfaceIndex);
             fallback ??= nic;
-            if (IsIpv4LinkLocal(candidate.Address) || IsVirtualOrTunnel(candidate) || IsWindowsIcsSubnet(candidate.Address))
+            if (IsIpv4LinkLocal(candidate.Address))
+            {
+                continue;
+            }
+
+            if (IsHotspotAdapter(candidate))
+            {
+                hotspots.Add(nic);
+                continue;
+            }
+
+            if (IsVirtualOrTunnel(candidate))
             {
                 continue;
             }
@@ -181,15 +201,29 @@ internal static class LocalNetwork
 
         if (preferred.Count > 0 || otherLan.Count > 0)
         {
-            var lans = new List<AdvertisedNic>(preferred.Count + otherLan.Count);
+            var lans = new List<AdvertisedNic>(preferred.Count + otherLan.Count + hotspots.Count);
             lans.AddRange(preferred);
             lans.AddRange(otherLan);
+            lans.AddRange(hotspots);
             return lans;
         }
 
         if (other.Count > 0)
         {
-            return other;
+            if (hotspots.Count == 0)
+            {
+                return other;
+            }
+
+            var withHotspot = new List<AdvertisedNic>(other.Count + hotspots.Count);
+            withHotspot.AddRange(other);
+            withHotspot.AddRange(hotspots);
+            return withHotspot;
+        }
+
+        if (hotspots.Count > 0)
+        {
+            return hotspots;
         }
 
         return fallback is null ? [] : [fallback.Value];
@@ -382,8 +416,18 @@ internal static class LocalNetwork
             return true;
         }
 
-        return ContainsVirtualMarker(candidate.Name) || ContainsVirtualMarker(candidate.Description);
+        return ContainsMarker(candidate.Name, VirtualInterfaceMarkers)
+            || ContainsMarker(candidate.Description, VirtualInterfaceMarkers);
     }
+
+    /// <summary>
+    /// Windows Mobile Hotspot, ICS, and Wi-Fi Direct. The default ICS subnet is
+    /// <c>192.168.137.0/24</c> even when the adapter name looks ordinary.
+    /// </summary>
+    internal static bool IsHotspotAdapter(AdvertisementCandidate candidate)
+        => IsWindowsIcsSubnet(candidate.Address)
+            || ContainsMarker(candidate.Name, HotspotInterfaceMarkers)
+            || ContainsMarker(candidate.Description, HotspotInterfaceMarkers);
 
     private static List<AdvertisementCandidate> EnumerateCandidates()
     {
@@ -450,14 +494,14 @@ internal static class LocalNetwork
         return false;
     }
 
-    private static bool ContainsVirtualMarker(string value)
+    private static bool ContainsMarker(string value, string[] markers)
     {
         if (string.IsNullOrEmpty(value))
         {
             return false;
         }
 
-        foreach (var marker in VirtualInterfaceMarkers)
+        foreach (var marker in markers)
         {
             if (value.Contains(marker, StringComparison.OrdinalIgnoreCase))
             {
@@ -500,7 +544,8 @@ internal static class LocalNetwork
     /// <summary>
     /// Windows Internet Connection Sharing and Mobile Hotspot use
     /// <c>192.168.137.0/24</c> by default. The adapter is often a Wi-Fi Direct
-    /// virtual NIC, but the subnet is skipped even when the name looks ordinary.
+    /// NIC. The subnet is still a hotspot when the name looks ordinary, and it
+    /// is advertised on that NIC only.
     /// </summary>
     internal static bool IsWindowsIcsSubnet(IPAddress address)
     {

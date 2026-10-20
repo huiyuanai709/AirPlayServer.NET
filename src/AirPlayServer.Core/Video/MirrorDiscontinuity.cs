@@ -24,6 +24,15 @@ internal static class MirrorDiscontinuity
     internal static bool ShouldResetDecoder(bool leavingPause, bool alreadyWaitingForSync)
         => leavingPause && !alreadyWaitingForSync;
 
+    /// <summary>
+    /// Two access units with no picture mean the references are gone only after
+    /// this stream has already published a frame. Before that, the software
+    /// decoder is still holding the opening IDR, or the phone sent SEI. Treating
+    /// those misses as a pause drops that GOP and the phone tears the session down.
+    /// </summary>
+    internal static bool MissesRequireSync(bool picturePublished, int consecutiveMisses)
+        => picturePublished && consecutiveMisses >= HardwareDecodeStall.MissesWithNoPicture;
+
     internal static bool IsSync(bool hevc, bool keyFrameFlag, ReadOnlySpan<byte> annexB)
     {
         if (keyFrameFlag)

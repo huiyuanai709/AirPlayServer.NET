@@ -8,6 +8,7 @@ using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Threading;
 using AirPlayServer.Core;
+using AirPlayServer.Core.Notify;
 using AirPlayServer.Core.Video;
 
 namespace AirPlayServer.Host.Display;
@@ -15,7 +16,7 @@ namespace AirPlayServer.Host.Display;
 /// <summary>
 /// One mirror session. The picture is the latest BGRA frame, letterboxed into
 /// the client. Hover text is TapClock UIKit points when <c>--model</c> is set.
-/// Pointer presses are not handled and are not sent to the phone.
+/// Presses and releases are mapped and reported. They are not sent to the phone.
 /// </summary>
 internal sealed class MirrorWindow : Window, IMirrorSurface
 {
@@ -23,6 +24,7 @@ internal sealed class MirrorWindow : Window, IMirrorSurface
     private readonly IAirPlayLog _log;
     private readonly int _tapClockScreenWidth;
     private readonly int _tapClockScreenHeight;
+    private readonly Action<MirrorPointerGesture>? _reportPointer;
     private readonly Panel _root;
     private readonly Image _image;
     private readonly Border _chip;
@@ -46,6 +48,7 @@ internal sealed class MirrorWindow : Window, IMirrorSurface
         _log = request.Log;
         _tapClockScreenWidth = request.TapClockScreenWidth;
         _tapClockScreenHeight = request.TapClockScreenHeight;
+        _reportPointer = request.ReportPointer;
         _baseTitle = MirrorViewMath.DeviceTitle(request.Title);
         Title = _baseTitle;
         Background = Brushes.Black;
@@ -91,6 +94,8 @@ internal sealed class MirrorWindow : Window, IMirrorSurface
         // Presses stay in this window. Nothing in this type talks to the phone.
         _root.PointerMoved += OnPointerMoved;
         _root.PointerExited += OnPointerExited;
+        _root.PointerPressed += OnPointerPressed;
+        _root.PointerReleased += OnPointerReleased;
 
         var index = AvaloniaMirrorDisplay.NextCascade();
         var offset = index * 28;
@@ -187,6 +192,89 @@ internal sealed class MirrorWindow : Window, IMirrorSurface
     {
         _pointerInside = false;
         UpdateHover();
+    }
+
+    private void OnPointerPressed(object? sender, PointerPressedEventArgs e) => PublishPointer(e, pressed: true);
+
+    private void OnPointerReleased(object? sender, PointerReleasedEventArgs e) => PublishPointer(e, pressed: false);
+
+    private void PublishPointer(PointerEventArgs e, bool pressed)
+    {
+        var report = _reportPointer;
+        if (report is null)
+        {
+            return;
+        }
+
+        var point = e.GetCurrentPoint(_root);
+        if (!TryButton(point.Properties.PointerUpdateKind, pressed, out var button))
+        {
+            return;
+        }
+
+        if (pressed)
+        {
+            e.Pointer.Capture(_root);
+        }
+        else if (Equals(e.Pointer.Captured, _root))
+        {
+            e.Pointer.Capture(null);
+        }
+
+        var scale = RenderScale();
+        var windowX = MirrorViewMath.DevicePixels(point.Position.X, scale);
+        var windowY = MirrorViewMath.DevicePixels(point.Position.Y, scale);
+        var client = ClientPixels();
+        _frames.TryReadSize(out var frameWidth, out var frameHeight);
+        var gesture = MirrorClickMap.Map(
+            pressed ? MirrorPointerPhase.Down : MirrorPointerPhase.Up,
+            button,
+            DateTimeOffset.UtcNow,
+            windowX,
+            windowY,
+            client.Width,
+            client.Height,
+            frameWidth,
+            frameHeight,
+            _tapClockScreenWidth,
+            _tapClockScreenHeight);
+        try
+        {
+            report(gesture);
+        }
+        catch (Exception ex)
+        {
+            _log.Log(AirPlayLogLevel.Warning, "镜像点击没有发布: " + ex.Message + " The mirror click was not published: " + ex.Message);
+        }
+    }
+
+    private static bool TryButton(PointerUpdateKind kind, bool pressed, out MirrorPointerButton button)
+    {
+        var press = kind is PointerUpdateKind.LeftButtonPressed
+            or PointerUpdateKind.RightButtonPressed
+            or PointerUpdateKind.MiddleButtonPressed
+            or PointerUpdateKind.XButton1Pressed
+            or PointerUpdateKind.XButton2Pressed;
+        var release = kind is PointerUpdateKind.LeftButtonReleased
+            or PointerUpdateKind.RightButtonReleased
+            or PointerUpdateKind.MiddleButtonReleased
+            or PointerUpdateKind.XButton1Released
+            or PointerUpdateKind.XButton2Released;
+        if (pressed != press || (!pressed && !release))
+        {
+            button = default;
+            return false;
+        }
+
+        button = kind switch
+        {
+            PointerUpdateKind.RightButtonPressed or PointerUpdateKind.RightButtonReleased => MirrorPointerButton.Right,
+            PointerUpdateKind.MiddleButtonPressed or PointerUpdateKind.MiddleButtonReleased => MirrorPointerButton.Middle,
+            PointerUpdateKind.XButton1Pressed or PointerUpdateKind.XButton1Released => MirrorPointerButton.X1,
+            PointerUpdateKind.XButton2Pressed or PointerUpdateKind.XButton2Released => MirrorPointerButton.X2,
+            _ => MirrorPointerButton.Left,
+        };
+        return true;
     }
 
     private void Present()

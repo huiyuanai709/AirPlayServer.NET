@@ -19,6 +19,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
     private readonly TapClockExporter? _tapClock;
     private readonly IAsyncDisposable? _windows;
     private readonly NativeMediaKeyModule? _plugin;
+    private readonly MirrorClickHub _clicks;
     private readonly int _displayWidth;
     private readonly int _displayHeight;
     private int _disposed;
@@ -31,6 +32,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         TapClockExporter? tapClock,
         IAsyncDisposable? windows,
         NativeMediaKeyModule? plugin,
+        MirrorClickHub clicks,
         FrameSlot frames,
         string deviceId,
         string name,
@@ -47,6 +49,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         _tapClock = tapClock;
         _windows = windows;
         _plugin = plugin;
+        _clicks = clicks;
         Frames = frames;
         DeviceId = deviceId;
         Name = name;
@@ -93,6 +96,12 @@ public sealed class AirPlayReceiver : IAsyncDisposable
     /// keeps its own <c>session_id</c>. Shutdown does not emit disconnected.
     /// </summary>
     public MirrorSessionHub SessionEvents => _mirror.SessionEvents;
+
+    /// <summary>
+    /// Pointer presses and releases from each mirror window. The host publishes
+    /// them to the configured webhook list. They are not sent to the phone.
+    /// </summary>
+    public MirrorClickHub Clicks => _clicks;
 
     public event EventHandler<AirPlaySessionEstablishedEventArgs>? SessionEstablished;
 
@@ -202,9 +211,10 @@ public sealed class AirPlayReceiver : IAsyncDisposable
 
             var windowGroup = new MirrorWindowGroup();
             windows = windowGroup;
+            var clicks = new MirrorClickHub();
             var logicalWidth = options.TapClockLogicalScreen?.Width ?? 0;
             var logicalHeight = options.TapClockLogicalScreen?.Height ?? 0;
-            IMirrorSurface? OpenSurface(FrameSlot slot, string title)
+            IMirrorSurface? OpenSurface(MirrorPipe pipe, FrameSlot slot, string title)
             {
                 if (!options.ShowWindow || options.OpenMirrorSurface is null)
                 {
@@ -221,6 +231,17 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                         TapClockScreenWidth = logicalWidth,
                         TapClockScreenHeight = logicalHeight,
                         CancellationToken = cancellationToken,
+                        ReportPointer = gesture =>
+                        {
+                            var snapshot = pipe.Sessions.GetSnapshot();
+                            clicks.Publish(new MirrorClickEventArgs
+                            {
+                                SessionId = snapshot.SessionId,
+                                DeviceName = pipe.DeviceName,
+                                SourceIp = pipe.SourceAddress?.ToString(),
+                                Gesture = gesture,
+                            });
+                        },
                     });
                 }
                 catch (Exception ex)
@@ -232,7 +253,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
 
             if (options.ShowWindow)
             {
-                windowGroup.Add(mirror.Primary, OpenSurface(frames, instance));
+                windowGroup.Add(mirror.Primary, OpenSurface(mirror.Primary, frames, instance));
             }
 
             mirror.PipeAdded += pipe =>
@@ -243,7 +264,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 }
 
                 var title = string.IsNullOrWhiteSpace(pipe.DeviceName) ? "镜像 " + pipe.Activity.DataPort : pipe.DeviceName;
-                windowGroup.Add(pipe, OpenSurface(pipe.Frames, title));
+                windowGroup.Add(pipe, OpenSurface(pipe, pipe.Frames, title));
             };
             mirror.DeviceNamed += windowGroup.Rename;
             control = ControlServer.Start(
@@ -274,6 +295,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 tapClock,
                 windows,
                 plugin,
+                clicks,
                 frames,
                 advertisement.DeviceId,
                 instance,

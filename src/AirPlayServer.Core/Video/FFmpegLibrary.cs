@@ -129,8 +129,23 @@ internal sealed unsafe class FFmpegLibrary
 
     internal string Description { get; }
 
-    /// <summary>libavcodec SONAME major, or 0 when the file name has none.</summary>
-    internal int AvcodecMajor { get; }
+    /// <summary>libavcodec major. The SONAME is the first guess; <c>avcodec_version</c> replaces it.</summary>
+    internal int AvcodecMajor { get; private set; }
+
+    /// <summary>libavcodec minor from <c>avcodec_version</c>. Zero when that symbol was not exported.</summary>
+    internal int AvcodecMinor { get; private set; }
+
+    internal void NoteRuntimeVersion(uint packed)
+    {
+        var major = (int)((packed >> 16) & 0xFF);
+        if (major <= 0)
+        {
+            return;
+        }
+
+        AvcodecMajor = major;
+        AvcodecMinor = (int)((packed >> 8) & 0xFF);
+    }
 
     internal static int HevcCodecId(int avcodecMajor)
         => avcodecMajor >= 63 ? CodecHevcFromAvcodec63 : CodecHevcThroughAvcodec62;
@@ -506,6 +521,12 @@ internal sealed unsafe class FFmpegLibrary
             (delegate* unmanaged[Cdecl]<nint*, nint, nint, int, int>)dictSet,
             (delegate* unmanaged[Cdecl]<nint*, void>)dictFree,
             (delegate* unmanaged[Cdecl]<nint, nint, int, long*, int>)optGetInt);
+        TryExport(avcodec, "avcodec_version", out var avcodecVersion);
+        if (avcodecVersion != 0)
+        {
+            bound.NoteRuntimeVersion(((delegate* unmanaged[Cdecl]<uint>)avcodecVersion)());
+        }
+
         if (!bound.ProbeFrameLayout())
         {
             return false;

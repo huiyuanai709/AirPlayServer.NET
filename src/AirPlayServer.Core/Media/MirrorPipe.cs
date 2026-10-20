@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using AirPlayServer.Core.Audio;
 using AirPlayServer.Core.Notify;
 using AirPlayServer.Core.Pairing;
 using AirPlayServer.Core.Protocol;
@@ -14,8 +15,9 @@ namespace AirPlayServer.Core.Media;
 
 /// <summary>
 /// One device's screen-mirror pipeline. Video is not UDP RTP: each packet is a
-/// 128-byte header plus a length-prefixed payload. Audio SETUP (type 96) stays
-/// unimplemented. A 72-byte ekey unwraps when <see cref="IMediaKeyUnwrapper"/> succeeds.
+/// 128-byte header plus a length-prefixed payload. Audio SETUP (type 96) is
+/// AAC-ELD over UDP and stays on this session's own sockets. A 72-byte ekey
+/// unwraps when <see cref="IMediaKeyUnwrapper"/> succeeds.
 /// The data listener and timing socket belong to this device. Closing them does
 /// not close another device's mirror.
 /// </summary>
@@ -35,6 +37,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
     private readonly DecodeTimingLog _decodeTiming;
     private readonly MirrorSessionTracker _sessions = new();
     private readonly MirrorDecryptor _decryptor = new();
+    private readonly MirrorAudio _audio;
     private readonly CancellationTokenSource _cancellation = new();
     private readonly object _gate = new();
     private readonly object _media = new();
@@ -50,6 +53,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
     private bool _dataPeerSeen;
     private IPAddress? _claimedAddress;
     private int _remoteTimingPort;
+    private byte[]? _audioIv;
     private byte[]? _sequence;
     private byte[]? _picture;
     private byte[]? _vps;
@@ -122,6 +126,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
             EventPort = eventPort,
             DecoderName = decoder.Name,
         };
+        _audio = new MirrorAudio(log, Activity.AcceptAudioPacket);
         sessionsHub.Attach(_sessions);
         _acceptLoop = Task.Run(AcceptLoop);
         _timingLoop = Task.Run(TimingLoop);
@@ -144,6 +149,18 @@ internal sealed class MirrorPipe : IAsyncDisposable
             lock (_gate)
             {
                 return _dataPeer;
+            }
+        }
+    }
+
+    /// <summary>Data peer when the mirror socket is up, otherwise the RTSP peer.</summary>
+    internal IPAddress? SourceAddress
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _dataPeer ?? _peer;
             }
         }
     }
@@ -247,6 +264,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
         }
 
         _sessions.Dispose();
+        await _audio.DisposeAsync().ConfigureAwait(false);
         await _cancellation.CancelAsync().ConfigureAwait(false);
         DropClient();
         _data.Dispose();
@@ -281,6 +299,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
         {
             ClearWrappedEkey();
             _decryptor.SetMaterial(contentKey, ecdhSecret);
+            SyncAudioKeysLocked();
             _streamId = streamConnectionId;
             _streamIdKnown = true;
             var ready = _decryptor.TryBind(streamConnectionId);
@@ -334,6 +353,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
         if (method.Equals("RECORD", StringComparison.OrdinalIgnoreCase))
         {
+            _audio.Resume();
             return Http1Response.Empty(200, extra:
             [
                 ("Audio-Latency", "11025"),
@@ -345,27 +365,42 @@ internal sealed class MirrorPipe : IAsyncDisposable
         {
             if (request.Headers.TryGetValue("Content-Type", out var type)
                 && type.StartsWith("text/parameters", StringComparison.OrdinalIgnoreCase)
-                && Encoding.ASCII.GetString(request.Body).Contains("volume", StringComparison.Ordinal))
+                && AirPlayVolume.BodyRequestsVolume(request.Body))
             {
-                return Http1Response.Bytes(200, "text/parameters", "volume: 0.0\r\n"u8.ToArray());
+                return Http1Response.Bytes(200, "text/parameters", Encoding.ASCII.GetBytes(AirPlayVolume.FormatParameter(_audio.VolumeDb)));
             }
 
             return Http1Response.Empty(200);
         }
 
-        if (method.Equals("SET_PARAMETER", StringComparison.OrdinalIgnoreCase)
-            || method.Equals("PAUSE", StringComparison.OrdinalIgnoreCase)
-            || method.Equals("FLUSH", StringComparison.OrdinalIgnoreCase))
+        if (method.Equals("SET_PARAMETER", StringComparison.OrdinalIgnoreCase))
         {
+            ApplyVolume(request);
+            return Http1Response.Empty(200);
+        }
+
+        if (method.Equals("PAUSE", StringComparison.OrdinalIgnoreCase))
+        {
+            _audio.Pause();
+            return Http1Response.Empty(200);
+        }
+
+        if (method.Equals("FLUSH", StringComparison.OrdinalIgnoreCase))
+        {
+            request.Headers.TryGetValue("RTP-Info", out var rtpInfo);
+            AirPlayVolume.TryReadFlushSequence(rtpInfo, out var nextSequence);
+            _audio.Flush(nextSequence);
             return Http1Response.Empty(200);
         }
 
         if (method.Equals("TEARDOWN", StringComparison.OrdinalIgnoreCase))
         {
-            var kind = ClassifyTeardown(request);
+            var plan = ClassifyTeardown(request);
+            var kind = plan.Kind;
             if (kind == TeardownKind.AudioOnly)
             {
-                _log.Log(AirPlayLogLevel.Information, "Audio teardown ignored. Mirror video stays armed.");
+                _audio.Stop();
+                _log.Log(AirPlayLogLevel.Information, "Audio teardown. Mirror video stays armed.");
                 return Http1Response.Empty(200);
             }
 
@@ -405,6 +440,13 @@ internal sealed class MirrorPipe : IAsyncDisposable
                     _hevcRejected = false;
                     ClearCodecLocked();
                     ClearStreamHealthLocked();
+                    if (_audioIv is not null)
+                    {
+                        CryptographicOperations.ZeroMemory(_audioIv);
+                        _audioIv = null;
+                    }
+
+                    _audio.ClearKeys();
                 }
 
                 // Video teardown leaves an empty picture buffer while the RTSP
@@ -425,6 +467,11 @@ internal sealed class MirrorPipe : IAsyncDisposable
             }
 
             DropClient();
+            if (plan.StopAudio)
+            {
+                _audio.Stop();
+            }
+
             _log.Log(AirPlayLogLevel.Information, kind == TeardownKind.VideoOnly
                 ? "Mirror video teardown. Session key kept for the next SETUP."
                 : "Mirror teardown.");
@@ -479,7 +526,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
             if (streamType == 96 || Find(stream, "audioFormat") is not null)
             {
-                return Http1Response.Text(501, "Audio streaming is not implemented.");
+                return HandleAudioSetup();
             }
 
             return Http1Response.Text(501, "Mirror stream type " + streamType + " is not implemented.");
@@ -543,6 +590,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
         lock (_media)
         {
+            ReplaceAudioIvLocked(eiv.Value);
             if (contentKey is null && _decryptor.HasContentKey)
             {
                 // Unlock can repeat the session plist before /fp-setup has a new
@@ -555,6 +603,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
                     _decryptor.NoteSecret(secret);
                 }
 
+                SyncAudioKeysLocked();
                 _log.Log(AirPlayLogLevel.Information, "SETUP did not supply a new content key. The session key already in use is kept.");
                 return Http1Response.Empty(200);
             }
@@ -585,6 +634,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 _decryptor.SetMaterial(contentKey, secret, keepStoredSecret: true);
             }
 
+            SyncAudioKeysLocked();
             Activity.SetKeysReady(false);
         }
 
@@ -1323,6 +1373,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
     {
         if (_decryptor.MediaKeysReady)
         {
+            SyncAudioKeysLocked();
             return true;
         }
 
@@ -1340,6 +1391,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
         if (!_streamIdKnown)
         {
+            SyncAudioKeysLocked();
             Activity.SetKeysReady(false);
             return false;
         }
@@ -1352,6 +1404,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
             OnArmedLocked(_streamId);
         }
 
+        SyncAudioKeysLocked();
         return ready;
     }
 
@@ -1692,11 +1745,120 @@ internal sealed class MirrorPipe : IAsyncDisposable
         AudioOnly = 2,
     }
 
-    private static TeardownKind ClassifyTeardown(Http1Request request)
+    private Http1Response HandleAudioSetup()
+    {
+        IPAddress? peer;
+        int remoteTiming;
+        lock (_gate)
+        {
+            peer = _peer;
+            remoteTiming = _remoteTimingPort;
+        }
+
+        _audio.SetTimingTarget(peer, remoteTiming);
+        if (!_audio.TryStart(_listenAddress ?? IPAddress.Any, out var dataPort, out var controlPort, out var timingPort))
+        {
+            return Http1Response.Text(500, "Audio sockets could not be opened.");
+        }
+
+        var inner = new PlistDictionary();
+        inner.Add("dataPort", new PlistInteger(dataPort));
+        inner.Add("controlPort", new PlistInteger(controlPort));
+        inner.Add("type", new PlistInteger(96));
+        var streams = new PlistArray();
+        streams.Add(inner);
+        var response = new PlistDictionary();
+        response.Add("timingPort", new PlistInteger(timingPort));
+        response.Add("streams", streams);
+        return Http1Response.Bytes(200, "application/x-apple-binary-plist", BinaryPropertyList.Write(response));
+    }
+
+    private void ApplyVolume(Http1Request request)
+    {
+        if (request.Headers.TryGetValue("Content-Type", out var type)
+            && type.StartsWith("text/parameters", StringComparison.OrdinalIgnoreCase))
+        {
+            if (AirPlayVolume.TryParseSetVolume(request.Body, out var db))
+            {
+                _audio.SetVolumeDb(db);
+                _log.Log(AirPlayLogLevel.Information, "镜像音量 " + AirPlayVolume.FormatParameter(db).TrimEnd('\r', '\n') + ".");
+            }
+
+            return;
+        }
+
+        try
+        {
+            if (BinaryPropertyList.Read(request.Body) is not PlistDictionary root)
+            {
+                return;
+            }
+
+            var node = Find(root, "volume");
+            float? db = node switch
+            {
+                PlistReal real => (float)real.Value,
+                PlistInteger integer => (float)integer.Value,
+                _ => null,
+            };
+            if (db is float value)
+            {
+                _audio.SetVolumeDb(value);
+                _log.Log(AirPlayLogLevel.Information, "镜像音量 " + AirPlayVolume.FormatParameter(value).TrimEnd('\r', '\n') + ".");
+            }
+        }
+        catch (FormatException)
+        {
+        }
+    }
+
+    private void ReplaceAudioIvLocked(ReadOnlySpan<byte> eiv)
+    {
+        if (eiv.Length != 16)
+        {
+            return;
+        }
+
+        if (_audioIv is not null)
+        {
+            CryptographicOperations.ZeroMemory(_audioIv);
+        }
+
+        _audioIv = eiv.ToArray();
+    }
+
+    private void SyncAudioKeysLocked()
+    {
+        if (_audioIv is not { Length: 16 })
+        {
+            return;
+        }
+
+        Span<byte> content = stackalloc byte[16];
+        Span<byte> secret = stackalloc byte[32];
+        if (!_decryptor.TryCopyMaterial(content, secret))
+        {
+            return;
+        }
+
+        try
+        {
+            _audio.SetKeys(content, secret, _audioIv);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(content);
+            CryptographicOperations.ZeroMemory(secret);
+        }
+    }
+
+    private readonly record struct TeardownPlan(TeardownKind Kind, bool StopAudio);
+
+    private static TeardownPlan ClassifyTeardown(Http1Request request)
     {
         if (request.Body.Length == 0)
         {
-            return TeardownKind.Session;
+            return new TeardownPlan(TeardownKind.Session, true);
         }
 
         try
@@ -1705,7 +1867,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 || Find(root, "streams") is not PlistArray streams
                 || streams.Items.Count == 0)
             {
-                return TeardownKind.Session;
+                return new TeardownPlan(TeardownKind.Session, true);
             }
 
             var video = false;
@@ -1733,19 +1895,19 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 // Type 110 keeps the FairPlay session even when the same plist
                 // also tears down audio. Treating that as a full session reset
                 // erased the content key and the unlock SETUP could not decrypt.
-                return TeardownKind.VideoOnly;
+                return new TeardownPlan(TeardownKind.VideoOnly, audio);
             }
 
             if (audio)
             {
-                return TeardownKind.AudioOnly;
+                return new TeardownPlan(TeardownKind.AudioOnly, true);
             }
 
-            return TeardownKind.Session;
+            return new TeardownPlan(TeardownKind.Session, true);
         }
         catch (FormatException)
         {
-            return TeardownKind.Session;
+            return new TeardownPlan(TeardownKind.Session, true);
         }
     }
 

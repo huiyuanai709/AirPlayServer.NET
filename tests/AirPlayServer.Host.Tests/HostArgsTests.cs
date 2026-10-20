@@ -250,4 +250,32 @@ public class HostArgsTests
             Directory.Delete(directory, recursive: true);
         }
     }
+
+    [Fact]
+    public void Webhook_flag_enables_the_click_list()
+    {
+        var directory = Directory.CreateTempSubdirectory("airplay-webhook-");
+        try
+        {
+            var path = Path.Combine(directory.FullName, "session-notify.json");
+            File.WriteAllText(path, """{"webhooks_enabled":true,"webhook_urls":["http://127.0.0.1:9/from-file"]}""");
+            var parsed = HostArgs.Parse(
+            [
+                "--notify-config", path,
+                "--webhook", "http://127.0.0.1:9/from-cli",
+                "--webhook", "http://127.0.0.1:9/from-file",
+            ]);
+            var plan = SessionNotifyService.Load(parsed.Notify);
+            Assert.True(plan.Config.WebhooksEnabled);
+            Assert.Equal(
+                ["http://127.0.0.1:9/from-file", "http://127.0.0.1:9/from-cli"],
+                plan.Config.WebhookUrls);
+            Assert.Contains("--webhook", HostArgs.HelpText, StringComparison.Ordinal);
+            Assert.Contains("点击仍然不发给手机", HostArgs.HelpText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory.FullName, recursive: true);
+        }
+    }
 }

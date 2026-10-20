@@ -72,10 +72,10 @@ jobs:
           done
 
   publish:
-    name: Publish ${{ matrix.rid }}
+    name: Publish ${{ matrix.rid }} ${{ matrix.flavor }}
     needs: version
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -83,8 +83,16 @@ jobs:
           # windows-latest already has the VS 2022 C++ toolset Native AOT links with.
           - os: windows-latest
             rid: win-x64
+            flavor: lean
+          - os: windows-latest
+            rid: win-x64
+            flavor: ui
           - os: ubuntu-latest
             rid: linux-x64
+            flavor: lean
+          - os: ubuntu-latest
+            rid: linux-x64
+            flavor: ui
     steps:
       - uses: actions/checkout@v4
 
@@ -101,55 +109,55 @@ jobs:
         shell: bash
         env:
           RID: ${{ matrix.rid }}
-          VERSION: ${{ needs.version.outputs.version }}
-          TAG: ${{ needs.version.outputs.tag }}
+          FLAVOR: ${{ matrix.flavor }}
+          PUBLISH_VERSION: ${{ needs.version.outputs.version }}
+          PUBLISH_INFORMATIONAL_VERSION: ${{ needs.version.outputs.tag }}
         run: |
           set -euo pipefail
-          dotnet publish src/AirPlayServer.Host/AirPlayServer.Host.csproj \
-            --configuration Release \
-            --runtime "$RID" \
-            --self-contained true \
-            -p:Version="$VERSION" \
-            -p:InformationalVersion="$TAG" \
-            -p:IncludeSourceRevisionInInformationalVersion=false \
-            -p:DebugType=none \
-            -p:DebugSymbols=false \
-            -p:NativeDebugSymbols=false \
-            --output "artifacts/$RID"
-          ./packaging/strip-publish-symbols.sh "artifacts/$RID"
-          ./packaging/assert-no-publish-symbols.sh "artifacts/$RID"
+          ./packaging/publish.sh "$RID" Release "$FLAVOR"
 
-      - name: Smoke the published binary (linux-x64)
-        if: runner.os == 'Linux'
+      - name: Smoke the published binary
         shell: bash
+        env:
+          RID: ${{ matrix.rid }}
+          FLAVOR: ${{ matrix.flavor }}
         run: |
           set -euo pipefail
-          artifacts/linux-x64/AirPlayServer.Host --help
-          artifacts/linux-x64/AirPlayServer.Host --self-check
-
-      - name: Smoke the published binary (win-x64)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          ./artifacts/win-x64/AirPlayServer.Host.exe --help
-          ./artifacts/win-x64/AirPlayServer.Host.exe --self-check
+          suffix=""
+          if [ "$FLAVOR" = "ui" ]; then
+            suffix="-ui"
+          fi
+          if [ "$RID" = "win-x64" ]; then
+            bin="artifacts/${RID}${suffix}/AirPlayServer.Host.exe"
+          else
+            bin="artifacts/${RID}${suffix}/AirPlayServer.Host"
+          fi
+          "$bin" --help
+          "$bin" --self-check
+          "$bin" --help | grep -F "构建: ${FLAVOR}"
 
       - name: Pack the release zip
         shell: bash
         env:
           RID: ${{ matrix.rid }}
+          FLAVOR: ${{ matrix.flavor }}
           TAG: ${{ needs.version.outputs.tag }}
         run: |
           set -euo pipefail
+          suffix=""
+          if [ "$FLAVOR" = "ui" ]; then
+            suffix="-ui"
+          fi
           ./packaging/stage-release.sh \
             "$RID" \
             "$TAG" \
-            "artifacts/$RID" \
-            "artifacts/release/AirPlayServer.Host-${TAG}-${RID}.zip"
+            "artifacts/${RID}${suffix}" \
+            "artifacts/release/AirPlayServer.Host-${TAG}-${RID}${suffix}.zip" \
+            "$FLAVOR"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPlayServer.Host-${{ matrix.rid }}
+          name: AirPlayServer.Host-${{ matrix.rid }}${{ matrix.flavor == 'ui' && '-ui' || '' }}
           path: artifacts/release/*.zip
           if-no-files-found: error
           retention-days: 14
@@ -178,12 +186,16 @@ jobs:
         run: |
           set -euo pipefail
           linux="AirPlayServer.Host-${TAG}-linux-x64.zip"
+          linux_ui="AirPlayServer.Host-${TAG}-linux-x64-ui.zip"
           windows="AirPlayServer.Host-${TAG}-win-x64.zip"
+          windows_ui="AirPlayServer.Host-${TAG}-win-x64-ui.zip"
           test -f "dist/$linux"
+          test -f "dist/$linux_ui"
           test -f "dist/$windows"
+          test -f "dist/$windows_ui"
           (
             cd dist
-            sha256sum "$linux" "$windows" > SHA256SUMS.txt
+            sha256sum "$linux" "$linux_ui" "$windows" "$windows_ui" > SHA256SUMS.txt
           )
           ./packaging/release-notes.sh "$TAG" > dist/notes.md
 
@@ -202,5 +214,7 @@ jobs:
             "$PRERELEASE" \
             dist/notes.md \
             "dist/AirPlayServer.Host-${TAG}-linux-x64.zip" \
+            "dist/AirPlayServer.Host-${TAG}-linux-x64-ui.zip" \
             "dist/AirPlayServer.Host-${TAG}-win-x64.zip" \
+            "dist/AirPlayServer.Host-${TAG}-win-x64-ui.zip" \
             dist/SHA256SUMS.txt

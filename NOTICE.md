@@ -68,12 +68,15 @@ ImageSharp is not linked.
 
 ## Avalonia
 
-The mirror window is Avalonia 12.1 (MIT). The UI is constructed in code. There
-is no XAML and no reflection-based control lookup. Native AOT publish copies
-that RID's Skia and HarfBuzz libraries next to the host. They load when a
-window opens, not during `--help` or `--self-check`. Linux uses the X11
-backend and needs `libX11` at runtime. macOS uses Avalonia.Native. A linux
-publish does not reference the Win32 backend.
+The UI release zip (`-ui`) shows the mirror in an Avalonia 12.1 window (MIT).
+The lean zip does not reference Avalonia, Skia, or HarfBuzz. The UI is
+constructed in code. There is no XAML and no reflection-based control lookup.
+Inter is not embedded. Native AOT publish of the UI flavor copies that RID's
+Skia and HarfBuzz libraries next to the host. They load when a window opens,
+not during `--help` or `--self-check`. Windows UI publish uses Skia software
+and does not ship ANGLE (`av_libglesv2.dll`). Linux uses the X11 backend and
+needs `libX11` at runtime. macOS uses Avalonia.Native. A linux publish does
+not reference the Win32 backend.
 
 Copyright (c) AvaloniaUI OÜ and contributors. <https://github.com/AvaloniaUI/Avalonia>
 Skia is Copyright (c) Google Inc. (BSD). HarfBuzz is Copyright (c) the HarfBuzz

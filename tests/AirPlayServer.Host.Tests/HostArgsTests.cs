@@ -101,6 +101,9 @@ public class HostArgsTests
         Assert.Contains("--version", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("SHA256SUMS.txt", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("GITHUB_TOKEN", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("构建: " + HostBuild.Flavor, HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Equal(HostBuild.HasAvaloniaWindow, HostArgs.Parse([]).Options.ShowWindow);
+        Assert.False(HostArgs.Parse(["--no-window"]).Options.ShowWindow);
     }
 
     [Fact]

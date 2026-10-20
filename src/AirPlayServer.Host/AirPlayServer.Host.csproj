@@ -18,13 +18,23 @@
     <ApplicationIcon>Assets/AirPlayServer.ico</ApplicationIcon>
   </PropertyGroup>
 
-  <!-- Avalonia 12.1 Native AOT. The mirror UI is code-only: no XAML, no compiled
+  <!-- EnableAvalonia=true is the UI zip (mirror window). false, the default,
+       is the lean zip: Avalonia is not referenced and Display/*.cs is not
+       compiled. publish.sh / publish.ps1 pass the flag explicitly.
+       Avalonia 12.1 Native AOT. The mirror UI is code-only: no XAML, no compiled
        bindings, no reflection control lookup. Avalonia's own ILLink descriptors
        root Skia and HarfBuzz. BuiltInComInteropSupport is left at the SDK default;
        that switch was only required before Avalonia 12.
        The window system is chosen here, not by UsePlatformDetect, so a linux-x64
-       publish does not root Win32/user32 and a win-x64 publish does not root X11. -->
+       publish does not root Win32/user32 and a win-x64 publish does not root X11.
+       Avalonia.Desktop is not referenced: each RID gets only its window package.
+       Inter is not embedded (no CJK, and the chip uses a system face).
+       Windows UI publish forces Skia software and drops av_libglesv2.dll. -->
   <PropertyGroup>
+    <EnableAvalonia Condition="'$(EnableAvalonia)' == ''">false</EnableAvalonia>
+    <EnableAvalonia Condition="'$(EnableAvalonia)' == 'True' or '$(EnableAvalonia)' == '1'">true</EnableAvalonia>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(EnableAvalonia)' == 'true'">
     <_AvaloniaOs Condition="$(RuntimeIdentifier.StartsWith('win'))">win</_AvaloniaOs>
     <_AvaloniaOs Condition="$(RuntimeIdentifier.StartsWith('osx'))">osx</_AvaloniaOs>
     <_AvaloniaOs Condition="$(RuntimeIdentifier.StartsWith('linux'))">linux</_AvaloniaOs>
@@ -32,14 +42,14 @@
     <_AvaloniaOs Condition="'$(_AvaloniaOs)' == '' and $([MSBuild]::IsOSPlatform('OSX'))">osx</_AvaloniaOs>
     <_AvaloniaOs Condition="'$(_AvaloniaOs)' == ''">linux</_AvaloniaOs>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(_AvaloniaOs)' == 'win'">
-    <DefineConstants>$(DefineConstants);AVALONIA_WIN</DefineConstants>
+  <PropertyGroup Condition="'$(EnableAvalonia)' == 'true' and '$(_AvaloniaOs)' == 'win'">
+    <DefineConstants>$(DefineConstants);AVALONIA_UI;AVALONIA_WIN</DefineConstants>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(_AvaloniaOs)' == 'osx'">
-    <DefineConstants>$(DefineConstants);AVALONIA_OSX</DefineConstants>
+  <PropertyGroup Condition="'$(EnableAvalonia)' == 'true' and '$(_AvaloniaOs)' == 'osx'">
+    <DefineConstants>$(DefineConstants);AVALONIA_UI;AVALONIA_OSX</DefineConstants>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(_AvaloniaOs)' == 'linux'">
-    <DefineConstants>$(DefineConstants);AVALONIA_LINUX</DefineConstants>
+  <PropertyGroup Condition="'$(EnableAvalonia)' == 'true' and '$(_AvaloniaOs)' == 'linux'">
+    <DefineConstants>$(DefineConstants);AVALONIA_UI;AVALONIA_LINUX</DefineConstants>
   </PropertyGroup>
 
   <!-- Release publish is the shipping binary. DebugType=none keeps the
@@ -54,11 +64,39 @@
     <ProjectReference Include="..\AirPlayServer.Core\AirPlayServer.Core.csproj" />
   </ItemGroup>
 
-  <ItemGroup>
-    <PackageReference Include="Avalonia" Version="12.1.4" />
-    <PackageReference Include="Avalonia.Desktop" Version="12.1.4" />
-    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.4" />
+  <ItemGroup Condition="'$(EnableAvalonia)' != 'true'">
+    <Compile Remove="Display/**/*.cs" />
   </ItemGroup>
+
+  <ItemGroup Condition="'$(EnableAvalonia)' == 'true'">
+    <PackageReference Include="Avalonia" Version="12.1.4" />
+    <PackageReference Include="Avalonia.HarfBuzz" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Skia" Version="12.1.4" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(EnableAvalonia)' == 'true' and '$(_AvaloniaOs)' == 'win'">
+    <PackageReference Include="Avalonia.Win32" Version="12.1.4" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(EnableAvalonia)' == 'true' and '$(_AvaloniaOs)' == 'linux'">
+    <PackageReference Include="Avalonia.X11" Version="12.1.4" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(EnableAvalonia)' == 'true' and '$(_AvaloniaOs)' == 'osx'">
+    <PackageReference Include="Avalonia.Native" Version="12.1.4" />
+  </ItemGroup>
+
+  <!-- Win32 defaults to ANGLE (av_libglesv2.dll, about 5 MB). The mirror window
+       blits BGRA on the CPU and sets Win32RenderingMode.Software, so that DLL
+       is not loaded. Remove it from the publish set if the package still copies it. -->
+  <Target Name="DropAvaloniaAngleNative" AfterTargets="ComputeFilesToPublish" Condition="'$(EnableAvalonia)' == 'true'">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="$([System.String]::Copy('%(Filename)').StartsWith('av_libglesv2'))" />
+    </ItemGroup>
+  </Target>
+  <Target Name="DeleteAvaloniaAngleNative" AfterTargets="Publish" Condition="'$(EnableAvalonia)' == 'true'">
+    <ItemGroup>
+      <_AngleNative Include="$(PublishDir)av_libglesv2.dll" />
+    </ItemGroup>
+    <Delete Files="@(_AngleNative)" />
+  </Target>
 
   <ItemGroup>
     <InternalsVisibleTo Include="AirPlayServer.Host.Tests" />

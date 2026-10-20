@@ -33,7 +33,7 @@ internal sealed class HostArgs
 
     public const int DefaultAdvertisedHeight = 1040;
 
-    public static string HelpText => """
+    public static string HelpText => FlavorBanner + """
         AirPlayServer.NET
 
         用法:
@@ -88,7 +88,7 @@ internal sealed class HostArgs
                          必须是正整数，0 和负数无效，没有硬上限。内存和 CPU 不够时会先撑不住。
                          每一路有自己的数据端口、解密、解码、画面和 session_id。
                          新手机不会踢掉已经连上的那一路。同一 IPv4 再次 SETUP 仍算同一路（锁屏重连）。
-                         Windows、macOS 和 Linux 上每一路一个窗口，标题是设备名。
+                         带 -ui 的包在 Windows、macOS 和 Linux 上每一路一个窗口，标题是设备名。精简包不打开窗口。
         --tapclock-dir   备用：把 JPEG 写进该目录。文件名带来源镜像数据对端的 IP，
                          例如 mirror-192.168.5.20.jpg。IPv6 的冒号会换成短横线。
                          还不知道对端时写 mirror-unknown.jpg。两台手机各写各的文件，互不覆盖。
@@ -119,13 +119,13 @@ internal sealed class HostArgs
                          Native AOT 不能在运行时加载托管程序集，所以这里只接受原生库。
         --demo-frame     推送一张合成画面，用来检查窗口和 TapClock。那不是手机屏幕。
         点击不在本进程发送。TapClock 的点击仍走 TCP 42123（ATB/1），坐标按 --model 的 UIKit 点对齐。
-        窗口里，鼠标停在画面上时，标题和左上角显示 TapClock 绝对屏幕坐标（标签「TapClock x, y」）。
+        带窗口的包里，鼠标停在画面上时，标题和左上角显示 TapClock 绝对屏幕坐标（标签「TapClock x, y」）。
         画面按比例放进客户区，比例不同时留黑边。点先换成解码帧像素（整数截断，画面外的黑边不算），再按 TapClock 的算法换成屏幕点：screen = 帧像素 * --model 宽高 / 帧宽高（整数除法，X 和 Y 分开算）。
         例如 --model iphone-15-pro-max 是 430×932。480×1040 的帧上，像素 (323, 850) 读成 TapClock 289, 761，和 TapClock 日志里的「屏幕坐标」是同一套点。
         没写 --model 时，图像尺寸就是屏幕，标签退回「像素 x, y」。悬停不使用 --screen 的广告分辨率。点击仍然不发给手机。
         默认不检查更新；用 --update 手动更新。普通启动不访问 GitHub。
         版本优先读可执行文件旁边的 VERSION.txt；没有这个文件时用编译进去的版本。
-        有较新的 vX.Y.Z 时，下载 win-x64 或 linux-x64 的 zip。Release 里有 SHA256SUMS.txt 就先校验，再替换本目录里的程序并重新启动。
+        有较新的 vX.Y.Z 时，下载和这个构建相同的包。精简包是 AirPlayServer.Host-<tag>-win-x64.zip 或 linux-x64.zip，带窗口的包是同名再加 -ui。--update 不会把一种换成另一种。Release 里有 SHA256SUMS.txt 就先校验，再替换本目录里的程序并重新启动。
         检查有超时，不会一直卡住。--update 失败时退出，不启动接收端。--auto-update 失败时只记日志，继续跑当前程序。
         --no-update      不检查更新。这是默认行为，可以和其他参数一起写。
         --update         检查并安装更新，然后重新启动。已经是最新则退出，不启动接收端。
@@ -133,6 +133,18 @@ internal sealed class HostArgs
         --auto-update    这次启动检查更新。失败时继续跑当前程序。不能和 --update 或 --no-update 一起用。
         --version        打印程序内版本和 VERSION.txt，然后退出。不访问网络。
         公开的 Release 不需要令牌。私有仓库请设置环境变量 GITHUB_TOKEN 或 GH_TOKEN。
+        """;
+
+    private static string FlavorBanner => HostBuild.HasAvaloniaWindow
+        ? """
+        构建: ui（Avalonia 镜像窗口）。无图形会话时加 --no-window。
+        精简包文件名不带 -ui，没有窗口，给 TapClock 用。
+
+        """
+        : """
+        构建: lean（无 Avalonia 窗口）。不打开镜像窗口，画面仍可导出到 TapClock。
+        --no-window 可以写，效果和默认一样。要窗口请用文件名带 -ui 的包。
+
         """;
 
     public static HostArgs Parse(string[] args)
@@ -144,7 +156,7 @@ internal sealed class HostArgs
         {
             DisplayWidth = DefaultAdvertisedWidth,
             DisplayHeight = DefaultAdvertisedHeight,
-            ShowWindow = true,
+            ShowWindow = HostBuild.HasAvaloniaWindow,
         };
         TapClockExportOptions? tapClock = null;
         for (var i = 0; i < args.Length; i++)

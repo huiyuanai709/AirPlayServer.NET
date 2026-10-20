@@ -181,7 +181,6 @@ internal static class AvaloniaMirrorDisplay
         {
             AppBuilder.Configure(() => new MirrorApplication())
                 .UseHostPlatform()
-                .WithInterFont()
                 .SetupWithLifetime(lifetime);
             lifetime.Startup += (_, _) =>
             {

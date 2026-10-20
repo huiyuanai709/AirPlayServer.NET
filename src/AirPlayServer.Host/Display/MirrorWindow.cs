@@ -67,10 +67,9 @@ internal sealed class MirrorWindow : Window, IMirrorSurface
             Foreground = Brushes.White,
             FontSize = 14,
             Margin = new Thickness(8, 5),
-            // Inter has no CJK glyphs. The title bar is drawn by the OS and is
-            // the readout that always has them; the chip falls through to a
-            // system face when Inter cannot draw 像素.
-            FontFamily = new FontFamily("Inter, Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif"),
+            // Inter is not embedded: it has no CJK glyphs, and the numbers
+            // render with a system face. The title bar is drawn by the OS.
+            FontFamily = new FontFamily("Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif"),
         };
         _chip = new Border
         {

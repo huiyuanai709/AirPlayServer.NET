@@ -3,23 +3,26 @@
 `publish.sh` and `publish.ps1` produce a self-contained Native AOT binary of `AirPlayServer.Host`. That binary is GPL-3.0-only because it compiles AirPlayFairPlay in-process. FairPlay adds no native dependency.
 
 ```bash
-./packaging/publish.sh linux-x64
+./packaging/publish.sh linux-x64                 # lean, artifacts/linux-x64
+./packaging/publish.sh linux-x64 Release ui      # Avalonia, artifacts/linux-x64-ui
 ```
 
 ```powershell
 ./packaging/publish.ps1 -Runtime win-x64
+./packaging/publish.ps1 -Runtime win-x64 -Flavor ui
 ```
 
-The output directory is `artifacts/<rid>/`. Linux needs `clang` and `zlib1g-dev`. Windows needs the Visual Studio C++ build tools, which Native AOT uses as its linker. GitHub-hosted `windows-latest` already has that toolset.
+`lean` does not reference Avalonia. `ui` does, and the output directory is `artifacts/<rid>-ui/`. Linux needs `clang` and `zlib1g-dev`. Windows needs the Visual Studio C++ build tools, which Native AOT uses as its linker. GitHub-hosted `windows-latest` already has that toolset. `assert-publish-flavor.sh` fails a lean directory that still contains Skia, HarfBuzz, or ANGLE, and fails a ui directory that is missing Skia/HarfBuzz or still contains `av_libglesv2.dll`. `strip-native-symbols.sh` removes local symbols from those native libraries after publish.
 
 `airplayserver.service` is a systemd stub. It does not embed a pairing seed or any other secret. Copy the published binary to `/usr/local/bin/AirPlayServer.Host` before enabling it. The linux-x64 release zip includes this unit.
 
-`publish.sh` and `publish.ps1` do not create a GitHub Release. `.github/workflows/release.yml` does, on a `v*` tag or a manual run. It publishes win-x64 and linux-x64 with the same `dotnet publish` arguments, smokes `--help` and `--self-check`, and uploads zips that contain the binary, `RUN.txt`, `LICENSE`, and `NOTICE.md`. Release publish sets `DebugType=none`, `DebugSymbols=false`, and `NativeDebugSymbols=false`. Avalonia, Skia, and HarfBuzz native packages can still drop a `.pdb` or `.dbg` beside `libHarfBuzzSharp` or `libSkiaSharp`. `strip-publish-symbols.sh` (and the same delete in `publish.ps1`) removes those files, then `assert-no-publish-symbols.sh` fails if any remain. The publish folder and the zip do not contain `.pdb` or `.dbg` files. The host stays GPL-3.0-only. The workflow does not read or embed key material.
+`publish.sh` and `publish.ps1` do not create a GitHub Release. `.github/workflows/release.yml` does, on a `v*` tag or a manual run. It publishes win-x64 and linux-x64, each as `lean` and `ui`, by calling `publish.sh`. The zip names are `AirPlayServer.Host-<tag>-<rid>.zip` (lean) and `AirPlayServer.Host-<tag>-<rid>-ui.zip`. Each job smokes `--help` and `--self-check`, and the zips contain the binary, `RUN.txt`, `LICENSE`, and `NOTICE.md`. `VERSION.txt` records `flavor=lean` or `flavor=ui`. Release publish sets `DebugType=none`, `DebugSymbols=false`, and `NativeDebugSymbols=false`. Avalonia, Skia, and HarfBuzz native packages can still drop a `.pdb` or `.dbg` beside `libHarfBuzzSharp` or `libSkiaSharp`. `strip-publish-symbols.sh` (and the same delete in `publish.ps1`) removes those files, then `assert-no-publish-symbols.sh` fails if any remain. The publish folder and the zip do not contain `.pdb` or `.dbg` files. The host stays GPL-3.0-only. The workflow does not read or embed key material.
 
 To stage a zip locally after a publish, without creating a release:
 
 ```bash
 ./packaging/stage-release.sh linux-x64 v0.1.0 artifacts/linux-x64 /tmp/AirPlayServer.Host-v0.1.0-linux-x64.zip
+./packaging/stage-release.sh linux-x64 v0.1.0 artifacts/linux-x64-ui /tmp/AirPlayServer.Host-v0.1.0-linux-x64-ui.zip ui
 ```
 
 `stage-release-test.sh` checks that fixture zip without a Native AOT publish. It keeps the binary and runtime libraries, and it fails if a `.pdb` or `.dbg` is packed. Zip modes are explicit: the linux-x64 binary is `0755`, and every other entry, including the win-x64 binary, is `0644`.

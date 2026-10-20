@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Stage a Native AOT publish directory into a release zip.
-# Usage: stage-release.sh <rid> <tag> <publish-dir> <zip-path>
+# Usage: stage-release.sh <rid> <tag> <publish-dir> <zip-path> [lean|ui]
+# flavor defaults to lean. ui zips use the -ui name suffix inside the archive.
 # The zip contains the binary, RUN.txt, LICENSE, NOTICE.md, and VERSION.txt.
 # linux-x64 also gets airplayserver.service.
 # osx-arm64 and osx-x64 pack the same Mach-O name as linux, plus any
@@ -9,8 +10,8 @@
 # No secrets are copied.
 set -euo pipefail
 
-if [ "$#" -ne 4 ]; then
-  echo "usage: stage-release.sh <rid> <tag> <publish-dir> <zip-path>" >&2
+if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
+  echo "usage: stage-release.sh <rid> <tag> <publish-dir> <zip-path> [lean|ui]" >&2
   exit 2
 fi
 
@@ -18,6 +19,18 @@ rid="$1"
 tag="$2"
 publish_dir="$3"
 zip_path="$4"
+flavor="${5:-lean}"
+case "$flavor" in
+  lean|ui) ;;
+  *)
+    echo "flavor must be lean or ui (got: ${flavor})" >&2
+    exit 2
+    ;;
+esac
+name_suffix=""
+if [ "$flavor" = "ui" ]; then
+  name_suffix="-ui"
+fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 case "$rid" in
@@ -85,10 +98,15 @@ if [ "$rid" = "linux-x64" ] || [ "$rid" = "osx-arm64" ] || [ "$rid" = "osx-x64" 
 fi
 if [ "$rid" = "linux-x64" ]; then
   cp "$root/packaging/airplayserver.service" "$stage/"
+  if [ "$flavor" = "ui" ]; then
+    # The UI binary opens a window unless told not to. The unit file is a
+    # headless stub, so it passes --no-window.
+    sed -i 's|--name AirPlayServer.NET|--name AirPlayServer.NET --no-window|' "$stage/airplayserver.service"
+  fi
 fi
 
 cp "$root/LICENSE" "$root/NOTICE.md" "$root/packaging/RUN.txt" "$stage/"
-printf 'tag=%s\nrid=%s\nbinary=%s\nlicense=GPL-3.0-only\n' "$tag" "$rid" "$binary" > "$stage/VERSION.txt"
+printf 'tag=%s\nrid=%s\nbinary=%s\nlicense=GPL-3.0-only\nflavor=%s\n' "$tag" "$rid" "$binary" "$flavor" > "$stage/VERSION.txt"
 
 mkdir -p -- "$(dirname -- "$zip_path")"
 case "$zip_path" in
@@ -116,7 +134,7 @@ fi
 
 STAGE_DIR="$stage" \
   ZIP_PATH="$zip_path" \
-  ZIP_PREFIX="AirPlayServer.Host-${tag}-${rid}" \
+  ZIP_PREFIX="AirPlayServer.Host-${tag}-${rid}${name_suffix}" \
   BINARY_NAME="$binary" \
   EXPECT_EXEC="$expect_exec" \
   EXPECT_SERVICE="$expect_service" \

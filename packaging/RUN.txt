@@ -1,8 +1,25 @@
 AirPlayServer.NET Native AOT 宿主
 
-本目录是一次发布包。版本和平台写在 VERSION.txt。
+本目录是一次发布包。版本、平台和构建写在 VERSION.txt（flavor=lean 或 flavor=ui）。
 程序是 GPL-3.0-only，因为进程内编进了 FairPlay。
 对应源码是本仓库里同名的 git tag。包里没有配对种子，也没有密钥材料。
+
+两种包，文件名不一样：
+
+  lean  AirPlayServer.Host-<版本>-win-x64.zip
+        AirPlayServer.Host-<版本>-linux-x64.zip
+        没有 Avalonia、Skia、HarfBuzz。不打开镜像窗口。给 TapClock、无图形会话、systemd 用。
+        --no-window 可以写，效果和默认一样。--help 和 --self-check 照常可用。
+
+  ui    同名再加 -ui，例如 AirPlayServer.Host-<版本>-win-x64-ui.zip。
+        带 Avalonia 镜像窗口。旁边的 libSkiaSharp / HarfBuzz 原生库要留在程序目录里，不要删。
+        没有嵌入 Inter 字体（没有中文，悬停数字用系统字体）。
+        Windows 这一包用软件绘制，不含 av_libglesv2.dll。
+        没有图形会话时加 --no-window。Linux 的 ui 包需要 libX11。
+
+--update 只下载和当前构建相同的那一种，不会把窗口包换成精简包，也不会反过来。
+v0.1.14 的更新器只认不带 -ui 的文件名，所以从那一版执行 --update 会落到精简包。
+要窗口请另外下载 -ui，解压到新目录。换种类时不要只靠 --update，旧的 Skia 库不会被删掉。
 
 先确认二进制还能跑自检：
 
@@ -73,8 +90,9 @@ Linux：sudo apt-get install ffmpeg
 这些库是 LGPL-2.1-or-later，带 GPL 组件的构建则是 GPL。分发它们时要遵守该构建的许可证。
 本程序是 GPL-3.0-only。更新不会删除你另外拷进来的 DLL / SO。
 
-Linux 包用 Avalonia / X11 打开镜像窗口，不包含 Media Foundation。没有图形会话时加 --no-window。没有 FFmpeg 时可以用 --demo-frame 检查导出。窗口旁边的 libSkiaSharp / HarfBuzz 原生库要留在程序目录里。
-linux-x64 包里的 airplayserver.service 是 systemd 草稿，不含 --seed。
+Linux 包不包含 Media Foundation。H.264 / HEVC 在运行时加载 FFmpeg。没有 FFmpeg 时可以用 --demo-frame 检查导出。
+lean 不打开窗口。ui 用 Avalonia / X11 打开镜像窗口，没有图形会话时加 --no-window，并且需要 libX11。
+linux-x64 包里的 airplayserver.service 是 systemd 草稿，不含 --seed。ui 包里的这份草稿带 --no-window。
 把 AirPlayServer.Host 拷到 /usr/local/bin/ 后再启用。
 这个二进制在 GitHub 的 ubuntu-latest 上构建，需要兼容的 glibc。
 
@@ -83,7 +101,7 @@ linux-x64 包里的 airplayserver.service 是 systemd 草稿，不含 --seed。
 
 默认不检查更新；用 --update 手动更新。普通启动不访问 GitHub。
 要更新时运行 --update 或 --check-update。版本以本目录的 VERSION.txt 为准。
-有较新稳定版时，下载同一平台的 zip，能对上 SHA256SUMS.txt 就先校验，
+有较新稳定版时，下载同一平台、同一种构建的 zip（lean 不带 -ui，ui 带 -ui），能对上 SHA256SUMS.txt 就先校验，
 再替换本目录里的程序和这些说明文件，然后重新启动。
 已经是最新稳定版时，这两条只打印版本并退出，不启动接收端。
 --no-update 仍然可以写，效果和默认一样，可以和其他参数一起用。

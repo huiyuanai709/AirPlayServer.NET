@@ -98,8 +98,8 @@ public sealed class AirPlayReceiver : IAsyncDisposable
     public MirrorSessionHub SessionEvents => _mirror.SessionEvents;
 
     /// <summary>
-    /// Pointer presses and releases from each mirror window. The host publishes
-    /// them to the configured webhook list. They are not sent to the phone.
+    /// Pointer presses, drags, and releases from each mirror window. The host
+    /// publishes them to the configured webhook list. They are not sent to the phone.
     /// </summary>
     public MirrorClickHub Clicks => _clicks;
 

@@ -178,8 +178,8 @@ static async Task<int> RunReceiverAsync(HostArgs arguments, CancellationToken ca
             windowLine = arguments.Options.TapClockLogicalScreen is { } hoverModel
                 ? "显示: 每一路镜像一个窗口（Windows、macOS、Linux），标题是设备名，只画该路最新一帧。鼠标悬停显示 TapClock 屏幕坐标 "
                     + AppleScreens.FormatPoints(hoverModel)
-                    + "。窗口里的点击不会发给手机。"
-                : "显示: 每一路镜像一个窗口（Windows、macOS、Linux），标题是设备名，只画该路最新一帧。未指定 --model，鼠标悬停显示解码帧像素。窗口里的点击不会发给手机。";
+                    + "。窗口里的按下、拖动和抬起不会发给手机。"
+                : "显示: 每一路镜像一个窗口（Windows、macOS、Linux），标题是设备名，只画该路最新一帧。未指定 --model，鼠标悬停显示解码帧像素。窗口里的按下、拖动和抬起不会发给手机。";
         }
 #else
         var windowLine = "显示: 精简构建，没有 Avalonia 窗口。画面仍可导出。";

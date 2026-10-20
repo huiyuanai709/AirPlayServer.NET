@@ -4,8 +4,9 @@ namespace AirPlayServer.Core.Video;
 
 /// <summary>
 /// One on-screen mirror. The host opens one surface per session.
-/// Pointer clicks stay in the window. <see cref="MirrorSurfaceRequest.ReportPointer"/>
-/// publishes them. They are not forwarded to the phone.
+/// Pointer presses, drags, and releases stay in the window.
+/// <see cref="MirrorSurfaceRequest.ReportPointer"/> publishes them.
+/// They are not forwarded to the phone.
 /// </summary>
 public interface IMirrorSurface : IAsyncDisposable
 {
@@ -33,8 +34,8 @@ public sealed class MirrorSurfaceRequest
     public CancellationToken CancellationToken { get; init; }
 
     /// <summary>
-    /// Press and release on this window, already mapped. Null when the host
-    /// does not publish pointer events. The callback must not send HID.
+    /// Press, drag, and release on this window, already mapped. Null when the
+    /// host does not publish pointer events. The callback must not send HID.
     /// </summary>
     public Action<MirrorPointerGesture>? ReportPointer { get; init; }
 }

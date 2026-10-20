@@ -112,7 +112,7 @@ public sealed class SessionEventDispatcher : IDisposable
         var body = new MirrorClickBody
         {
             Event = "mirror.click",
-            Phase = gesture.Phase == MirrorPointerPhase.Down ? "down" : "up",
+            Phase = PhaseName(gesture.Phase),
             At = SessionNotifyConfig.FormatTimestamp(gesture.At),
             SessionId = args.SessionId,
             Device = args.DeviceName ?? "",
@@ -141,6 +141,14 @@ public sealed class SessionEventDispatcher : IDisposable
             await PostAsync(url, json, config.WebhookSecretHeader, config.WebhookSecret, "Webhook").ConfigureAwait(false);
         }
     }
+
+    private static string PhaseName(MirrorPointerPhase phase) => phase switch
+    {
+        MirrorPointerPhase.Down => "down",
+        MirrorPointerPhase.Move => "move",
+        MirrorPointerPhase.Up => "up",
+        _ => throw new ArgumentOutOfRangeException(nameof(phase), phase, "Mirror pointer phase is not down, move, or up."),
+    };
 
     private static string ButtonName(MirrorPointerButton button) => button switch
     {

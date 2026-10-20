@@ -68,7 +68,7 @@ internal sealed class HostArgs
         --seed           仅存在于内存的 32 字节身份种子，不会写入磁盘。
         --screen WxH     AirPlay /info 向手机宣告的镜像分辨率（width、height、widthPixels、heightPixels）。
                          宿主默认 480x1040。这是广告尺寸，用来让手机送出镜像。
-                         它不是 UIKit 逻辑点，也不是 Windows 窗口里的点击坐标。
+                         它不是 UIKit 逻辑点，也不是镜像窗口里的点击坐标。
                          显式写出的 --screen 决定宣告。--model 不改这个值。
         --model <slug>   TapClock 点击对齐用的竖屏 UIKit 逻辑点，和 TapClock 的机型表相同。
                          例如 iphone-15-pro 是 393×852 point，不是 1179×2556 物理像素。
@@ -88,7 +88,7 @@ internal sealed class HostArgs
                          必须是正整数，0 和负数无效，没有硬上限。内存和 CPU 不够时会先撑不住。
                          每一路有自己的数据端口、解密、解码、画面和 session_id。
                          新手机不会踢掉已经连上的那一路。同一 IPv4 再次 SETUP 仍算同一路（锁屏重连）。
-                         Windows 上每一路一个窗口，标题是设备名。
+                         Windows、macOS 和 Linux 上每一路一个窗口，标题是设备名。
         --tapclock-dir   备用：把 JPEG 写进该目录。文件名带来源镜像数据对端的 IP，
                          例如 mirror-192.168.5.20.jpg。IPv6 的冒号会换成短横线。
                          还不知道对端时写 mirror-unknown.jpg。两台手机各写各的文件，互不覆盖。
@@ -119,8 +119,8 @@ internal sealed class HostArgs
                          Native AOT 不能在运行时加载托管程序集，所以这里只接受原生库。
         --demo-frame     推送一张合成画面，用来检查窗口和 TapClock。那不是手机屏幕。
         点击不在本进程发送。TapClock 的点击仍走 TCP 42123（ATB/1），坐标按 --model 的 UIKit 点对齐。
-        Windows 窗口里，鼠标停在画面上时，标题和左上角显示 TapClock 绝对屏幕坐标（标签「TapClock x, y」）。
-        窗口把画面拉伸到客户区。点先换成解码帧像素（整数截断，画面外的黑边不算），再按 TapClock 的算法换成屏幕点：screen = 帧像素 * --model 宽高 / 帧宽高（整数除法，X 和 Y 分开算）。
+        窗口里，鼠标停在画面上时，标题和左上角显示 TapClock 绝对屏幕坐标（标签「TapClock x, y」）。
+        画面按比例放进客户区，比例不同时留黑边。点先换成解码帧像素（整数截断，画面外的黑边不算），再按 TapClock 的算法换成屏幕点：screen = 帧像素 * --model 宽高 / 帧宽高（整数除法，X 和 Y 分开算）。
         例如 --model iphone-15-pro-max 是 430×932。480×1040 的帧上，像素 (323, 850) 读成 TapClock 289, 761，和 TapClock 日志里的「屏幕坐标」是同一套点。
         没写 --model 时，图像尺寸就是屏幕，标签退回「像素 x, y」。悬停不使用 --screen 的广告分辨率。点击仍然不发给手机。
         默认不检查更新；用 --update 手动更新。普通启动不访问 GitHub。

@@ -66,6 +66,19 @@ compiled only into the Windows host. The linux-x64 publish does not link
 `mfplat` or `user32`. JPEG stills for TapClock are encoded in-process;
 ImageSharp is not linked.
 
+## Avalonia
+
+The mirror window is Avalonia 12.1 (MIT). The UI is constructed in code. There
+is no XAML and no reflection-based control lookup. Native AOT publish copies
+that RID's Skia and HarfBuzz libraries next to the host. They load when a
+window opens, not during `--help` or `--self-check`. Linux uses the X11
+backend and needs `libX11` at runtime. macOS uses Avalonia.Native. A linux
+publish does not reference the Win32 backend.
+
+Copyright (c) AvaloniaUI OÜ and contributors. <https://github.com/AvaloniaUI/Avalonia>
+Skia is Copyright (c) Google Inc. (BSD). HarfBuzz is Copyright (c) the HarfBuzz
+contributors.
+
 ## FFmpeg
 
 FFmpeg is an optional runtime dependency. The host loads `libavcodec` and

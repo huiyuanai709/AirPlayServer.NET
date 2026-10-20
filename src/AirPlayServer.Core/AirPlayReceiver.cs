@@ -190,17 +190,44 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 tapClock = TapClockExporter.Start(options.TapClock, mirror.ExportSources, log, CancellationToken.None);
             }
 
-            if (options.ShowWindow && !OperatingSystem.IsWindows())
+            if (options.ShowWindow && options.OpenMirrorSurface is null)
             {
-                log.Log(AirPlayLogLevel.Information, "Windows display window is not created on this OS. Frames can still be exported.");
+                log.Log(AirPlayLogLevel.Information, "没有接上镜像窗口，画面仍可导出。No mirror window was attached. Frames can still be exported.");
             }
+
             var windowGroup = new MirrorWindowGroup();
             windows = windowGroup;
             var logicalWidth = options.TapClockLogicalScreen?.Width ?? 0;
             var logicalHeight = options.TapClockLogicalScreen?.Height ?? 0;
+            IMirrorSurface? OpenSurface(FrameSlot slot, string title)
+            {
+                if (!options.ShowWindow || options.OpenMirrorSurface is null)
+                {
+                    return null;
+                }
+
+                try
+                {
+                    return options.OpenMirrorSurface(new MirrorSurfaceRequest
+                    {
+                        Frames = slot,
+                        Title = title,
+                        Log = log,
+                        TapClockScreenWidth = logicalWidth,
+                        TapClockScreenHeight = logicalHeight,
+                        CancellationToken = cancellationToken,
+                    });
+                }
+                catch (Exception ex)
+                {
+                    log.Log(AirPlayLogLevel.Warning, "镜像窗口没有打开: " + ex.Message + " The mirror window was not opened: " + ex.Message);
+                    return null;
+                }
+            }
+
             if (options.ShowWindow)
             {
-                windowGroup.Add(mirror.Primary, MirrorWindows.TryOpen(frames, instance, log, logicalWidth, logicalHeight, CancellationToken.None));
+                windowGroup.Add(mirror.Primary, OpenSurface(frames, instance));
             }
 
             mirror.PipeAdded += pipe =>
@@ -211,7 +238,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 }
 
                 var title = string.IsNullOrWhiteSpace(pipe.DeviceName) ? "镜像 " + pipe.Activity.DataPort : pipe.DeviceName;
-                windowGroup.Add(pipe, MirrorWindows.TryOpen(pipe.Frames, title, log, logicalWidth, logicalHeight, CancellationToken.None));
+                windowGroup.Add(pipe, OpenSurface(pipe.Frames, title));
             };
             mirror.DeviceNamed += windowGroup.Rename;
             control = ControlServer.Start(
@@ -357,11 +384,11 @@ public sealed class AirPlayReceiver : IAsyncDisposable
     private sealed class MirrorWindowGroup : IAsyncDisposable
     {
         private readonly object _gate = new();
-        private readonly List<IMirrorWindow> _open = [];
-        private readonly Dictionary<MirrorPipe, IMirrorWindow> _byPipe = new();
+        private readonly List<IMirrorSurface> _open = [];
+        private readonly Dictionary<MirrorPipe, IMirrorSurface> _byPipe = new();
         private int _disposed;
 
-        public void Add(MirrorPipe pipe, IMirrorWindow? window)
+        public void Add(MirrorPipe pipe, IMirrorSurface? window)
         {
             if (window is null)
             {
@@ -383,7 +410,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
 
         public void Rename(MirrorPipe pipe)
         {
-            IMirrorWindow? window;
+            IMirrorSurface? window;
             lock (_gate)
             {
                 _byPipe.TryGetValue(pipe, out window);
@@ -399,7 +426,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 return;
             }
 
-            IMirrorWindow[] copy;
+            IMirrorSurface[] copy;
             lock (_gate)
             {
                 copy = _open.ToArray();

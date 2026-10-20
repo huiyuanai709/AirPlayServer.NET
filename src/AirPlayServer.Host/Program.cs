@@ -4,6 +4,7 @@ using AirPlayServer.Core;
 using AirPlayServer.Core.Export;
 using AirPlayServer.Core.Protocol;
 using AirPlayServer.Host;
+using AirPlayServer.Host.Display;
 using AirPlayServer.Host.Notify;
 using AirPlayServer.Host.Update;
 
@@ -73,131 +74,157 @@ if (arguments.UpdateMode == HostUpdateMode.Automatic && !HostUpdate.WasJustUpdat
     }
 }
 
-SessionNotifyPlan notifyPlan;
+if (arguments.Options.ShowWindow && OperatingSystem.IsMacOS())
+{
+    return AvaloniaMirrorDisplay.RunOnMainThread(arguments.Options, () => RunReceiverAsync(arguments, shutdown.Token));
+}
+
+if (arguments.Options.ShowWindow)
+{
+    arguments.Options.OpenMirrorSurface = AvaloniaMirrorDisplay.Open;
+}
+
 try
 {
-    notifyPlan = SessionNotifyService.Load(arguments.Notify);
+    return await RunReceiverAsync(arguments, shutdown.Token).ConfigureAwait(false);
 }
-catch (Exception ex) when (ex is InvalidDataException or ArgumentException or IOException)
+finally
 {
-    Console.Error.WriteLine("通知配置无效: " + ex.Message);
-    return 1;
-}
-
-AirPlayReceiver receiver;
-try
-{
-    receiver = await AirPlayReceiver.StartAsync(arguments.Options, shutdown.Token).ConfigureAwait(false);
-}
-catch (Exception ex) when (ex is ArgumentException or IOException or SocketException)
-{
-    Console.Error.WriteLine("启动失败: " + ex.Message);
-    return 1;
+    AvaloniaMirrorDisplay.Shutdown();
 }
 
-SessionNotifyService notify;
-try
+static async Task<int> RunReceiverAsync(HostArgs arguments, CancellationToken cancellationToken)
 {
-    notify = SessionNotifyService.Start(notifyPlan, receiver);
-}
-catch (Exception ex) when (ex is ArgumentException or IOException or SocketException or InvalidDataException)
-{
-    await receiver.DisposeAsync().ConfigureAwait(false);
-    Console.Error.WriteLine("通知页面启动失败: " + ex.Message);
-    return 1;
-}
-
-await using (receiver)
-await using (notify)
-{
-    Console.WriteLine("AirPlayServer.NET 接收端已启动");
-    Console.WriteLine("名称: " + receiver.Name);
-    Console.WriteLine("设备 ID: " + receiver.DeviceId);
-    Console.WriteLine("AirPlay 控制: " + receiver.AirPlayEndPoint);
-    Console.WriteLine("RAOP 控制: " + receiver.RaopEndPoint);
-    Console.WriteLine(receiver.DiscoveryReceiving
-        ? "mDNS: 正在广播并应答 _airplay._tcp / _raop._tcp"
-        : arguments.Options.EnableDiscovery
-            ? "mDNS: 查询端口不可用，仅尝试发送通告"
-            : "mDNS: 已关闭");
-    Console.WriteLine("宣告画面: " + arguments.Options.DisplayWidth + "x" + arguments.Options.DisplayHeight
-        + "（AirPlay /info 广告分辨率。点击对齐的 UIKit 点见下一行）");
-    if (arguments.Options.TapClockLogicalScreen is { } logical)
-    {
-        Console.WriteLine("TapClock 逻辑点: " + logical.Slug + " " + AppleScreens.FormatPoints(logical)
-            + "（竖屏 UIKit 点，点击对齐）。宣告画面仍是上面的 "
-            + arguments.Options.DisplayWidth + "x" + arguments.Options.DisplayHeight + "。");
-    }
-    else
-    {
-        Console.WriteLine("TapClock 逻辑点: 未指定。--model 选择点击对齐的 UIKit 点，宣告画面保持 "
-            + arguments.Options.DisplayWidth + "x" + arguments.Options.DisplayHeight + "。");
-    }
-    Console.WriteLine("镜像数据端口: " + receiver.Mirror.DataPort + "，计时端口: " + receiver.Mirror.TimingPort);
-    var mirrorLimit = arguments.Options.MaxMirrors == AirPlayReceiverOptions.DefaultMaxMirrors
-        ? "不限制路数"
-        : "最多 " + arguments.Options.MaxMirrors.ToString(CultureInfo.InvariantCulture) + " 路";
-    Console.WriteLine("同时镜像: " + mirrorLimit
-        + "。每路独立数据端口、会话和窗口。导出文件为 mirror-<来源IP>.jpg。");
-    var windowLine = "显示: 当前进程没有打开窗口。";
-    if (arguments.Options.ShowWindow && OperatingSystem.IsWindows())
-    {
-        windowLine = arguments.Options.TapClockLogicalScreen is { } hoverModel
-            ? "显示: 每一路镜像一个 Windows 窗口，标题是设备名，只画该路最新一帧。鼠标悬停显示 TapClock 屏幕坐标 "
-                + AppleScreens.FormatPoints(hoverModel)
-                + "。窗口里的点击不会发给手机。"
-            : "显示: 每一路镜像一个 Windows 窗口，标题是设备名，只画该路最新一帧。未指定 --model，鼠标悬停显示解码帧像素。窗口里的点击不会发给手机。";
-    }
-
-    Console.WriteLine(windowLine);
-    if (arguments.Options.TapClock is { Enabled: true } tapClock)
-    {
-        Console.WriteLine("TapClock: "
-            + (string.IsNullOrWhiteSpace(tapClock.Endpoint) ? "不推 TCP" : "ATBF JPEG -> " + tapClock.Endpoint)
-            + (string.IsNullOrWhiteSpace(tapClock.WatchDirectory) ? "" : "，目录 " + tapClock.WatchDirectory)
-            + "，约 " + tapClock.FramesPerSecond.ToString(CultureInfo.InvariantCulture) + " fps");
-    }
-    else
-    {
-        Console.WriteLine("TapClock: 未启用。需要 --tapclock host:42125 或 --tapclock-dir。");
-    }
-
-    if (!string.IsNullOrWhiteSpace(arguments.Options.MediaKeyPluginPath))
-    {
-        Console.WriteLine("FairPlay：--media-key-plugin 已接上。各路镜像共用这个原生库的握手；没有对应导出时那一项失败关闭。");
-    }
-    else
-    {
-        Console.WriteLine("FairPlay：进程内 AirPlayFairPlay 已启用。每一路镜像有自己的 /fp-setup 握手，不和另一台手机共用。");
-    }
-
-    if (arguments.Options.LabContentKey is not null)
-    {
-        Console.WriteLine("内容密钥：SETUP 使用 --lab-key 的 16 字节实验密钥。");
-    }
-    foreach (var line in notify.StartupLines())
-    {
-        Console.WriteLine(line);
-    }
-
-    Console.WriteLine("H.264 解码器: " + receiver.Mirror.DecoderName + "。点击仍由 TapClock 走 TCP 42123，坐标是板上的 HID 计数。");
-    if (receiver.AdvertisesHevc)
-    {
-        Console.WriteLine("HEVC：已打开。解码器: " + receiver.HevcDecoderName + "。mDNS 和 /info 的 features 置上第 42 位（SupportsScreenMultiCodec）。手机仍可能选择 H.264。");
-    }
-    else if (arguments.Options.AcceptHevc)
-    {
-        Console.WriteLine("HEVC：--h265 已忽略。没有可用的解码器，features 第 42 位不会置上，手机继续发送 H.264。");
-    }
-    Console.WriteLine("按 Ctrl+C 停止。");
+    SessionNotifyPlan notifyPlan;
     try
     {
-        await Task.Delay(Timeout.Infinite, shutdown.Token).ConfigureAwait(false);
+        notifyPlan = SessionNotifyService.Load(arguments.Notify);
     }
-    catch (OperationCanceledException)
+    catch (Exception ex) when (ex is InvalidDataException or ArgumentException or IOException)
     {
+        Console.Error.WriteLine("通知配置无效: " + ex.Message);
+        return 1;
     }
-}
 
-Console.WriteLine("已停止。");
-return 0;
+    AirPlayReceiver receiver;
+    try
+    {
+        receiver = await AirPlayReceiver.StartAsync(arguments.Options, cancellationToken).ConfigureAwait(false);
+    }
+    catch (Exception ex) when (ex is ArgumentException or IOException or SocketException)
+    {
+        Console.Error.WriteLine("启动失败: " + ex.Message);
+        return 1;
+    }
+
+    SessionNotifyService notify;
+    try
+    {
+        notify = SessionNotifyService.Start(notifyPlan, receiver);
+    }
+    catch (Exception ex) when (ex is ArgumentException or IOException or SocketException or InvalidDataException)
+    {
+        await receiver.DisposeAsync().ConfigureAwait(false);
+        Console.Error.WriteLine("通知页面启动失败: " + ex.Message);
+        return 1;
+    }
+
+    await using (receiver)
+    await using (notify)
+    {
+        Console.WriteLine("AirPlayServer.NET 接收端已启动");
+        Console.WriteLine("名称: " + receiver.Name);
+        Console.WriteLine("设备 ID: " + receiver.DeviceId);
+        Console.WriteLine("AirPlay 控制: " + receiver.AirPlayEndPoint);
+        Console.WriteLine("RAOP 控制: " + receiver.RaopEndPoint);
+        Console.WriteLine(receiver.DiscoveryReceiving
+            ? "mDNS: 正在广播并应答 _airplay._tcp / _raop._tcp"
+            : arguments.Options.EnableDiscovery
+                ? "mDNS: 查询端口不可用，仅尝试发送通告"
+                : "mDNS: 已关闭");
+        Console.WriteLine("宣告画面: " + arguments.Options.DisplayWidth + "x" + arguments.Options.DisplayHeight
+            + "（AirPlay /info 广告分辨率。点击对齐的 UIKit 点见下一行）");
+        if (arguments.Options.TapClockLogicalScreen is { } logical)
+        {
+            Console.WriteLine("TapClock 逻辑点: " + logical.Slug + " " + AppleScreens.FormatPoints(logical)
+                + "（竖屏 UIKit 点，点击对齐）。宣告画面仍是上面的 "
+                + arguments.Options.DisplayWidth + "x" + arguments.Options.DisplayHeight + "。");
+        }
+        else
+        {
+            Console.WriteLine("TapClock 逻辑点: 未指定。--model 选择点击对齐的 UIKit 点，宣告画面保持 "
+                + arguments.Options.DisplayWidth + "x" + arguments.Options.DisplayHeight + "。");
+        }
+        Console.WriteLine("镜像数据端口: " + receiver.Mirror.DataPort + "，计时端口: " + receiver.Mirror.TimingPort);
+        var mirrorLimit = arguments.Options.MaxMirrors == AirPlayReceiverOptions.DefaultMaxMirrors
+            ? "不限制路数"
+            : "最多 " + arguments.Options.MaxMirrors.ToString(CultureInfo.InvariantCulture) + " 路";
+        Console.WriteLine("同时镜像: " + mirrorLimit
+            + "。每路独立数据端口、会话和窗口。导出文件为 mirror-<来源IP>.jpg。");
+        var windowLine = "显示: 当前进程没有打开窗口。";
+        if (arguments.Options.ShowWindow && !AvaloniaMirrorDisplay.HasOpenedSurface)
+        {
+            windowLine = "显示: 窗口没有打开，画面仍可导出。无图形会话时加 --no-window。";
+        }
+        else if (arguments.Options.ShowWindow)
+        {
+            windowLine = arguments.Options.TapClockLogicalScreen is { } hoverModel
+                ? "显示: 每一路镜像一个窗口（Windows、macOS、Linux），标题是设备名，只画该路最新一帧。鼠标悬停显示 TapClock 屏幕坐标 "
+                    + AppleScreens.FormatPoints(hoverModel)
+                    + "。窗口里的点击不会发给手机。"
+                : "显示: 每一路镜像一个窗口（Windows、macOS、Linux），标题是设备名，只画该路最新一帧。未指定 --model，鼠标悬停显示解码帧像素。窗口里的点击不会发给手机。";
+        }
+
+        Console.WriteLine(windowLine);
+        if (arguments.Options.TapClock is { Enabled: true } tapClock)
+        {
+            Console.WriteLine("TapClock: "
+                + (string.IsNullOrWhiteSpace(tapClock.Endpoint) ? "不推 TCP" : "ATBF JPEG -> " + tapClock.Endpoint)
+                + (string.IsNullOrWhiteSpace(tapClock.WatchDirectory) ? "" : "，目录 " + tapClock.WatchDirectory)
+                + "，约 " + tapClock.FramesPerSecond.ToString(CultureInfo.InvariantCulture) + " fps");
+        }
+        else
+        {
+            Console.WriteLine("TapClock: 未启用。需要 --tapclock host:42125 或 --tapclock-dir。");
+        }
+
+        if (!string.IsNullOrWhiteSpace(arguments.Options.MediaKeyPluginPath))
+        {
+            Console.WriteLine("FairPlay：--media-key-plugin 已接上。各路镜像共用这个原生库的握手；没有对应导出时那一项失败关闭。");
+        }
+        else
+        {
+            Console.WriteLine("FairPlay：进程内 AirPlayFairPlay 已启用。每一路镜像有自己的 /fp-setup 握手，不和另一台手机共用。");
+        }
+
+        if (arguments.Options.LabContentKey is not null)
+        {
+            Console.WriteLine("内容密钥：SETUP 使用 --lab-key 的 16 字节实验密钥。");
+        }
+        foreach (var line in notify.StartupLines())
+        {
+            Console.WriteLine(line);
+        }
+
+        Console.WriteLine("H.264 解码器: " + receiver.Mirror.DecoderName + "。点击仍由 TapClock 走 TCP 42123，坐标是板上的 HID 计数。");
+        if (receiver.AdvertisesHevc)
+        {
+            Console.WriteLine("HEVC：已打开。解码器: " + receiver.HevcDecoderName + "。mDNS 和 /info 的 features 置上第 42 位（SupportsScreenMultiCodec）。手机仍可能选择 H.264。");
+        }
+        else if (arguments.Options.AcceptHevc)
+        {
+            Console.WriteLine("HEVC：--h265 已忽略。没有可用的解码器，features 第 42 位不会置上，手机继续发送 H.264。");
+        }
+        Console.WriteLine("按 Ctrl+C 停止。");
+        try
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    Console.WriteLine("已停止。");
+    return 0;
+}

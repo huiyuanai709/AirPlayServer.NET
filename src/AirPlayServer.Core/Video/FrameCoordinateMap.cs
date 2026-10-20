@@ -11,8 +11,8 @@ namespace AirPlayServer.Core.Video;
 /// A point outside that rectangle, including the bars, is not on the picture.
 /// A point inside maps with
 /// <c>frame = (client - origin) * frameSize / destinationSize</c> (integer
-/// truncation), then clamps to <c>[0, frameSize)</c>. GDI may filter the
-/// pixels when the destination size differs; this map stays the integer sample.
+/// truncation), then clamps to <c>[0, frameSize)</c>. The window samples with
+/// the same integer grid; this map does not follow a filtered pixel.
 /// Frame pixels then use TapClock <c>ScreenMap.FromImage</c>:
 /// <c>screen = frame * screenSize / frameSize</c>, also integer truncation, with
 /// X and Y scaled on their own axes. A non-positive screen size means

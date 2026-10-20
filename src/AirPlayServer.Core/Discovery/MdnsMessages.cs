@@ -10,7 +10,10 @@ internal static class MdnsMessages
     public const uint TtlSeconds = MdnsCadence.TtlSeconds;
 
     public static byte[] BuildAnnouncement(ReceiverAdvertisement advertisement, IPAddress? address = null)
-        => BuildResponse(advertisement, id: 0, includeAirPlay: true, includeRaop: true, address);
+        => BuildResponse(advertisement, id: 0, includeAirPlay: true, includeRaop: true, AddressList(address));
+
+    public static byte[] BuildAnnouncement(ReceiverAdvertisement advertisement, IReadOnlyList<IPAddress> addresses)
+        => BuildResponse(advertisement, id: 0, includeAirPlay: true, includeRaop: true, addresses);
 
     public static bool TryBuildQueryResponse(
         ReadOnlySpan<byte> query,
@@ -19,6 +22,15 @@ internal static class MdnsMessages
         out int written,
         out bool unicast,
         IPAddress? address = null)
+        => TryBuildQueryResponse(query, advertisement, destination, out written, out unicast, AddressList(address));
+
+    public static bool TryBuildQueryResponse(
+        ReadOnlySpan<byte> query,
+        ReceiverAdvertisement advertisement,
+        Span<byte> destination,
+        out int written,
+        out bool unicast,
+        IReadOnlyList<IPAddress>? addresses)
     {
         written = 0;
         unicast = false;
@@ -54,7 +66,7 @@ internal static class MdnsMessages
             raop = true;
         }
 
-        var packet = BuildResponse(advertisement, id, airPlay, raop, address);
+        var packet = BuildResponse(advertisement, id, airPlay, raop, addresses);
         if (packet.Length > destination.Length)
         {
             return false;
@@ -65,6 +77,9 @@ internal static class MdnsMessages
         return true;
     }
 
+    private static IReadOnlyList<IPAddress>? AddressList(IPAddress? address)
+        => address is null ? null : [address];
+
     public static byte[] BuildQuery(ushort id, string service)
     {
         var writer = new DnsWriter();
@@ -73,46 +88,48 @@ internal static class MdnsMessages
         return writer.ToArray();
     }
 
-    private static byte[] BuildResponse(ReceiverAdvertisement advertisement, ushort id, bool includeAirPlay, bool includeRaop, IPAddress? address)
+    private static byte[] BuildResponse(
+        ReceiverAdvertisement advertisement,
+        ushort id,
+        bool includeAirPlay,
+        bool includeRaop,
+        IReadOnlyList<IPAddress>? addresses)
     {
-        address ??= advertisement.Address;
-        var answerCount = 0;
-        if (includeAirPlay)
-        {
-            answerCount += address is null ? 3 : 4;
-        }
-
-        if (includeRaop)
-        {
-            answerCount += address is null ? 3 : 4;
-        }
-
-        if (includeAirPlay && includeRaop && address is not null)
-        {
-            // The host A record is shared. Count it once.
-            answerCount--;
-        }
+        var published = NormalizeAddresses(addresses, advertisement);
+        var services = (includeAirPlay ? 1 : 0) + (includeRaop ? 1 : 0);
+        // PTR + SRV + TXT per service. Every A record is shared by the host name, so it is counted once.
+        var answerCount = (services * 3) + (services > 0 ? published.Count : 0);
 
         var writer = new DnsWriter();
         writer.WriteHeader(id, AuthoritativeResponse, questions: 0, (ushort)answerCount, authority: 0, additional: 0);
         var wroteAddress = false;
         if (includeAirPlay)
         {
-            WriteService(writer, advertisement, address, "_airplay", advertisement.InstanceName, advertisement.AirPlayPort, ServiceText.AirPlay(advertisement), ref wroteAddress);
+            WriteService(writer, advertisement, published, "_airplay", advertisement.InstanceName, advertisement.AirPlayPort, ServiceText.AirPlay(advertisement), ref wroteAddress);
         }
 
         if (includeRaop)
         {
-            WriteService(writer, advertisement, address, "_raop", advertisement.RaopInstance, advertisement.RaopPort, ServiceText.Raop(advertisement), ref wroteAddress);
+            WriteService(writer, advertisement, published, "_raop", advertisement.RaopInstance, advertisement.RaopPort, ServiceText.Raop(advertisement), ref wroteAddress);
         }
 
         return writer.ToArray();
     }
 
+    private static IReadOnlyList<IPAddress> NormalizeAddresses(IReadOnlyList<IPAddress>? addresses, ReceiverAdvertisement advertisement)
+    {
+        if (addresses is { Count: > 0 })
+        {
+            return addresses;
+        }
+
+        return advertisement.Address is null ? [] : [advertisement.Address];
+    }
+
     private static void WriteService(
         DnsWriter writer,
         ReceiverAdvertisement advertisement,
-        IPAddress? address,
+        IReadOnlyList<IPAddress> addresses,
         string service,
         string instance,
         ushort port,
@@ -122,11 +139,19 @@ internal static class MdnsMessages
         writer.WritePtr(service, instance, TtlSeconds);
         writer.WriteSrv(instance, service, port, advertisement.HostLabel, TtlSeconds);
         writer.WriteTxt(instance, service, text, TtlSeconds);
-        if (!wroteAddress && address is not null)
+        if (wroteAddress || addresses.Count == 0)
+        {
+            return;
+        }
+
+        // One cache-flush set. Separate packets each flushing a different A record
+        // are what replaced the LAN address with the hotspot and stalled the picture.
+        foreach (var address in addresses)
         {
             writer.WriteAddress(advertisement.HostLabel, address, TtlSeconds);
-            wroteAddress = true;
         }
+
+        wroteAddress = true;
     }
 
     private static bool Matches(DnsQuestion question, ReceiverAdvertisement advertisement, ref bool airPlay, ref bool raop, ref bool host)

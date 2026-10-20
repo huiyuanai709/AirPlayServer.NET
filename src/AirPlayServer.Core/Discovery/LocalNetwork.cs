@@ -45,9 +45,10 @@ internal static class LocalNetwork
         => SelectAdvertisementAddress(listenAddress, EnumerateCandidates());
 
     /// <summary>
-    /// IPv4 published in mDNS. An explicit unicast listen address is returned
-    /// unchanged. <see cref="IPAddress.Any"/> prefers one reachable LAN address.
-    /// The announcer publishes that single address, not every NIC.
+    /// Primary IPv4. An explicit unicast listen address is returned unchanged.
+    /// <see cref="IPAddress.Any"/> returns the first address from
+    /// <see cref="SelectAdvertisedNics"/> (a gateway LAN when one exists).
+    /// The announcer publishes every address in that list, not only this one.
     /// </summary>
     internal static IPAddress? SelectAdvertisementAddress(
         IPAddress listenAddress,
@@ -61,13 +62,13 @@ internal static class LocalNetwork
         => SelectAdvertisedNics(listenAddress, EnumerateCandidates());
 
     /// <summary>
-    /// The IPv4 the announcer should publish. An explicit unicast listen address
-    /// stays a single entry. <see cref="IPAddress.Any"/> returns one up, non-virtual
-    /// LAN address: the first gateway RFC1918 Wi-Fi or Ethernet interface in
-    /// enumeration order. Other real NICs are not added. A second A record for the
-    /// same hostname (especially Windows Mobile Hotspot <c>192.168.137.1</c>) leaves
-    /// the RTSP session up while the picture waits for a keyframe. Virtual, hotspot,
-    /// and link-local addresses are used only when nothing else is up.
+    /// Every IPv4 the announcer should publish. An explicit unicast listen address
+    /// stays a single entry. <see cref="IPAddress.Any"/> returns each up, non-virtual
+    /// RFC1918 address, gateway Wi-Fi and Ethernet first. Windows Mobile Hotspot,
+    /// ICS, and Wi-Fi Direct stay out of this list: a second A record for
+    /// <c>192.168.137.1</c> leaves the RTSP session up while the picture waits for
+    /// a keyframe. Virtual, hotspot, and link-local addresses are used only when
+    /// nothing else is up.
     /// </summary>
     internal static IReadOnlyList<AdvertisedNic> SelectAdvertisedNics(
         IPAddress listenAddress,
@@ -132,7 +133,13 @@ internal static class LocalNetwork
 
     internal static IReadOnlyList<AdvertisedNic> ChooseReachableNics(IReadOnlyList<AdvertisementCandidate> candidates)
     {
-        AdvertisedNic? reachable = null;
+        // Gateway LANs first, then any other real RFC1918 NIC. Stopping at the
+        // first gateway (v0.1.21) dropped a second office subnet, so a phone on
+        // that subnet never saw an on-link address. Hotspot and ICS never enter
+        // these lists; they are not a second real LAN.
+        var preferred = new List<AdvertisedNic>();
+        var otherLan = new List<AdvertisedNic>();
+        var other = new List<AdvertisedNic>();
         AdvertisedNic? fallback = null;
         var seen = new HashSet<IPAddress>();
 
@@ -155,24 +162,132 @@ internal static class LocalNetwork
                 continue;
             }
 
-            // First gateway LAN wins. That is the pre-#41 choice, and it stays
-            // one A record even when Ethernet and Wi-Fi are both up.
-            if (IsEthernetOrWireless(candidate.InterfaceType)
-                && IsRfc1918(candidate.Address)
-                && candidate.HasGateway)
+            if (IsRfc1918(candidate.Address))
             {
-                return [nic];
+                if (candidate.HasGateway && IsEthernetOrWireless(candidate.InterfaceType))
+                {
+                    preferred.Add(nic);
+                }
+                else
+                {
+                    otherLan.Add(nic);
+                }
+
+                continue;
             }
 
-            reachable ??= nic;
+            other.Add(nic);
         }
 
-        if (reachable is not null)
+        if (preferred.Count > 0 || otherLan.Count > 0)
         {
-            return [reachable.Value];
+            var lans = new List<AdvertisedNic>(preferred.Count + otherLan.Count);
+            lans.AddRange(preferred);
+            lans.AddRange(otherLan);
+            return lans;
+        }
+
+        if (other.Count > 0)
+        {
+            return other;
         }
 
         return fallback is null ? [] : [fallback.Value];
+    }
+
+    /// <summary>
+    /// True when <paramref name="remote"/> shares a known prefix with an
+    /// advertised NIC. A prefix of 0 or less is treated as unknown, not as
+    /// "different subnet".
+    /// </summary>
+    internal static bool QuerierOnAdvertisedLan(IPAddress remote, IReadOnlyList<AdvertisedNic> nics)
+    {
+        foreach (var nic in nics)
+        {
+            if (nic.PrefixLength <= 0)
+            {
+                continue;
+            }
+
+            if (SharesPrefix(remote, nic.Address, nic.PrefixLength))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// QU-bit and legacy (source port other than 5353) queries are always unicast.
+    /// A querier that sits on none of the advertised prefixes also gets a unicast
+    /// copy: a multicast reply pinned to 172.16.88.168 does not reach 172.16.93.211.
+    /// </summary>
+    internal static bool ShouldReplyUnicast(bool quBit, int remotePort, IPAddress? remote, IReadOnlyList<AdvertisedNic> nics)
+    {
+        if (quBit || (remotePort is not 0 and not MdnsSockets.Port))
+        {
+            return true;
+        }
+
+        if (remote is null || QuerierOnAdvertisedLan(remote, nics) || !HasAdvertisedPrefix(nics))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Addresses to put in one response. <paramref name="preferred"/> is first so
+    /// the on-link NIC leads when the querier matched one. The rest of the
+    /// advertised set follows; hotspot addresses are never in <paramref name="nics"/>.
+    /// </summary>
+    internal static IPAddress[] ReplyAddresses(IPAddress? preferred, IReadOnlyList<AdvertisedNic> nics)
+    {
+        var list = new List<IPAddress>(nics.Count + 1);
+        if (preferred is not null)
+        {
+            list.Add(preferred);
+        }
+
+        foreach (var nic in nics)
+        {
+            if (ContainsAddress(list, nic.Address))
+            {
+                continue;
+            }
+
+            list.Add(nic.Address);
+        }
+
+        return list.ToArray();
+    }
+
+    private static bool HasAdvertisedPrefix(IReadOnlyList<AdvertisedNic> nics)
+    {
+        foreach (var nic in nics)
+        {
+            if (nic.PrefixLength > 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ContainsAddress(List<IPAddress> addresses, IPAddress address)
+    {
+        foreach (var candidate in addresses)
+        {
+            if (candidate.Equals(address))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

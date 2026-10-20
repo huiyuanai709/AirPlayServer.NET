@@ -53,7 +53,7 @@ internal static class MdnsCadence
     public static TimeSpan AddressPollInterval => TimeSpan.FromMilliseconds(AddressPollMilliseconds);
 
     /// <summary>
-    /// True only when the published A record changed. Hotspot-only flaps are
+    /// True only when the published address set changed. Hotspot-only flaps are
     /// absent from both lists once selection has run, so they return false.
     /// A true result is one mDNS announcement. It does not reset a mirror.
     /// </summary>

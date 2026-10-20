@@ -116,27 +116,25 @@ public sealed class LocalNetworkTests
     }
 
     [Fact]
-    public void Any_advertises_one_gateway_lan_and_skips_hyperv()
+    public void Any_advertises_each_gateway_lan_and_skips_hyperv()
     {
-        var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any,
+        AdvertisementCandidate[] candidates =
         [
             Nic("vEthernet (Default Switch)", "172.17.96.1", gateway: true, description: "Hyper-V Virtual Ethernet Adapter"),
             Nic("Ethernet", "192.168.5.15", gateway: true, description: "Realtek PCIe GbE Family Controller"),
             Nic("Wi-Fi", "192.168.1.20", type: NetworkInterfaceType.Wireless80211, gateway: true),
-        ]);
+        ];
 
-        Assert.Single(nics);
+        var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any, candidates);
+
+        Assert.Equal(2, nics.Count);
         Assert.Equal(IPAddress.Parse("192.168.5.15"), nics[0].Address);
-        Assert.Equal(IPAddress.Parse("192.168.5.15"), LocalNetwork.SelectAdvertisementAddress(IPAddress.Any,
-        [
-            Nic("vEthernet (Default Switch)", "172.17.96.1", gateway: true, description: "Hyper-V Virtual Ethernet Adapter"),
-            Nic("Ethernet", "192.168.5.15", gateway: true),
-            Nic("Wi-Fi", "192.168.1.20", type: NetworkInterfaceType.Wireless80211, gateway: true),
-        ]));
+        Assert.Equal(IPAddress.Parse("192.168.1.20"), nics[1].Address);
+        Assert.Equal(IPAddress.Parse("192.168.5.15"), LocalNetwork.SelectAdvertisementAddress(IPAddress.Any, candidates));
     }
 
     [Fact]
-    public void Gateway_lan_is_the_only_advertised_address()
+    public void Gateway_lan_is_listed_before_a_lan_without_a_gateway()
     {
         var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any,
         [
@@ -144,8 +142,9 @@ public sealed class LocalNetworkTests
             Nic("Wi-Fi", "192.168.1.20", type: NetworkInterfaceType.Wireless80211, gateway: true),
         ]);
 
-        Assert.Single(nics);
+        Assert.Equal(2, nics.Count);
         Assert.Equal(IPAddress.Parse("192.168.1.20"), nics[0].Address);
+        Assert.Equal(IPAddress.Parse("192.168.5.15"), nics[1].Address);
     }
 
     [Fact]
@@ -187,6 +186,52 @@ public sealed class LocalNetworkTests
         Assert.True(LocalNetwork.IsWindowsIcsSubnet(IPAddress.Parse("192.168.137.255")));
         Assert.False(LocalNetwork.IsWindowsIcsSubnet(IPAddress.Parse("192.168.136.1")));
         Assert.False(LocalNetwork.IsWindowsIcsSubnet(IPAddress.Parse("172.16.88.168")));
+    }
+
+    [Fact]
+    public void Second_office_lan_is_advertised_and_hotspot_is_not()
+    {
+        // The querier subnet from the v0.1.21 report, plus the Wi-Fi that was
+        // the only published address, plus the hotspot that froze video.
+        var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any,
+        [
+            Nic("Local Area Connection* 2", "192.168.137.1", gateway: true, description: "Microsoft Wi-Fi Direct Virtual Adapter"),
+            Nic("Wi-Fi", "172.16.88.168", type: NetworkInterfaceType.Wireless80211, gateway: true, description: "Intel(R) Wi-Fi 6 AX201"),
+            Nic("Ethernet", "172.16.93.10", gateway: true, description: "Realtek PCIe GbE Family Controller"),
+        ]);
+
+        Assert.Equal(2, nics.Count);
+        Assert.Equal(IPAddress.Parse("172.16.88.168"), nics[0].Address);
+        Assert.Equal(IPAddress.Parse("172.16.93.10"), nics[1].Address);
+        Assert.DoesNotContain(nics, nic => nic.Address.Equals(IPAddress.Parse("192.168.137.1")));
+    }
+
+    [Fact]
+    public void Off_subnet_querier_is_answered_unicast_and_on_subnet_stays_multicast()
+    {
+        AdvertisedNic[] wifiOnly =
+        [
+            new(IPAddress.Parse("172.16.88.168"), 24, "Wi-Fi"),
+        ];
+        var querier = IPAddress.Parse("172.16.93.211");
+
+        Assert.False(LocalNetwork.QuerierOnAdvertisedLan(querier, wifiOnly));
+        Assert.True(LocalNetwork.ShouldReplyUnicast(quBit: false, remotePort: 5353, querier, wifiOnly));
+        Assert.False(LocalNetwork.ShouldReplyUnicast(quBit: false, remotePort: 5353, IPAddress.Parse("172.16.88.50"), wifiOnly));
+        Assert.True(LocalNetwork.ShouldReplyUnicast(quBit: true, remotePort: 5353, IPAddress.Parse("172.16.88.50"), wifiOnly));
+        Assert.True(LocalNetwork.ShouldReplyUnicast(quBit: false, remotePort: 5300, IPAddress.Parse("172.16.88.50"), wifiOnly));
+
+        AdvertisedNic[] bothLans =
+        [
+            new(IPAddress.Parse("172.16.88.168"), 24, "Wi-Fi"),
+            new(IPAddress.Parse("172.16.93.10"), 24, "Ethernet"),
+        ];
+        Assert.True(LocalNetwork.QuerierOnAdvertisedLan(querier, bothLans));
+        Assert.False(LocalNetwork.ShouldReplyUnicast(quBit: false, remotePort: 5353, querier, bothLans));
+        var answers = LocalNetwork.ReplyAddresses(LocalNetwork.MatchRemote(querier, bothLans), bothLans);
+        Assert.Equal(IPAddress.Parse("172.16.93.10"), answers[0]);
+        Assert.Equal(IPAddress.Parse("172.16.88.168"), answers[1]);
+        Assert.DoesNotContain(answers, address => address.Equals(IPAddress.Parse("192.168.137.1")));
     }
 
     [Fact]

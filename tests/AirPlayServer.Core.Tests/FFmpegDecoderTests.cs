@@ -164,6 +164,42 @@ public sealed class FFmpegDecoderTests
         }
     }
 
+    [Fact]
+    public void Reset_reopens_hevc_and_drops_slices_until_the_next_keyframe()
+    {
+        var log = new ListLog();
+        var library = FFmpegLibrary.TryLoad(log);
+        if (library is null)
+        {
+            if (Environment.GetEnvironmentVariable("AIRPLAY_REQUIRE_FFMPEG") == "1")
+            {
+                Assert.Fail("FFmpeg libraries were not loaded.");
+            }
+
+            return;
+        }
+
+        var hevcPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "red-64x64.hevc");
+        Assert.True(File.Exists(hevcPath), "Missing HEVC fixture " + hevcPath);
+        var annexB = File.ReadAllBytes(hevcPath);
+        Assert.True(FFmpegHevcDecoder.TryCreate(library, log, out var created));
+        using var decoder = created;
+        Assert.NotNull(decoder);
+        Assert.True(decoder.TryDecode(annexB, keyFrame: true, out var first));
+        Assert.Equal(64, first.Width);
+        Assert.Equal(64, first.Height);
+
+        decoder.Reset();
+        Assert.False(decoder.TryDecode(annexB, keyFrame: false, out _));
+        Assert.True(decoder.TryDecode(annexB, keyFrame: true, out var again));
+        Assert.Equal(64, again.Width);
+        Assert.Equal(64, again.Height);
+        Assert.Contains("已重建解码器", log.Text, StringComparison.Ordinal);
+        Assert.Contains("Reopened the decoder", log.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Could not find ref", log.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Error constructing the frame RPS", log.Text, StringComparison.Ordinal);
+    }
+
     private static void AssertDecodedRed(IDisposable? decoder, byte[] annexB)
     {
         Assert.NotNull(decoder);

@@ -238,6 +238,77 @@ public sealed class HevcMirrorTests
             Packet(0, 0x10, 0, Encrypt(lab, secret, streamId, embedded, first.Length + second.Length)));
         Assert.Equal(1, CountHevcNal(hevc.Snapshot()[2], 32));
         Assert.Equal(ConcatAnnex([0x40, 0x01, 0x10], [0x02, 0x03]), hevc.Snapshot()[2]);
+        Assert.Equal(0, hevc.Resets);
+    }
+
+    [Fact]
+    public async Task Hevc_resume_drops_slices_until_the_next_irap()
+    {
+        var lab = new byte[16];
+        lab[4] = 8;
+        var secret = new byte[32];
+        secret[5] = 3;
+        const ulong streamId = 51;
+        var hevc = new SpyHevc();
+        byte[] vps = [0x40, 0x01, 0x10];
+        byte[] sps = [0x42, 0x01, 0x20];
+        byte[] pps = [0x44, 0x01, 0x30];
+        await using var mirror = MirrorRuntime.Start(
+            IPAddress.Loopback,
+            9,
+            new FrameSlot(),
+            new SpyH264(),
+            null,
+            lab,
+            NullAirPlayLog.Instance,
+            acceptHevc: true,
+            hevcDecoder: hevc);
+        mirror.ArmForStream(lab, secret, streamId);
+
+        var idr = LengthPrefixed(0x26, 0x01);
+        var delta = LengthPrefixed(0x02, 0x01);
+        var ordinary = LengthPrefixed(0x02, 0x02);
+        await SendAsync(
+            mirror,
+            () => hevc.Snapshot().Length >= 2,
+            HevcCodecPacket(vps, sps, pps),
+            Packet(0, 0x10, 0, Encrypt(lab, secret, streamId, idr, 0)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, delta, idr.Length)));
+        Assert.Equal(0, hevc.Resets);
+
+        var skip = idr.Length + delta.Length;
+        await SendAsync(
+            mirror,
+            () => hevc.Snapshot().Length >= 3,
+            HevcCodecPacket(vps, sps, pps, 0x1E),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, ordinary, skip)));
+        Assert.Equal(0, hevc.Resets);
+        Assert.Equal(Annex(0x02, 0x02), hevc.Snapshot()[2]);
+
+        skip += ordinary.Length;
+        var dropped = LengthPrefixed(0x02, 0x03);
+        var next = LengthPrefixed(0x26, 0x02);
+        var followed = LengthPrefixed(0x02, 0x04);
+        await SendAsync(
+            mirror,
+            () => hevc.Resets == 1 && hevc.Snapshot().Length == 3,
+            HevcCodecPacket(vps, sps, pps, 0x5E),
+            HevcCodecPacket(vps, sps, pps, 0x1E),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, dropped, skip)));
+        Assert.Equal(3, hevc.Snapshot().Length);
+        Assert.Equal(1, hevc.Resets);
+
+        skip += dropped.Length;
+        await SendAsync(
+            mirror,
+            () => hevc.Snapshot().Length >= 5,
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, next, skip)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, followed, skip + next.Length)));
+        Assert.Equal(1, hevc.Resets);
+        Assert.Equal(0x40, hevc.Snapshot()[3][4]);
+        Assert.Equal(0x26, hevc.Snapshot()[3][^2]);
+        Assert.Equal(Annex(0x02, 0x04), hevc.Snapshot()[4]);
+        Assert.Equal(0, mirror.Activity.RejectedPayloads);
     }
 
     [Fact]
@@ -542,13 +613,13 @@ public sealed class HevcMirrorTests
         return packet;
     }
 
-    private static byte[] HevcCodecPacket(byte[] vps, byte[] sps, byte[] pps)
+    private static byte[] HevcCodecPacket(byte[] vps, byte[] sps, byte[] pps, byte option = 0)
     {
         var arrays = HvccArrays(vps, sps, pps);
         var payload = new byte[0x75 + arrays.Length];
         WriteHvc1(payload);
         arrays.CopyTo(payload, 0x75);
-        return Packet(1, 0, 0, payload);
+        return Packet(1, 0, option, payload);
     }
 
     private static byte[] H264CodecPacket()
@@ -672,6 +743,10 @@ public sealed class HevcMirrorTests
 
         public int Configures { get; private set; }
 
+        public int Resets => Volatile.Read(ref _resets);
+
+        private int _resets;
+
         public byte[] Video { get; private set; } = [];
 
         public byte[] Sequence { get; private set; } = [];
@@ -698,9 +773,7 @@ public sealed class HevcMirrorTests
             Configures++;
         }
 
-        public void Reset()
-        {
-        }
+        public void Reset() => Interlocked.Increment(ref _resets);
 
         public bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
         {

@@ -242,7 +242,7 @@ public sealed class HevcMirrorTests
     }
 
     [Fact]
-    public async Task Hevc_resume_drops_slices_until_the_next_irap()
+    public async Task Hevc_resume_keeps_the_decoder_and_feeds_the_next_slice()
     {
         var lab = new byte[16];
         lab[4] = 8;
@@ -286,28 +286,28 @@ public sealed class HevcMirrorTests
         Assert.Equal(Annex(0x02, 0x02), hevc.Snapshot()[2]);
 
         skip += ordinary.Length;
-        var dropped = LengthPrefixed(0x02, 0x03);
+        var continued = LengthPrefixed(0x02, 0x03);
         var next = LengthPrefixed(0x26, 0x02);
         var followed = LengthPrefixed(0x02, 0x04);
         await SendAsync(
             mirror,
-            () => hevc.Resets == 1 && hevc.Snapshot().Length == 3,
+            () => hevc.Snapshot().Length >= 4,
             HevcCodecPacket(vps, sps, pps, 0x5E),
             HevcCodecPacket(vps, sps, pps, 0x1E),
-            Packet(0, 0, 0, Encrypt(lab, secret, streamId, dropped, skip)));
-        Assert.Equal(3, hevc.Snapshot().Length);
-        Assert.Equal(1, hevc.Resets);
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, continued, skip)));
+        Assert.Equal(Annex(0x02, 0x03), hevc.Snapshot()[3]);
+        Assert.Equal(0, hevc.Resets);
 
-        skip += dropped.Length;
+        skip += continued.Length;
         await SendAsync(
             mirror,
-            () => hevc.Snapshot().Length >= 5,
+            () => hevc.Snapshot().Length >= 6,
             Packet(0, 0, 0, Encrypt(lab, secret, streamId, next, skip)),
             Packet(0, 0, 0, Encrypt(lab, secret, streamId, followed, skip + next.Length)));
-        Assert.Equal(1, hevc.Resets);
-        Assert.Equal(0x40, hevc.Snapshot()[3][4]);
-        Assert.Equal(0x26, hevc.Snapshot()[3][^2]);
-        Assert.Equal(Annex(0x02, 0x04), hevc.Snapshot()[4]);
+        Assert.Equal(0, hevc.Resets);
+        Assert.Equal(0x40, hevc.Snapshot()[4][4]);
+        Assert.Equal(0x26, hevc.Snapshot()[4][^2]);
+        Assert.Equal(Annex(0x02, 0x04), hevc.Snapshot()[5]);
         Assert.Equal(0, mirror.Activity.RejectedPayloads);
     }
 

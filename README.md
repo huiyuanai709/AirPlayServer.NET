@@ -287,18 +287,11 @@ Windows 上的顺序：
 
 上面这条里，`/info` 仍宣告 `480x1040`。`iphone-15-pro` 的 393×852 只作为 TapClock 的 UIKit 逻辑点。省略 `--model` 时广告尺寸不变，逻辑点留空。只写 `--model iphone-15-pro`、不写 `--screen` 时，广告仍是宿主默认的 `480x1040`。
 
-3. iPhone 在同一局域网里发现接收端并镜像。锁屏再解锁后，带 type 110 的 TEARDOWN（即使同一条里还有 type 96）只停视频：FairPlay 内容密钥和上一组 SPS/PPS 保留，下一次 type-110 SETUP 从计数器 0 重新开始，并丢掉锁屏前积压的密文。解不开的重复会话 SETUP 不会清掉正在用的密钥。Windows 上 Media Foundation 会释放当前解码器，下一帧重建，避免画面停在锁屏前的最后一帧。
+3. iPhone 在同一局域网里发现接收端并镜像。锁屏再解锁后，带 type 110 的 TEARDOWN（即使同一条里还有 type 96）只停视频：FairPlay 内容密钥和上一组 SPS/PPS 保留，下一次 type-110 SETUP 从计数器 0 重新开始，并丢掉锁屏前积压的密文。解不开的重复会话 SETUP 不会清掉正在用的密钥。
 
-   暂停后再出现 `Mirror sender resumed`，而 SPS/PPS 没变时，也会释放当前变换，下一帧重建。下面这段是软件 H.264，不是 HEVC，不需要 `--h265`：
+   只出现 `Mirror sender paused` / `Mirror sender resumed`（H.264 的 codec option 是 `0x56` / `0x16`，HEVC 是 `0x5E` / `0x1E`）时，解码器保持打开。恢复包里的 SPS/PPS（或 VPS）照常解析，下一张关键帧才会拼上去；紧接着的 P 帧直接送进原来的解码器。这条路径不重建上下文，也不等待下一个关键帧。H.264 和 `--h265` 的 ffmpeg-hevc 都是这样。日志里不应再出现「已重建解码器」或「要等下一个关键帧」。`720x1560` 这种几何尺寸是手机这次送出的画面，比 `--screen` 小是正常的，窗口按它缩放。
 
-   ```
-   Mirror sender resumed.
-   Mirror geometry 720x1560 source 720x1560
-   NV12 to BGRA is BT.709 full range (matrix: sequence parameter set, range: sequence parameter set).
-   H.264 decoder is the Microsoft Media Foundation software decoder.
-   ```
-
-   `720x1560` 是手机这次送出的尺寸，比 `--screen 1290x2796` 小是正常的，窗口按这个尺寸缩放。软件解码器有时要 drain 才肯吐出恢复后的第一帧。v0.1.12 在**同一只**变换上 drain 之后再 flush，并把关键帧送回去。这只变换 flush 之后不再出画（锁屏恢复时已经见过），所以窗口停在刚 drain 出来的那一帧，会话还在。现在 drain 只用来取出这一帧，然后丢掉该变换，把同一个关键帧送进新建的软件解码器，并且不再 drain 新的那只。后面的 P 帧打在新解码器上，窗口会继续刷新。硬件变换仍然不 drain。
+   已经出过画之后，如果连续两个访问单元都解不出画面，才会丢掉参考帧并等到下一个 IDR/IRAP。那是参考帧真的对不上，不是锁屏暂停本身。正在出画的变换不做 drain。
 
 `POST /fp-setup` 如果比带 `ekey` 的 SETUP 晚到，72 字节 `ekey` 会留着，握手完成后重试解开，这段时间的密文会按到达顺序补解密，而不是直接丢掉。关键帧如果比 SPS/PPS 早到，会留到 codec 数据到达后再解码。Hold 缓冲溢出会让这一条流保持丢弃，直到手机重新开一次镜像。`Mirror.DecodedFrames` 只在真正写出 BGRA 时增加；`DroppedEncryptedPayloads` 只计被丢掉的密文；`PendingEncryptedPayloads` 是还在等密钥的包。连不上 TapClock 时，控制台会写出 `TapClock connect to host:port failed` 并继续重试。
 

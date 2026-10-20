@@ -231,27 +231,30 @@ public sealed class MirrorResumeTests
         Assert.Equal(0, log.Count("下一个关键帧"));
         var skip = idr.Length + delta.Length;
 
+        // 0x56 then 0x16 keeps the decoder. The next slice is a P-frame and
+        // must be fed; waiting for an IDR is what froze the window.
         await SendAsync(
             mirror,
-            () => decoder.Resets == resets + 1 && mirror.Activity.AcceptedAccessUnits >= 3,
+            () => decoder.Snapshot().Length >= 3,
             CodecPacket(0x56),
             CodecPacket(0x16),
             Packet(0, 0, 0, Encrypt(lab, secret, streamId, after, skip: skip)));
-        Assert.Equal(2, decoder.Snapshot().Length);
-        Assert.Equal(resets + 1, decoder.Resets);
-        Assert.Equal(1, log.Count("下一个关键帧"));
+        Assert.Equal(new byte[] { 0, 0, 0, 1, 0x21 }, decoder.Snapshot()[2]);
+        Assert.Equal(resets, decoder.Resets);
+        Assert.Equal(0, log.Count("下一个关键帧"));
         Assert.Equal(0, mirror.Activity.RejectedPayloads);
 
         skip += after.Length;
         await SendAsync(
             mirror,
-            () => decoder.Snapshot().Length >= 4,
+            () => decoder.Snapshot().Length >= 5,
             Packet(0, 0, 0, Encrypt(lab, secret, streamId, next, skip: skip)),
             Packet(0, 0, 0, Encrypt(lab, secret, streamId, after, skip: skip + next.Length)));
-        Assert.Equal(resets + 1, decoder.Resets);
-        Assert.Equal(0x67, decoder.Snapshot()[2][4]);
-        Assert.Equal(0x45, decoder.Snapshot()[2][^1]);
-        Assert.Equal(new byte[] { 0, 0, 0, 1, 0x21 }, decoder.Snapshot()[3]);
+        Assert.Equal(resets, decoder.Resets);
+        Assert.Equal(0x67, decoder.Snapshot()[3][4]);
+        Assert.Equal(0x45, decoder.Snapshot()[3][^1]);
+        Assert.Equal(new byte[] { 0, 0, 0, 1, 0x21 }, decoder.Snapshot()[4]);
+        Assert.Equal(0, log.Count("下一个关键帧"));
         Assert.Equal(0, mirror.Activity.RejectedPayloads);
     }
 
@@ -284,14 +287,14 @@ public sealed class MirrorResumeTests
             Packet(0, 0x10, 0, Encrypt(lab, secret, streamId, during, skip: idr.Length)),
             CodecPacket(0x16),
             Packet(0, 0, 0, Encrypt(lab, secret, streamId, after, skip: idr.Length + during.Length)));
-        Assert.Equal(resets + 1, decoder.Resets);
+        Assert.Equal(resets, decoder.Resets);
         Assert.Equal(0x45, decoder.Snapshot()[1][^1]);
         Assert.Equal(new byte[] { 0, 0, 0, 1, 0x21 }, decoder.Snapshot()[2]);
         Assert.Equal(0, mirror.Activity.RejectedPayloads);
     }
 
     [Fact]
-    public async Task Unflagged_idr_is_the_sync_point_after_pause()
+    public async Task Unflagged_idr_after_pause_is_decoded_without_resetting()
     {
         var lab = new byte[16];
         lab[11] = 8;
@@ -299,11 +302,13 @@ public sealed class MirrorResumeTests
         secret[12] = 3;
         const ulong streamId = 35;
         var decoder = new SpyDecoder();
-        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, NullAirPlayLog.Instance);
+        var log = new CountingLog();
+        await using var mirror = MirrorRuntime.Start(IPAddress.Loopback, 9, new FrameSlot(), decoder, null, lab, log);
         mirror.ArmForStream(lab, secret, streamId);
 
         var idr = AccessUnit(0x65);
         var delta = AccessUnit(0x41);
+        var trailing = AccessUnit(0x21);
         var bare = AccessUnit(0x65);
         await SendAsync(
             mirror,
@@ -316,14 +321,17 @@ public sealed class MirrorResumeTests
 
         await SendAsync(
             mirror,
-            () => decoder.Snapshot().Length >= 3,
+            () => decoder.Snapshot().Length >= 4,
             CodecPacket(0x56),
             CodecPacket(0x16),
-            Packet(0, 0, 0, Encrypt(lab, secret, streamId, bare, skip: skip)));
-        Assert.Equal(resets + 1, decoder.Resets);
-        Assert.Equal(0x67, decoder.Snapshot()[2][4]);
-        Assert.Equal(0x65, decoder.Snapshot()[2][^1]);
-        Assert.Equal(1, CountNal(decoder.Snapshot()[2], 5));
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, trailing, skip: skip)),
+            Packet(0, 0, 0, Encrypt(lab, secret, streamId, bare, skip: skip + trailing.Length)));
+        Assert.Equal(resets, decoder.Resets);
+        Assert.Equal(new byte[] { 0, 0, 0, 1, 0x21 }, decoder.Snapshot()[2]);
+        Assert.Equal(0x67, decoder.Snapshot()[3][4]);
+        Assert.Equal(0x65, decoder.Snapshot()[3][^1]);
+        Assert.Equal(1, CountNal(decoder.Snapshot()[3], 5));
+        Assert.Equal(0, log.Count("下一个关键帧"));
     }
 
     [Fact]

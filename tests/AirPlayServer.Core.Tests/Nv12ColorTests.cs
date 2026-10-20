@@ -91,6 +91,219 @@ public sealed class Nv12ColorTests
         Assert.False(Nv12Color.TryCopy(source, 4, 1, 4, 4, 1, YuvColorSpace.AirPlayMirror, visible));
     }
 
+    [Fact]
+    public void Bulk_copy_matches_convert_for_odd_widths_padding_and_both_matrices()
+    {
+        var random = new Random(709);
+        foreach (var matrix in new[] { YuvMatrix.Bt709, YuvMatrix.Bt601 })
+        {
+            foreach (var range in new[] { YuvRange.Full, YuvRange.Limited })
+            {
+                var color = new YuvColorSpace(matrix, range);
+                const int codedWidth = 18;
+                const int codedHeight = 8;
+                const int stride = 24;
+                const int width = 17;
+                const int height = 7;
+                var source = new byte[stride * codedHeight + stride * (codedHeight / 2)];
+                random.NextBytes(source);
+                var destination = new byte[width * height * 4];
+                Assert.True(Nv12Color.TryCopy(source, codedWidth, codedHeight, stride, width, height, color, destination));
+                var pixel = 0;
+                for (var y = 0; y < height; y++)
+                {
+                    var yRow = y * stride;
+                    var uvRow = stride * codedHeight + (y / 2) * stride;
+                    for (var x = 0; x < width; x++)
+                    {
+                        var cbIndex = uvRow + (x & ~1);
+                        Nv12Color.Convert(source[yRow + x], source[cbIndex], source[cbIndex + 1], color, out var b, out var g, out var r);
+                        Assert.Equal(b, destination[pixel]);
+                        Assert.Equal(g, destination[pixel + 1]);
+                        Assert.Equal(r, destination[pixel + 2]);
+                        Assert.Equal(255, destination[pixel + 3]);
+                        pixel += 4;
+                    }
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public void Tall_frame_matches_convert_on_both_sides_of_a_row_split()
+    {
+        const int width = 1280;
+        const int height = 720;
+        var random = new Random(30);
+        var yPlane = new byte[width * height];
+        var uvPlane = new byte[width * (height / 2)];
+        random.NextBytes(yPlane);
+        random.NextBytes(uvPlane);
+        var destination = new byte[width * height * 4];
+        var color = YuvColorSpace.AirPlayMirror;
+        Assert.True(YuvPlanarColor.TryCopyNv12(yPlane, width, uvPlane, width, width, height, color, destination));
+        foreach (var y in new[] { 0, 1, 179, 180, 359, 360, 539, 540, 718, 719 })
+        {
+            for (var x = 0; x < width; x += 17)
+            {
+                var cbIndex = ((y / 2) * width) + (x & ~1);
+                Nv12Color.Convert(yPlane[(y * width) + x], uvPlane[cbIndex], uvPlane[cbIndex + 1], color, out var b, out var g, out var r);
+                var pixel = ((y * width) + x) * 4;
+                Assert.Equal(b, destination[pixel]);
+                Assert.Equal(g, destination[pixel + 1]);
+                Assert.Equal(r, destination[pixel + 2]);
+                Assert.Equal(255, destination[pixel + 3]);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Two_large_frames_convert_together_without_mixing_pixels()
+    {
+        var first = Task.Run(() => ConvertSolid(80));
+        var second = Task.Run(() => ConvertSolid(200));
+        var results = await Task.WhenAll(first, second);
+        Assert.Equal(80, results[0]);
+        Assert.Equal(200, results[1]);
+    }
+
+    private static byte ConvertSolid(byte luma)
+    {
+        const int width = 1280;
+        const int height = 720;
+        var yPlane = new byte[width * height];
+        var uvPlane = new byte[width * (height / 2)];
+        Array.Fill(yPlane, luma);
+        Array.Fill(uvPlane, (byte)128);
+        var destination = new byte[width * height * 4];
+        Assert.True(YuvPlanarColor.TryCopyNv12(yPlane, width, uvPlane, width, width, height, YuvColorSpace.AirPlayMirror, destination));
+        Nv12Color.Convert(luma, 128, 128, YuvColorSpace.AirPlayMirror, out var b, out var g, out var r);
+        Assert.Equal(b, destination[0]);
+        Assert.Equal(g, destination[1]);
+        Assert.Equal(r, destination[2]);
+        var last = destination.Length - 4;
+        Assert.Equal(b, destination[last]);
+        Assert.Equal(g, destination[last + 1]);
+        Assert.Equal(r, destination[last + 2]);
+        return destination[2];
+    }
+
+    [Fact]
+    public void Planar_and_nv12_phone_rows_match_and_can_be_timed()
+    {
+        const int width = 1290;
+        const int height = 64;
+        var random = new Random(2796);
+        var y = new byte[width * height];
+        var u = new byte[(width / 2) * (height / 2)];
+        var v = new byte[u.Length];
+        var uv = new byte[width * (height / 2)];
+        random.NextBytes(y);
+        random.NextBytes(u);
+        random.NextBytes(v);
+        for (var row = 0; row < height / 2; row++)
+        {
+            for (var col = 0; col < width / 2; col++)
+            {
+                uv[(row * width) + (col * 2)] = u[(row * (width / 2)) + col];
+                uv[(row * width) + (col * 2) + 1] = v[(row * (width / 2)) + col];
+            }
+        }
+
+        var planar = new byte[width * height * 4];
+        var interleaved = new byte[planar.Length];
+        var color = YuvColorSpace.AirPlayMirror;
+        Assert.True(YuvPlanarColor.TryCopyYuv420(y, width, u, width / 2, v, width / 2, width, height, color, planar));
+        Assert.True(YuvPlanarColor.TryCopyNv12(y, width, uv, width, width, height, color, interleaved));
+        Assert.Equal(planar, interleaved);
+        Nv12Color.Convert(y[0], u[0], v[0], color, out var b, out var g, out var r);
+        Assert.Equal(b, planar[0]);
+        Assert.Equal(g, planar[1]);
+        Assert.Equal(r, planar[2]);
+
+        if (Environment.GetEnvironmentVariable("AIRPLAY_BENCH_YUV") != "1")
+        {
+            return;
+        }
+
+        const int tall = 2796;
+        var yTall = new byte[width * tall];
+        var uvTall = new byte[width * (tall / 2)];
+        random.NextBytes(yTall);
+        random.NextBytes(uvTall);
+        var bgra = new byte[width * tall * 4];
+        for (var i = 0; i < 3; i++)
+        {
+            YuvPlanarColor.TryCopyNv12(yTall, width, uvTall, width, width, tall, color, bgra);
+        }
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        const int passes = 8;
+        for (var i = 0; i < passes; i++)
+        {
+            YuvPlanarColor.TryCopyNv12(yTall, width, uvTall, width, width, tall, color, bgra);
+        }
+
+        watch.Stop();
+        var microseconds = watch.ElapsedTicks * 1_000_000L / System.Diagnostics.Stopwatch.Frequency / passes;
+        watch.Restart();
+        for (var i = 0; i < passes; i++)
+        {
+            LegacyNv12(yTall, uvTall, width, tall, bgra);
+        }
+
+        watch.Stop();
+        var legacy = watch.ElapsedTicks * 1_000_000L / System.Diagnostics.Stopwatch.Frequency / passes;
+        Console.WriteLine("nv12 " + width + "x" + tall + " table " + microseconds + " us, scalar " + legacy + " us");
+    }
+
+    private static void LegacyNv12(byte[] yPlane, byte[] uvPlane, int width, int height, byte[] destination)
+    {
+        var to = 0;
+        for (var y = 0; y < height; y++)
+        {
+            var yRow = y * width;
+            var uvRow = (y / 2) * width;
+            for (var x = 0; x < width; x++)
+            {
+                var cbIndex = uvRow + (x & ~1);
+                LegacyConvert(yPlane[yRow + x], uvPlane[cbIndex], uvPlane[cbIndex + 1], out var b, out var g, out var r);
+                destination[to++] = b;
+                destination[to++] = g;
+                destination[to++] = r;
+                destination[to++] = 255;
+            }
+        }
+    }
+
+    private static void LegacyConvert(byte y8, byte cb8, byte cr8, out byte b, out byte g, out byte r)
+    {
+        var luma = y8 * 65536 / 255;
+        var chromaB = (cb8 - 128) * 65536 / 255;
+        var chromaR = (cr8 - 128) * 65536 / 255;
+        r = LegacyByte(luma + LegacyScale(103206, chromaR));
+        g = LegacyByte(luma - LegacyScale(12276, chromaB) - LegacyScale(30679, chromaR));
+        b = LegacyByte(luma + LegacyScale(121609, chromaB));
+    }
+
+    private static int LegacyScale(int coefficient, int sample)
+    {
+        var product = (long)coefficient * sample;
+        if (product >= 0)
+        {
+            return (int)((product + 32768) >> 16);
+        }
+
+        return -(int)(((-product) + 32768) >> 16);
+    }
+
+    private static byte LegacyByte(int q16)
+    {
+        var scaled = (long)q16 * 255;
+        scaled += scaled >= 0 ? 32768 : -32768;
+        return (byte)Math.Clamp((int)(scaled >> 16), 0, 255);
+    }
+
     private static void Expect(byte y, byte cb, byte cr, YuvColorSpace color, byte b, byte g, byte r)
     {
         Nv12Color.Convert(y, cb, cr, color, out var actualB, out var actualG, out var actualR);

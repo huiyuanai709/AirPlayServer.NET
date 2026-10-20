@@ -156,13 +156,12 @@ internal static class Nv12Color
 {
     public static void Convert(byte y, byte cb, byte cr, YuvColorSpace color, out byte b, out byte g, out byte r)
     {
-        var coefficients = MatrixCoefficients.For(color.Matrix);
-        var luma = NormalizeLuma(y, color.Range);
-        var chromaB = NormalizeChroma(cb, color.Range);
-        var chromaR = NormalizeChroma(cr, color.Range);
-        r = ToByte(luma + Scale(coefficients.CrToR, chromaR));
-        g = ToByte(luma - Scale(coefficients.CbToG, chromaB) - Scale(coefficients.CrToG, chromaR));
-        b = ToByte(luma + Scale(coefficients.CbToB, chromaB));
+        // Same integer formula as before, looked up from tables built once per
+        // matrix and range. A 1290×2796 frame was doing this division per pixel.
+        var table = YuvConvertTable.For(color);
+        b = table.Blue(y, cb);
+        g = table.Green(y, cb, cr);
+        r = table.Red(y, cr);
     }
 
     public static bool TryCopy(
@@ -193,35 +192,36 @@ internal static class Nv12Color
             return false;
         }
 
-        var to = 0;
-        for (var y = 0; y < height; y++)
+        unsafe
         {
-            var yRow = y * stride;
-            var uvRow = (int)chroma + (y / 2) * stride;
-            for (var x = 0; x < width; x++)
+            fixed (byte* sourcePointer = source)
+            fixed (byte* destinationPointer = destination)
             {
-                var cbIndex = uvRow + (x & ~1);
-                Convert(source[yRow + x], source[cbIndex], source[cbIndex + 1], color, out var b, out var g, out var r);
-                destination[to++] = b;
-                destination[to++] = g;
-                destination[to++] = r;
-                destination[to++] = 255;
+                YuvConvert.CopyNv12(
+                    sourcePointer,
+                    stride,
+                    sourcePointer + chroma,
+                    stride,
+                    width,
+                    height,
+                    color,
+                    destinationPointer);
             }
         }
 
         return true;
     }
 
-    private static int NormalizeLuma(int value, YuvRange range)
+    internal static int NormalizeLuma(int value, YuvRange range)
         => range == YuvRange.Limited ? (value - 16) * 65536 / 219 : value * 65536 / 255;
 
-    private static int NormalizeChroma(int value, YuvRange range)
+    internal static int NormalizeChroma(int value, YuvRange range)
     {
         var centered = value - 128;
         return range == YuvRange.Limited ? centered * 65536 / 224 : centered * 65536 / 255;
     }
 
-    private static int Scale(int coefficient, int sample)
+    internal static int Scale(int coefficient, int sample)
     {
         var product = (long)coefficient * sample;
         if (product >= 0)
@@ -232,7 +232,16 @@ internal static class Nv12Color
         return -(int)(((-product) + 32768) >> 16);
     }
 
-    private static byte ToByte(int q16)
+    internal static void Coefficients(YuvMatrix matrix, out int crToR, out int cbToG, out int crToG, out int cbToB)
+    {
+        var coefficients = MatrixCoefficients.For(matrix);
+        crToR = coefficients.CrToR;
+        cbToG = coefficients.CbToG;
+        crToG = coefficients.CrToG;
+        cbToB = coefficients.CbToB;
+    }
+
+    internal static byte ToByte(int q16)
     {
         var scaled = (long)q16 * 255;
         scaled += scaled >= 0 ? 32768 : -32768;
@@ -246,7 +255,7 @@ internal static class Nv12Color
 
         private static readonly MatrixCoefficients Bt601 = new(91881, 22553, 46802, 116130);
 
-        public static MatrixCoefficients For(YuvMatrix matrix)
+        internal static MatrixCoefficients For(YuvMatrix matrix)
             => matrix == YuvMatrix.Bt601 ? Bt601 : Bt709;
     }
 }

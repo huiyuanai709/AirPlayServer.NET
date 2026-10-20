@@ -273,9 +273,13 @@ internal sealed unsafe class FFmpegLibrary
 
     /// <summary>
     /// Opens the codec with one decode thread. FFmpeg treats a thread count of 0
-    /// as "one thread per core", which pegs a 1290x2794 HEVC mirror. The count is
-    /// also passed in the <c>avcodec_open2</c> dictionary so a private default
-    /// cannot put it back.
+    /// as one thread per core and, by default, frame threading. Idle workers from
+    /// that combination peg a 1290×2794 HEVC mirror even when the access unit has
+    /// a single slice. Slice threading above one thread does not decode a
+    /// single-slice phone frame any faster, and frame threading holds pictures
+    /// back. The count stays 1; it is also passed in the <c>avcodec_open2</c>
+    /// dictionary so a private default cannot put it back. The per-frame cost
+    /// that does move is the YUV to BGRA conversion.
     /// </summary>
     internal unsafe int OpenCapped(nint context, nint codec)
     {

@@ -131,6 +131,31 @@ internal static class YuvPlanarColor
             return false;
         }
 
+        if (sampleBytes == 1 && sampleShift == 0)
+        {
+            unsafe
+            {
+                fixed (byte* destinationPointer = destination)
+                {
+                    YuvConvert.CopyPlanes(
+                        (byte*)yPlane,
+                        yStride,
+                        (byte*)uPlane,
+                        uStride,
+                        (byte*)vPlane,
+                        vStride,
+                        width,
+                        height,
+                        color,
+                        nv12,
+                        swapUv,
+                        destinationPointer);
+                }
+            }
+
+            return true;
+        }
+
         var to = 0;
         for (var y = 0; y < height; y++)
         {

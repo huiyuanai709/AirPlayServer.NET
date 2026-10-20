@@ -242,4 +242,15 @@ if ! grep -q "libHarfBuzzSharp.pdb" "$tmp/strip.out"; then
   fail "strip log was: $(cat "$tmp/strip.out")"
 fi
 
+mkdir -p "$tmp/natives"
+cp /bin/true "$tmp/natives/libSkiaSharp.so"
+printf 'leave' > "$tmp/natives/AirPlayServer.Host"
+"$root/packaging/strip-native-symbols.sh" "$tmp/natives" >"$tmp/natives.out"
+if ! grep -q "libSkiaSharp.so" "$tmp/natives.out"; then
+  fail "strip-native-symbols did not see libSkiaSharp.so: $(cat "$tmp/natives.out")"
+fi
+if [ ! -f "$tmp/natives/AirPlayServer.Host" ] || [ ! -f "$tmp/natives/libSkiaSharp.so" ]; then
+  fail "strip-native-symbols removed a runtime file"
+fi
+
 echo "stage-release-test ok"

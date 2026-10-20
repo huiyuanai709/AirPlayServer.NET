@@ -18,7 +18,9 @@ fi
 
 shopt -s nullglob
 files=()
-for pattern in libSkiaSharp.* libHarfBuzzSharp.* libAvaloniaNative.* av_libglesv2.*; do
+# Patterns stay quoted. Unquoted globs here would expand in the repo root
+# (nullglob then deletes them) and the publish directory would never be scanned.
+for pattern in 'libSkiaSharp.*' 'libHarfBuzzSharp.*' 'libAvaloniaNative.*' 'av_libglesv2.*'; do
   for file in "$dir"/$pattern; do
     if [ -f "$file" ]; then
       files+=("$file")

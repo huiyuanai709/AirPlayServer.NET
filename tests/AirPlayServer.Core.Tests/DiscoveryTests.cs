@@ -116,6 +116,111 @@ public sealed class DiscoveryTests
     }
 
     [Fact]
+    public void Hotspot_flap_does_not_request_another_announcement()
+    {
+        AdvertisementCandidate[] withHotspot =
+        [
+            new(
+                "Local Area Connection* 2",
+                "Microsoft Wi-Fi Direct Virtual Adapter",
+                NetworkInterfaceType.Wireless80211,
+                OperationalStatus.Up,
+                IPAddress.Parse("192.168.137.1"),
+                HasGateway: true,
+                PrefixLength: 24),
+            new(
+                "Wi-Fi",
+                "Intel(R) Wi-Fi 6 AX201",
+                NetworkInterfaceType.Wireless80211,
+                OperationalStatus.Up,
+                IPAddress.Parse("172.16.88.168"),
+                HasGateway: true,
+                PrefixLength: 24),
+        ];
+        AdvertisementCandidate[] hotspotMoved =
+        [
+            withHotspot[1],
+            new(
+                "Local Area Connection* 2",
+                "Microsoft Wi-Fi Direct Virtual Adapter",
+                NetworkInterfaceType.Wireless80211,
+                OperationalStatus.Up,
+                IPAddress.Parse("192.168.137.2"),
+                HasGateway: true,
+                PrefixLength: 24),
+        ];
+
+        var before = LocalNetwork.SelectAdvertisedNics(IPAddress.Any, withHotspot);
+        var after = LocalNetwork.SelectAdvertisedNics(IPAddress.Any, hotspotMoved);
+
+        Assert.Single(before);
+        Assert.Equal(IPAddress.Parse("172.16.88.168"), before[0].Address);
+        Assert.False(MdnsCadence.ShouldRefreshAnnouncement(before, after));
+    }
+
+    [Fact]
+    public void Each_lan_announcement_names_only_that_nic_and_never_the_hotspot()
+    {
+        var wifi = MdnsMessages.BuildAnnouncement(Sample(), IPAddress.Parse("172.16.88.168"));
+        var ethernet = MdnsMessages.BuildAnnouncement(Sample(), IPAddress.Parse("172.16.93.10"));
+
+        Assert.Equal(7, MdnsMessages.CountWalkableRecords(wifi));
+        Assert.Equal(7, MdnsMessages.CountWalkableRecords(ethernet));
+        Assert.True(ContainsSequence(wifi, [172, 16, 88, 168]));
+        Assert.False(ContainsSequence(wifi, [172, 16, 93, 10]));
+        Assert.False(ContainsSequence(wifi, [192, 168, 137, 1]));
+        Assert.True(ContainsSequence(ethernet, [172, 16, 93, 10]));
+        Assert.False(ContainsSequence(ethernet, [172, 16, 88, 168]));
+    }
+
+    [Fact]
+    public void Off_subnet_multicast_query_is_answered_on_the_arrival_nic()
+    {
+        var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any,
+        [
+            new AdvertisementCandidate(
+                "Local Area Connection* 2",
+                "Microsoft Wi-Fi Direct Virtual Adapter",
+                NetworkInterfaceType.Wireless80211,
+                OperationalStatus.Up,
+                IPAddress.Parse("192.168.137.1"),
+                HasGateway: true,
+                PrefixLength: 24,
+                InterfaceIndex: 4),
+            new AdvertisementCandidate(
+                "Wi-Fi",
+                "Intel(R) Wi-Fi 6 AX201",
+                NetworkInterfaceType.Wireless80211,
+                OperationalStatus.Up,
+                IPAddress.Parse("172.16.88.168"),
+                HasGateway: true,
+                PrefixLength: 24,
+                InterfaceIndex: 12),
+        ]);
+        var querier = IPAddress.Parse("172.16.93.211");
+        var arrival = LocalNetwork.FindByInterface(12, nics);
+        var plan = LocalNetwork.PlanReply(quBit: false, remotePort: 5353, queryWasMulticast: true, querier, nics, arrival);
+        Assert.True(plan.SendMulticast);
+        Assert.False(plan.SendUnicast);
+        Assert.True(MdnsSockets.IsMulticastDestination(IPAddress.Parse("224.0.0.251")));
+        Assert.False(MdnsSockets.IsMulticastDestination(IPAddress.Parse("172.16.88.168")));
+
+        var answer = LocalNetwork.AnswerAddress(querier, nics, arrival, boundAddress: null);
+        var query = MdnsMessages.BuildQuery(0x2222, "_airplay");
+        var response = new byte[2048];
+        Assert.True(MdnsMessages.TryBuildQueryResponse(query, Sample(), response, out var written, out var quBit, answer));
+        Assert.False(quBit);
+        Assert.Equal(4, MdnsMessages.CountWalkableRecords(response.AsSpan(0, written)));
+        Assert.Equal(0x2222, BinaryPrimitives.ReadUInt16BigEndian(response));
+        MdnsMessages.StampMulticastId(response.AsSpan(0, written));
+        Assert.Equal(0, BinaryPrimitives.ReadUInt16BigEndian(response));
+        var body = response.AsSpan(0, written).ToArray();
+        Assert.True(ContainsSequence(body, [172, 16, 88, 168]));
+        Assert.False(ContainsSequence(body, [192, 168, 137, 1]));
+        Assert.False(ContainsSequence(body, [10, 1, 2, 3]));
+    }
+
+    [Fact]
     public void Chosen_lan_is_the_only_address_in_the_announcement()
     {
         var chosen = LocalNetwork.SelectAdvertisementAddress(IPAddress.Any,

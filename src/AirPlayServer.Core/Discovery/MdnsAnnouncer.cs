@@ -356,38 +356,45 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
             return;
         }
 
-        // One datagram, one A record. A second packet with another address for
-        // the same hostname is what made phones keep RTSP and stall the picture.
-        var target = PrimaryTarget(targets, nics);
+        // One packet per non-hotspot NIC, and that packet names only that NIC.
+        // mDNSResponder registers records on a single interface the same way.
+        // Putting every LAN in every packet, or adding the hotspot, is the
+        // second A record that left RTSP up and stalled the picture.
         var sent = 0;
         var port = 0;
         string? lastError = null;
-        if (!IPAddress.Any.Equals(target.PacketAddress) && !IPAddress.IsLoopback(target.PacketAddress))
+        foreach (var target in targets)
         {
-            if (!MdnsSockets.TrySetMulticastInterface(target.Socket, target.PacketAddress) && !_multicastIfWarned)
+            if (!IPAddress.Any.Equals(target.PacketAddress) && !IPAddress.IsLoopback(target.PacketAddress))
             {
-                _multicastIfWarned = true;
-                _log.Log(
-                    AirPlayLogLevel.Warning,
-                    "mDNS 无法把多播出口固定到 " + target.PacketAddress
-                    + "。Could not set IP_MULTICAST_IF for " + target.PacketAddress + ".");
+                if (!MdnsSockets.TrySetMulticastInterface(target.Socket, target.PacketAddress) && !_multicastIfWarned)
+                {
+                    _multicastIfWarned = true;
+                    _log.Log(
+                        AirPlayLogLevel.Warning,
+                        "mDNS 无法把多播出口固定到 " + target.PacketAddress
+                        + "。Could not set IP_MULTICAST_IF for " + target.PacketAddress + ".");
+                }
             }
-        }
 
-        var packet = MdnsMessages.BuildAnnouncement(_advertisement, target.PacketAddress);
-        try
-        {
-            await target.Socket.SendToAsync(packet, SocketFlags.None, MdnsSockets.GroupEndpoint, cancellationToken).ConfigureAwait(false);
-            sent++;
-            port = target.Port;
-        }
-        catch (SocketException ex)
-        {
-            lastError = ex.Message;
-        }
-        catch (ObjectDisposedException)
-        {
-            return;
+            var packet = MdnsMessages.BuildAnnouncement(_advertisement, target.PacketAddress);
+            try
+            {
+                await target.Socket.SendToAsync(packet, SocketFlags.None, MdnsSockets.GroupEndpoint, cancellationToken).ConfigureAwait(false);
+                sent++;
+                if (port == 0 || target.Port != MdnsSockets.Port)
+                {
+                    port = target.Port;
+                }
+            }
+            catch (SocketException ex)
+            {
+                lastError = ex.Message;
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
         }
 
         if (sent == 0)
@@ -403,7 +410,7 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
                 sequence,
                 _advertisement.InstanceName,
                 _advertisement.DeviceId,
-                MdnsCadence.FormatNics(LoggedNic(nics, target)),
+                MdnsCadence.FormatNics(nics),
                 port,
                 _receiving));
     }
@@ -412,13 +419,31 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
     {
         var buffer = new byte[2048];
         var response = new byte[2048];
+        var packetInfo = MdnsSockets.TryEnablePacketInformation(socket);
         EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
         while (!cancellationToken.IsCancellationRequested)
         {
-            SocketReceiveFromResult received;
+            int receivedBytes;
+            EndPoint remoteEndPoint;
+            IPAddress? destination;
+            var interfaceIndex = 0;
             try
             {
-                received = await socket.ReceiveFromAsync(buffer, SocketFlags.None, remote, cancellationToken).ConfigureAwait(false);
+                if (packetInfo)
+                {
+                    var message = await socket.ReceiveMessageFromAsync(buffer, SocketFlags.None, remote, cancellationToken).ConfigureAwait(false);
+                    receivedBytes = message.ReceivedBytes;
+                    remoteEndPoint = message.RemoteEndPoint;
+                    destination = message.PacketInformation.Address;
+                    interfaceIndex = message.PacketInformation.Interface;
+                }
+                else
+                {
+                    var received = await socket.ReceiveFromAsync(buffer, SocketFlags.None, remote, cancellationToken).ConfigureAwait(false);
+                    receivedBytes = received.ReceivedBytes;
+                    remoteEndPoint = received.RemoteEndPoint;
+                    destination = null;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -433,50 +458,87 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
                 break;
             }
 
-            var remoteAddress = received.RemoteEndPoint is IPEndPoint endpoint ? endpoint.Address : null;
-            var answerAddress = boundAddress is not null && !IPAddress.Any.Equals(boundAddress)
-                ? boundAddress
-                : remoteAddress is null
-                    ? _advertisement.Address
-                    : LocalNetwork.MatchRemote(remoteAddress, _nics);
+            var remoteEndpoint = remoteEndPoint as IPEndPoint;
+            var remoteAddress = remoteEndpoint?.Address;
+            var remotePort = remoteEndpoint?.Port ?? 0;
+            var nics = _nics;
+            var arrival = LocalNetwork.FindByInterface(interfaceIndex, nics);
+            var answerAddress = LocalNetwork.AnswerAddress(remoteAddress, nics, arrival, boundAddress);
             if (!MdnsMessages.TryBuildQueryResponse(
-                    buffer.AsSpan(0, received.ReceivedBytes),
+                    buffer.AsSpan(0, receivedBytes),
                     _advertisement,
                     response,
                     out var written,
-                    out var unicast,
+                    out var quBit,
                     answerAddress))
             {
                 continue;
             }
 
-            if (!unicast && answerAddress is not null)
+            var plan = LocalNetwork.PlanReply(
+                quBit,
+                remotePort,
+                MdnsSockets.IsMulticastDestination(destination),
+                remoteAddress,
+                nics,
+                arrival);
+            var sent = false;
+            if (plan.SendUnicast && remoteEndpoint is not null)
             {
-                MdnsSockets.TrySetMulticastInterface(socket, answerAddress);
+                try
+                {
+                    await socket.SendToAsync(response.AsMemory(0, written), SocketFlags.None, remoteEndpoint, cancellationToken).ConfigureAwait(false);
+                    sent = true;
+                }
+                catch (SocketException ex)
+                {
+                    _log.Log(AirPlayLogLevel.Warning, "mDNS 单播应答没有发出: " + ex.Message + " Unicast mDNS response was not sent: " + ex.Message);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
             }
 
-            var destination = unicast ? received.RemoteEndPoint : MdnsSockets.GroupEndpoint;
-            try
+            if (plan.SendMulticast)
             {
-                await socket.SendToAsync(response.AsMemory(0, written), SocketFlags.None, destination, cancellationToken).ConfigureAwait(false);
-                NoteQuery(received.RemoteEndPoint, unicast);
+                MdnsMessages.StampMulticastId(response.AsSpan(0, written));
+                if (answerAddress is not null)
+                {
+                    MdnsSockets.TrySetMulticastInterface(socket, answerAddress);
+                }
+
+                try
+                {
+                    await socket.SendToAsync(response.AsMemory(0, written), SocketFlags.None, MdnsSockets.GroupEndpoint, cancellationToken).ConfigureAwait(false);
+                    sent = true;
+                }
+                catch (SocketException ex)
+                {
+                    _log.Log(AirPlayLogLevel.Warning, "mDNS 应答没有发出: " + ex.Message + " mDNS response was not sent: " + ex.Message);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
             }
-            catch (SocketException ex)
+
+            if (sent)
             {
-                _log.Log(AirPlayLogLevel.Warning, "mDNS 应答没有发出: " + ex.Message + " mDNS response was not sent: " + ex.Message);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (ObjectDisposedException)
-            {
-                break;
+                NoteQuery(remoteEndPoint, plan);
             }
         }
     }
 
-    private void NoteQuery(EndPoint remote, bool unicast)
+    private void NoteQuery(EndPoint remote, MdnsReplyPlan plan)
     {
         var key = remote.ToString() ?? "";
         bool first;
@@ -490,9 +552,10 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
             return;
         }
 
+        var mode = plan.SendUnicast ? "True" : "False";
         _log.Log(
             AirPlayLogLevel.Information,
-            "mDNS 已应答来自 " + key + " 的查询（unicast=" + unicast + "）。Answered an mDNS query from " + key + ", unicast=" + unicast + ".");
+            "mDNS 已应答来自 " + key + " 的查询（unicast=" + mode + ", " + plan.Reason + "）。Answered an mDNS query from " + key + ", unicast=" + mode + ", " + plan.Reason + ".");
     }
 
     private string? EnsureSockets(IReadOnlyList<AdvertisedNic> nics)
@@ -526,30 +589,37 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
 
             for (var i = _nicSockets.Count - 1; i >= 0; i--)
             {
-                if (nics.Count == 0 || !_nicSockets[i].Address.Equals(nics[0].Address))
+                if (!ContainsAdvertised(nics, _nicSockets[i].Address))
                 {
                     _nicSockets[i].Socket.Dispose();
                     _nicSockets.RemoveAt(i);
                 }
             }
 
-            // One socket. Extra NIC sockets were joined and sent a second A record.
-            if (nics.Count > 0 && !ContainsBound(nics[0].Address))
+            // One socket per non-hotspot NIC when 0.0.0.0:5353 is unavailable.
+            // Joining only the first NIC dropped queries that arrived on another LAN.
+            foreach (var nic in nics)
             {
-                var nic = nics[0];
-                var receiveError = TryOpenNic(nic, receive: true);
-                if (!ContainsBound(nic.Address))
+                if (ContainsBound(nic.Address))
                 {
-                    if (receiveError is not null)
-                    {
-                        errors.Add(nic.Address + ":5353 " + receiveError);
-                    }
+                    continue;
+                }
 
-                    var sendError = TryOpenNic(nic, receive: false);
-                    if (!ContainsBound(nic.Address) && sendError is not null)
-                    {
-                        errors.Add(nic.Address + " send " + sendError);
-                    }
+                var receiveError = TryOpenNic(nic, receive: true);
+                if (ContainsBound(nic.Address))
+                {
+                    continue;
+                }
+
+                if (receiveError is not null)
+                {
+                    errors.Add(nic.Address + ":5353 " + receiveError);
+                }
+
+                var sendError = TryOpenNic(nic, receive: false);
+                if (!ContainsBound(nic.Address) && sendError is not null)
+                {
+                    errors.Add(nic.Address + " send " + sendError);
                 }
             }
 
@@ -631,9 +701,14 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
         }
 
         var desired = new List<IPAddress>();
-        if (nics.Count > 0 && !IPAddress.IsLoopback(nics[0].Address))
+        foreach (var nic in nics)
         {
-            desired.Add(nics[0].Address);
+            if (IPAddress.IsLoopback(nic.Address) || ContainsIp(desired, nic.Address))
+            {
+                continue;
+            }
+
+            desired.Add(nic.Address);
         }
 
         for (var i = _joined.Count - 1; i >= 0; i--)
@@ -667,36 +742,17 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
         _loops.Add(Task.Run(() => ReceiveLoop(socket, boundAddress, token), token));
     }
 
-    private static IReadOnlyList<AdvertisedNic> LoggedNic(IReadOnlyList<AdvertisedNic> nics, SendTarget target)
+    private static bool ContainsAdvertised(IReadOnlyList<AdvertisedNic> nics, IPAddress address)
     {
         foreach (var nic in nics)
         {
-            if (nic.Address.Equals(target.PacketAddress))
+            if (nic.Address.Equals(address))
             {
-                return [nic];
+                return true;
             }
         }
 
-        return [new AdvertisedNic(target.PacketAddress, PrefixLength: -1, Name: "primary")];
-    }
-
-    private static SendTarget PrimaryTarget(SendTarget[] targets, IReadOnlyList<AdvertisedNic> nics)
-    {
-        if (nics.Count == 0)
-        {
-            return targets[0];
-        }
-
-        var primary = nics[0].Address;
-        foreach (var target in targets)
-        {
-            if (target.PacketAddress.Equals(primary))
-            {
-                return target;
-            }
-        }
-
-        return targets[0];
+        return false;
     }
 
     private SendTarget[] SnapshotTargets(IReadOnlyList<AdvertisedNic> nics)

@@ -86,6 +86,38 @@ internal static class MdnsSockets
     public static void ConfigureMulticast(Socket socket)
         => socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 255);
 
+    public static bool TryEnablePacketInformation(Socket socket)
+    {
+        try
+        {
+            socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.PacketInformation, true);
+            return true;
+        }
+        catch (SocketException)
+        {
+            return false;
+        }
+        catch (PlatformNotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// True when the UDP destination is the mDNS group, or when the stack did not
+    /// report a destination. mDNSResponder treats a missing destination the same way
+    /// on platforms whose <c>IP_RECVDSTADDR</c> is broken.
+    /// </summary>
+    public static bool IsMulticastDestination(IPAddress? destination)
+    {
+        if (destination is null || destination.Equals(IPAddress.Any) || destination.Equals(IPAddress.None))
+        {
+            return true;
+        }
+
+        return destination.Equals(Group);
+    }
+
     public static bool TryJoinGroup(Socket socket, IPAddress local)
     {
         try

@@ -249,6 +249,32 @@ public sealed class MultiMirrorTests
     }
 
     [Fact]
+    public async Task Default_max_mirrors_has_no_cap_and_accepts_more_than_four()
+    {
+        Assert.Equal(int.MaxValue, MirrorRuntime.DefaultMaxMirrors);
+        await using var mirror = MirrorRuntime.Start(
+            IPAddress.Loopback,
+            9,
+            new FrameSlot(),
+            new MarkDecoder(1),
+            null,
+            ReadOnlySpan<byte>.Empty,
+            NullAirPlayLog.Instance);
+        using var pairing = new PairingSession(PairingIdentity.Generate());
+        for (var n = 1; n <= 5; n++)
+        {
+            var remote = new IPEndPoint(IPAddress.Parse("10.21.0." + n.ToString(System.Globalization.CultureInfo.InvariantCulture)), 7000);
+            var response = mirror.HandleMedia(
+                Request("SETUP", SessionBody("Phone " + n.ToString(System.Globalization.CultureInfo.InvariantCulture))),
+                pairing,
+                remote);
+            Assert.Equal(200, response.Status);
+        }
+
+        Assert.Equal(5, mirror.Snapshot().Length);
+    }
+
+    [Fact]
     public async Task Configured_max_above_eight_accepts_that_many_and_refuses_the_next()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => MirrorRuntime.Start(

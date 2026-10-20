@@ -16,7 +16,8 @@ namespace AirPlayServer.Core.Media;
 /// </summary>
 internal sealed class MirrorRuntime : IAsyncDisposable
 {
-    public const int DefaultMaxMirrors = 4;
+    /// <summary><see cref="int.MaxValue"/> means there is no concurrent-mirror cap.</summary>
+    public const int DefaultMaxMirrors = int.MaxValue;
 
     private readonly object _gate = new();
     private readonly List<MirrorPipe> _pipes = [];

@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -31,6 +32,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
     private readonly IMediaKeyUnwrapper _unwrapper;
     private readonly byte[]? _labKey;
     private readonly IAirPlayLog _log;
+    private readonly DecodeTimingLog _decodeTiming;
     private readonly MirrorSessionTracker _sessions = new();
     private readonly MirrorDecryptor _decryptor = new();
     private readonly CancellationTokenSource _cancellation = new();
@@ -96,7 +98,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
         bool acceptHevc,
         IHevcDecoder? hevcDecoder,
         IFairPlaySetup? fairPlay,
-        MirrorSessionHub sessionsHub)
+        MirrorSessionHub sessionsHub,
+        DecodeTimingMode decodeTiming)
     {
         _data = data;
         _timing = timing;
@@ -108,6 +111,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
         _unwrapper = unwrapper;
         _labKey = labKey;
         _log = log;
+        _decodeTiming = new DecodeTimingLog(decodeTiming, log);
         FairPlay = fairPlay;
         Activity = new MirrorActivity
         {
@@ -200,7 +204,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
         bool acceptHevc,
         IHevcDecoder? hevcDecoder,
         IFairPlaySetup? fairPlay,
-        MirrorSessionHub sessionsHub)
+        MirrorSessionHub sessionsHub,
+        DecodeTimingMode decodeTiming = DecodeTimingMode.Off)
     {
         ArgumentNullException.ThrowIfNull(sessionsHub);
         Socket? data = null;
@@ -221,7 +226,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 acceptHevc,
                 hevcDecoder,
                 fairPlay,
-                sessionsHub);
+                sessionsHub,
+                decodeTiming);
         }
         catch
         {
@@ -1154,10 +1160,16 @@ internal sealed class MirrorPipe : IAsyncDisposable
         }
 
         var finished = false;
+        var decoderName = hevc ? _hevc?.Name ?? "hevc" : _decoder.Name;
+        long decodeUs = 0;
+        var timed = false;
+        var pictureWidth = 0;
+        var pictureHeight = 0;
         try
         {
             bool produced;
             DecodedFrame frame = default;
+            var started = _decodeTiming.Enabled ? Stopwatch.GetTimestamp() : 0;
             if (hevc)
             {
                 produced = _hevc is not null && _hevc.TryDecode(presented, keyFrame, out frame);
@@ -1167,10 +1179,19 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 produced = _decoder.TryDecode(presented, keyFrame, out frame);
             }
 
-            if (!produced)
+            if (_decodeTiming.Enabled)
+            {
+                decodeUs = DecodeTiming.TicksToMicroseconds(Stopwatch.GetTimestamp() - started);
+                timed = true;
+            }
+
+            if (!produced || frame.Width == 0)
             {
                 return false;
             }
+
+            pictureWidth = frame.Width;
+            pictureHeight = frame.Height;
 
             if (offered && reuse is not null && frame.Owned is null && frame.RefersTo(reuse))
             {
@@ -1203,6 +1224,15 @@ internal sealed class MirrorPipe : IAsyncDisposable
             if (offered && !finished)
             {
                 _frames.CancelReuse();
+            }
+
+            if (timed)
+            {
+                // DecodedFrames already includes this picture when publish called
+                // NoteDecoded. The name is the decoder that ran: media-foundation,
+                // media-foundation-hardware, media-foundation-hevc(-hardware),
+                // ffmpeg-h264, or ffmpeg-hevc.
+                _decodeTiming.Note(decoderName, decodeUs, pictureWidth > 0, pictureWidth, pictureHeight, Activity.DecodedFrames);
             }
         }
     }

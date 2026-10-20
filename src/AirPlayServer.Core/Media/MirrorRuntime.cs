@@ -31,6 +31,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private readonly bool _acceptHevc;
     private readonly int _maxMirrors;
     private readonly Func<MirrorEndpointResources>? _extra;
+    private readonly DecodeTimingMode _decodeTiming;
     private int _pendingLimit = 8 * 1024 * 1024;
     private int _disposed;
 
@@ -44,7 +45,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         IAirPlayLog log,
         bool acceptHevc,
         int maxMirrors,
-        Func<MirrorEndpointResources>? extra)
+        Func<MirrorEndpointResources>? extra,
+        DecodeTimingMode decodeTiming)
     {
         _primary = primary;
         _hub = hub;
@@ -56,6 +58,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         _acceptHevc = acceptHevc;
         _maxMirrors = maxMirrors;
         _extra = extra;
+        _decodeTiming = decodeTiming;
         _pipes.Add(primary);
         primary.DeviceNamed += OnDeviceNamed;
     }
@@ -97,7 +100,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         IHevcDecoder? hevcDecoder = null,
         int maxMirrors = DefaultMaxMirrors,
         Func<MirrorEndpointResources>? extra = null,
-        IFairPlaySetup? fairPlay = null)
+        IFairPlaySetup? fairPlay = null,
+        DecodeTimingMode decodeTiming = DecodeTimingMode.Off)
     {
         ArgumentNullException.ThrowIfNull(frames);
         ArgumentNullException.ThrowIfNull(decoder);
@@ -123,7 +127,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 acceptHevc,
                 hevcDecoder,
                 fairPlay,
-                hub);
+                hub,
+                decodeTiming);
             return new MirrorRuntime(
                 primary,
                 hub,
@@ -134,7 +139,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 log,
                 acceptHevc,
                 maxMirrors,
-                extra);
+                extra,
+                decodeTiming);
         }
         catch
         {
@@ -396,7 +402,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             acceptHevc,
             hevc,
             fairPlay,
-            _hub);
+            _hub,
+            _decodeTiming);
         pipe.PendingEncryptedByteLimit = Volatile.Read(ref _pendingLimit);
         pipe.DeviceNamed += OnDeviceNamed;
         return pipe;

@@ -39,6 +39,7 @@ internal sealed class HostArgs
         用法:
           AirPlayServer.Host [--name 名称] [--listen 0.0.0.0] [--airplay-port 7001] [--raop-port 5001]
                              [--screen 480x1040] [--model iphone-15-pro] [--list-models] [--h265]
+                             [--decode-timing [sample|every]] [--no-decode-timing]
                              [--max-mirrors N] [--no-discovery] [--no-window] [--demo-frame]
                              [--tapclock 主机:42125] [--tapclock-dir 目录] [--tapclock-fps 2]
                              [--tapclock-events] [--tapclock-base http://127.0.0.1:5088] [--notify-debounce-ms 3000]
@@ -83,6 +84,18 @@ internal sealed class HostArgs
                          打不开时改用程序旁边或系统路径里的 FFmpeg（libavcodec / libavutil）。
                          Linux 上 H.264 和 HEVC 都只走 FFmpeg。库怎么放见 packaging/RUN.txt。
                          --model 仍只决定 UIKit 点击点，不决定广告分辨率。
+        --decode-timing [sample|every]
+                         打印每次解码调用的耗时，单位固定为微秒（us）。默认关闭。
+                         不写参数，或写成 sample：第 1 帧、之后每 30 帧一行，
+                         以及任何达到 20000 us 的访问单元立刻一行。
+                         行里有解码器名（media-foundation、media-foundation-hardware、
+                         media-foundation-hevc、media-foundation-hevc-hardware、
+                         ffmpeg-h264、ffmpeg-hevc）、分辨率和已出画序号。
+                         every：每个访问单元一行，包括还没出画的。
+                         环境变量 AIRPLAY_DECODE_TIMING=off|sample|every（也接受 0、1、all）。
+                         命令行优先于环境变量。
+        --no-decode-timing
+                         关闭解码耗时。环境变量开着时用它关掉。
         --tapclock       把最新解码帧按 ATBF type 3 JPEG 推到 host:42125。不发送 H.264。
         --max-mirrors    同时镜像的手机数量。省略则不限制。写成正整数 N 时，第 N+1 路返回 503。
                          必须是正整数，0 和负数无效，没有硬上限。内存和 CPU 不够时会先撑不住。
@@ -140,6 +153,7 @@ internal sealed class HostArgs
         var parsed = new HostArgs();
         var notify = new NotifyLaunch();
         HostUpdateMode? updateMode = null;
+        bool? decodeTimingOn = null;
         var options = new AirPlayReceiverOptions
         {
             DisplayWidth = DefaultAdvertisedWidth,
@@ -162,6 +176,14 @@ internal sealed class HostArgs
                 case "--h265":
                 case "--hevc":
                     options.AcceptHevc = true;
+                    break;
+                case "--decode-timing":
+                    decodeTimingOn = CombineDecodeTiming(decodeTimingOn, true);
+                    options.DecodeTiming = TakeTimingMode(args, ref i);
+                    break;
+                case "--no-decode-timing":
+                    decodeTimingOn = CombineDecodeTiming(decodeTimingOn, false);
+                    options.DecodeTiming = DecodeTimingMode.Off;
                     break;
                 case "--self-check":
                     parsed.SelfCheck = true;
@@ -262,12 +284,52 @@ internal sealed class HostArgs
         }
 
         options.TapClock = tapClock;
+        if (decodeTimingOn is null)
+        {
+            var timingVariable = Environment.GetEnvironmentVariable("AIRPLAY_DECODE_TIMING");
+            if (!string.IsNullOrWhiteSpace(timingVariable))
+            {
+                if (!DecodeTiming.TryParse(timingVariable, out var timing))
+                {
+                    throw new ArgumentException("AIRPLAY_DECODE_TIMING must be off, sample, or every.");
+                }
+
+                options.DecodeTiming = timing;
+            }
+        }
+
         options.Log ??= ConsoleAirPlayLog.Instance;
         options.EnableInProcessFairPlay();
         parsed.UpdateMode = updateMode ?? HostUpdateMode.Disabled;
         parsed.Options = options;
         parsed.Notify = notify;
         return parsed;
+    }
+
+    private static bool CombineDecodeTiming(bool? current, bool next)
+    {
+        if (current is null || current == next)
+        {
+            return next;
+        }
+
+        throw new ArgumentException("--decode-timing and --no-decode-timing cannot be combined.");
+    }
+
+    private static DecodeTimingMode TakeTimingMode(string[] args, ref int index)
+    {
+        if (index + 1 >= args.Length || args[index + 1].StartsWith('-'))
+        {
+            return DecodeTimingMode.Sample;
+        }
+
+        if (!DecodeTiming.TryParse(args[index + 1], out var mode) || mode == DecodeTimingMode.Off)
+        {
+            throw new ArgumentException("--decode-timing expects sample or every.");
+        }
+
+        index++;
+        return mode;
     }
 
     private static HostUpdateMode CombineUpdateMode(HostUpdateMode? current, HostUpdateMode next)

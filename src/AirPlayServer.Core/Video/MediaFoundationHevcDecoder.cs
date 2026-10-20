@@ -10,7 +10,8 @@ namespace AirPlayServer.Core.Video;
 /// once and replaced by the Microsoft software decoder
 /// (CLSID_CMSH265DecoderMFT). Hardware transforms are not drained: that flush
 /// drops reference frames and leaves the window on the last picture. A software
-/// drain is flushed and the keyframe is submitted again so later frames paint.
+/// drain releases that transform and submits the keyframe to a new one.
+/// Flushing the drained object leaves the window on that one frame.
 /// Output is
 /// BGRA for the existing window and TapClock path. This file is compiled only
 /// into a Windows host.
@@ -40,6 +41,7 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IBgraReu
     private static readonly Guid SequenceHeader = Guid.Parse("3c036de7-3ad0-4c9e-9216-ee6d6ac21cb3");
     private static readonly Guid DefaultStride = Guid.Parse("644b4e48-1e02-4516-b0eb-c01ca9d49ac6");
     private static readonly Guid CleanPoint = Guid.Parse("9cdf01d8-a0f0-43ba-b077-eaa06cbd728a");
+    private static readonly Guid Discontinuity = MediaFoundationDrainRestart.DiscontinuityAttribute;
     private static readonly Guid TransformAsync = Guid.Parse("f81a699a-649a-497d-8c73-29f8fed6ad7a");
     private static readonly Guid LowLatency = Guid.Parse("9c27891a-ed7a-40e1-88e8-b22727a024ee");
     private static readonly Guid D3DAware = Guid.Parse("eaa35c29-775e-488e-9b61-b3283e49583b");
@@ -82,6 +84,8 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IBgraReu
     private int _disposed;
     private int _pictures;
     private int _consecutiveMisses;
+    private bool _markDiscontinuity;
+    private bool _inputAccepted;
     private byte[]? _lastKeyframe;
     private byte[]? _contiguous;
     private const int MaxKeyframeBytes = 4 * 1024 * 1024;
@@ -260,9 +264,10 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IBgraReu
         }
     }
 
-    private bool DecodeLocked(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame, bool allowHardwareFallback, bool allowDrain = true)
+    private bool DecodeLocked(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame, bool allowHardwareFallback, bool allowDrain = true, bool allowRecreate = true)
     {
         frame = default;
+        _inputAccepted = false;
         if (!EnsureTransform() || !_typesReady && !ApplyTypes())
         {
             return false;
@@ -299,8 +304,15 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IBgraReu
                         out frame);
                 }
 
+                if (MediaFoundationDrainRestart.ShouldRecreateAfterReject(_hardware, allowRecreate, hr))
+                {
+                    return RecreateSoftware(annexB, keyFrame, out frame);
+                }
+
                 return false;
             }
+
+            _inputAccepted = true;
         }
         finally
         {
@@ -315,25 +327,16 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IBgraReu
             keyFrame,
             _pictures,
             _hardware);
-        if (drain.Drain)
+        if (drain.Drain && drain.ReplaceTransform)
         {
-            // Same restart as H.264. A drained software HEVC MFT that only
-            // receives start-of-stream stops publishing while the session stays up.
-            Slots.ProcessMessage(_transform, MediaFoundationDrainRestart.MessageDrain, 0);
-            produced = Pull(ref frame);
-            foreach (var message in MediaFoundationDrainRestart.MessagesAfterDrain)
+            // Same restart as H.264. The drained software object is released.
+            // Flushing it is the resume freeze: one picture, then no more.
+            if (!ContinueAfterDrain(annexB, drain.MarkDiscontinuity, ref frame))
             {
-                Slots.ProcessMessage(_transform, message, 0);
+                return false;
             }
 
-            if (drain.ResubmitKeyframe
-                && DecodeLocked(annexB, keyFrame: true, out var restored, allowHardwareFallback: false, allowDrain: false)
-                && restored.Width != 0)
-            {
-                ReleasePicture(ref frame);
-                frame = restored;
-                return true;
-            }
+            return true;
         }
 
         if (produced == PullResult.Unsupported && _hardware && allowHardwareFallback)
@@ -351,20 +354,142 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IBgraReu
             return true;
         }
 
-        if (_hardware && allowHardwareFallback)
+        _consecutiveMisses++;
+        if (_hardware && allowHardwareFallback && HardwareDecodeStall.ShouldAbandon(_pictures, _consecutiveMisses))
         {
-            _consecutiveMisses++;
-            if (HardwareDecodeStall.ShouldAbandon(_pictures, _consecutiveMisses))
-            {
-                return AbandonHardware(
-                    annexB,
-                    keyFrame,
-                    "硬件 HEVC 连续没有画面（已出画 " + _pictures + "，连续空帧 " + _consecutiveMisses + "），已释放硬件变换并改用软件解码器，避免驱动线程空转。Hardware HEVC produced no picture (pictures=" + _pictures + ", consecutive misses=" + _consecutiveMisses + "). Released the hardware transform and switched to the software decoder.",
-                    out frame);
-            }
+            return AbandonHardware(
+                annexB,
+                keyFrame,
+                "硬件 HEVC 连续没有画面（已出画 " + _pictures + "，连续空帧 " + _consecutiveMisses + "），已释放硬件变换并改用软件解码器，避免驱动线程空转。Hardware HEVC produced no picture (pictures=" + _pictures + ", consecutive misses=" + _consecutiveMisses + "). Released the hardware transform and switched to the software decoder.",
+                out frame);
+        }
+
+        if (MediaFoundationDrainRestart.ShouldRecreateAfterSoftwareStall(_hardware, allowRecreate, _pictures, _consecutiveMisses)
+            && (_lastKeyframe is not null || keyFrame))
+        {
+            return RecreateSoftware(annexB, keyFrame, out frame);
         }
 
         return false;
+    }
+
+    private bool ContinueAfterDrain(ReadOnlySpan<byte> annexB, bool markDiscontinuity, ref DecodedFrame frame)
+    {
+        var drained = frame;
+        frame = default;
+        DecodedFrame replacement = default;
+        // The restart callback cannot capture the span or the out parameter.
+        var keyframe = annexB.ToArray();
+        var restart = MediaFoundationDrainRestart.ContinueAfterSoftwareDrain(
+            ProcessDrainMessage,
+            PullDrained,
+            ReleaseTransform,
+            Submit);
+
+        int ProcessDrainMessage(int message)
+            => _transform == 0 ? unchecked((int)0x80004005) : Slots.ProcessMessage(_transform, message, 0);
+
+        bool PullDrained()
+        {
+            Pull(ref drained);
+            return drained.Width != 0;
+        }
+
+        MediaFoundationDrainRestart.SubmitResult Submit()
+            => SubmitReplacement(keyframe, markDiscontinuity, ref drained, out replacement);
+
+        if (restart.DrainHresult < 0)
+        {
+            _log.Log(
+                AirPlayLogLevel.Warning,
+                "软件 HEVC drain 返回 0x" + restart.DrainHresult.ToString("X8") + "，已丢掉该变换并重建。Software HEVC drain returned 0x" + restart.DrainHresult.ToString("X8") + ". Released that transform.");
+        }
+        else
+        {
+            _log.Log(
+                AirPlayLogLevel.Information,
+                "软件 HEVC 在 drain 后已换新解码器，没有在同一只变换上 flush。Software HEVC was replaced after drain. The drained transform was not flushed.");
+        }
+
+        if (restart.UseReplacementPicture)
+        {
+            frame = replacement;
+            return true;
+        }
+
+        if (restart.PublishDrainedPicture && drained.Width != 0)
+        {
+            frame = drained;
+            ReleasePicture(ref replacement);
+            NotePicture();
+            return true;
+        }
+
+        ReleasePicture(ref drained);
+        ReleasePicture(ref replacement);
+        return false;
+    }
+
+    private MediaFoundationDrainRestart.SubmitResult SubmitReplacement(ReadOnlySpan<byte> annexB, bool markDiscontinuity, ref DecodedFrame drained, out DecodedFrame frame)
+    {
+        _markDiscontinuity = markDiscontinuity;
+        try
+        {
+            var picture = DecodeLocked(annexB, keyFrame: true, out frame, allowHardwareFallback: false, allowDrain: false, allowRecreate: false)
+                && frame.Width != 0;
+            if (picture)
+            {
+                ReleasePicture(ref drained);
+            }
+
+            return new MediaFoundationDrainRestart.SubmitResult
+            {
+                Accepted = _inputAccepted,
+                Picture = picture,
+            };
+        }
+        finally
+        {
+            _markDiscontinuity = false;
+        }
+    }
+
+    private bool RecreateSoftware(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
+    {
+        frame = default;
+        var replay = _lastKeyframe;
+        var replayDifferent = replay is not null && (replay.Length != annexB.Length || !annexB.SequenceEqual(replay));
+        ReleaseTransform();
+        _log.Log(
+            AirPlayLogLevel.Warning,
+            "软件 HEVC 不再出画，已丢掉该变换并重建。Software HEVC stopped publishing. Released that transform and created another.");
+        DecodedFrame latest = default;
+        if (replayDifferent && replay is not null && DecodeDiscontinuous(replay, keyFrame: true, out var keyed) && keyed.Width != 0)
+        {
+            latest = keyed;
+        }
+
+        if (DecodeDiscontinuous(annexB, keyFrame, out var current) && current.Width != 0)
+        {
+            ReleasePicture(ref latest);
+            latest = current;
+        }
+
+        frame = latest;
+        return latest.Width != 0;
+    }
+
+    private bool DecodeDiscontinuous(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
+    {
+        _markDiscontinuity = true;
+        try
+        {
+            return DecodeLocked(annexB, keyFrame, out frame, allowHardwareFallback: false, allowDrain: false, allowRecreate: false);
+        }
+        finally
+        {
+            _markDiscontinuity = false;
+        }
     }
 
     private bool AbandonHardware(ReadOnlySpan<byte> annexB, bool keyFrame, string reason, out DecodedFrame frame)
@@ -741,6 +866,11 @@ internal sealed unsafe class MediaFoundationHevcDecoder : IHevcDecoder, IBgraReu
             if (keyFrame)
             {
                 Slots.SetUInt32(sample, CleanPoint, 1);
+            }
+
+            if (_markDiscontinuity)
+            {
+                Slots.SetUInt32(sample, Discontinuity, 1);
             }
 
             return true;

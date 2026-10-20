@@ -17,7 +17,7 @@ public sealed class MirrorPresentTests
     }
 
     [Fact]
-    public void Resume_software_drain_flushes_and_resubmits_the_keyframe()
+    public void Resume_software_drain_replaces_the_transform_instead_of_flushing_it()
     {
         // Mirror sender resumed, geometry 720x1560, then a new software MFT
         // (pictures == 0). The first keyframe has not produced a picture yet.
@@ -29,26 +29,202 @@ public sealed class MirrorPresentTests
             picturesProduced: 0,
             hardware: false);
         Assert.True(resume.Drain);
-        Assert.True(resume.ResubmitKeyframe);
-        Assert.Equal(
-            [
-                MediaFoundationDrainRestart.MessageFlush,
-                MediaFoundationDrainRestart.MessageBeginStreaming,
-                MediaFoundationDrainRestart.MessageStartOfStream,
-            ],
-            MediaFoundationDrainRestart.MessagesAfterDrain);
-        Assert.Equal(0, MediaFoundationDrainRestart.MessagesAfterDrain[0]);
-        Assert.NotEqual(
-            MediaFoundationDrainRestart.MessageStartOfStream,
-            MediaFoundationDrainRestart.MessagesAfterDrain[0]);
+        Assert.True(resume.ReplaceTransform);
+        Assert.True(resume.MarkDiscontinuity);
+        Assert.Equal(new Guid("9cdf01d9-a0f0-43ba-b077-eaa06cbd728a"), MediaFoundationDrainRestart.DiscontinuityAttribute);
 
-        Assert.False(MediaFoundationDrainRestart.For(true, false, false, true, picturesProduced: 1, hardware: false).Drain);
-        Assert.False(MediaFoundationDrainRestart.For(true, false, false, true, picturesProduced: 0, hardware: true).Drain);
+        var steady = MediaFoundationDrainRestart.For(true, false, false, true, picturesProduced: 1, hardware: false);
+        Assert.False(steady.Drain);
+        Assert.False(steady.ReplaceTransform);
+        var hardware = MediaFoundationDrainRestart.For(true, false, false, true, picturesProduced: 0, hardware: true);
+        Assert.False(hardware.Drain);
+        Assert.False(hardware.ReplaceTransform);
         Assert.False(MediaFoundationDrainRestart.For(true, false, producedPicture: true, true, 0, false).Drain);
-        Assert.False(MediaFoundationDrainRestart.For(allowDrain: false, false, false, true, 0, false).Drain);
+        var held = MediaFoundationDrainRestart.For(allowDrain: false, false, false, true, 0, false);
+        Assert.False(held.Drain);
+        Assert.False(held.ReplaceTransform);
         Assert.False(MediaFoundationDrainRestart.For(true, outputUnsupported: true, false, true, 0, false).Drain);
         Assert.False(MediaFoundationDrainRestart.For(true, false, false, keyFrame: false, 0, false).Drain);
         Assert.False(MediaFoundationDrainRestart.For(true, false, false, true, picturesProduced: -1, hardware: false).Drain);
+    }
+
+    [Fact]
+    public void Resume_v0112_flush_on_the_drained_object_publishes_one_frame()
+    {
+        // Stand-in for CLSID_CMSH264DecoderMFT. Linux CI cannot load it.
+        // After drain, flush + begin + start on the same object does not emit
+        // again. That is the v0.1.12 resume freeze: one picture, session stays up.
+        var mft = new SoftwareDecoderStandIn();
+        Assert.Equal(0, mft.ProcessInput());
+        Assert.False(mft.Pull());
+        Assert.Equal(0, mft.ProcessMessage(MediaFoundationDrainRestart.MessageDrain));
+        Assert.True(mft.Pull());
+        Assert.Equal(0, mft.ProcessMessage(MediaFoundationDrainRestart.MessageFlush));
+        Assert.Equal(0, mft.ProcessMessage(MediaFoundationDrainRestart.MessageBeginStreaming));
+        Assert.Equal(0, mft.ProcessMessage(MediaFoundationDrainRestart.MessageStartOfStream));
+        Assert.Equal(MediaFoundationDrainRestart.NotAccepting, mft.ProcessInput());
+        Assert.False(mft.Pull());
+        Assert.False(mft.SubmitFollowingFrame());
+        Assert.Equal(1, mft.Pictures);
+        Assert.Equal(0, mft.Releases);
+    }
+
+    [Fact]
+    public void Resume_drain_then_a_new_transform_keeps_publishing()
+    {
+        var mft = new SoftwareDecoderStandIn();
+        Assert.Equal(0, mft.ProcessInput());
+        Assert.False(mft.Pull());
+        var restart = MediaFoundationDrainRestart.ContinueAfterSoftwareDrain(
+            mft.ProcessMessage,
+            mft.Pull,
+            mft.Release,
+            () => mft.SubmitReplacement());
+        Assert.DoesNotContain(MediaFoundationDrainRestart.MessageFlush, mft.Messages);
+        Assert.DoesNotContain(MediaFoundationDrainRestart.MessageBeginStreaming, mft.Messages);
+        Assert.DoesNotContain(MediaFoundationDrainRestart.MessageStartOfStream, mft.Messages);
+        Assert.Equal([MediaFoundationDrainRestart.MessageDrain], mft.Messages);
+        Assert.Equal(1, mft.Releases);
+        Assert.True(restart.DrainedPicture);
+        Assert.True(restart.ReplacementAccepted);
+        Assert.False(restart.ReplacementPicture);
+        Assert.True(restart.PublishDrainedPicture);
+        Assert.False(restart.UseReplacementPicture);
+        Assert.True(mft.Discontinuity);
+        Assert.True(mft.SubmitFollowingFrame());
+        Assert.Equal(2, mft.Pictures);
+
+        var rejected = MediaFoundationDrainRestart.ContinueAfterSoftwareDrain(
+            _ => 0,
+            () => true,
+            () => { },
+            () => new MediaFoundationDrainRestart.SubmitResult { Accepted = false, Picture = false });
+        Assert.True(rejected.DrainedPicture);
+        Assert.False(rejected.ReplacementAccepted);
+        Assert.False(rejected.PublishDrainedPicture);
+        Assert.False(rejected.UseReplacementPicture);
+
+        var failedDrain = MediaFoundationDrainRestart.ContinueAfterSoftwareDrain(
+            _ => unchecked((int)0x80004001),
+            () => false,
+            () => { },
+            () => new MediaFoundationDrainRestart.SubmitResult { Accepted = true, Picture = true });
+        Assert.True(failedDrain.DrainHresult < 0);
+        Assert.True(failedDrain.UseReplacementPicture);
+        Assert.False(failedDrain.PublishDrainedPicture);
+    }
+
+    [Fact]
+    public void Software_reject_and_stall_recreate_the_transform_hardware_does_not()
+    {
+        Assert.True(MediaFoundationDrainRestart.ShouldRecreateAfterReject(hardware: false, allowRecreate: true, MediaFoundationDrainRestart.NotAccepting));
+        Assert.False(MediaFoundationDrainRestart.ShouldRecreateAfterReject(hardware: true, allowRecreate: true, MediaFoundationDrainRestart.NotAccepting));
+        Assert.False(MediaFoundationDrainRestart.ShouldRecreateAfterReject(hardware: false, allowRecreate: false, MediaFoundationDrainRestart.NotAccepting));
+        Assert.False(MediaFoundationDrainRestart.ShouldRecreateAfterReject(hardware: false, allowRecreate: true, hresult: -1));
+
+        Assert.False(MediaFoundationDrainRestart.ShouldRecreateAfterSoftwareStall(false, true, picturesProduced: 1, consecutiveMisses: 2));
+        Assert.True(MediaFoundationDrainRestart.ShouldRecreateAfterSoftwareStall(false, true, picturesProduced: 1, consecutiveMisses: MediaFoundationDrainRestart.SoftwareStallMisses));
+        Assert.False(MediaFoundationDrainRestart.ShouldRecreateAfterSoftwareStall(false, true, picturesProduced: 0, consecutiveMisses: 4));
+        Assert.False(MediaFoundationDrainRestart.ShouldRecreateAfterSoftwareStall(true, true, picturesProduced: 3, consecutiveMisses: 4));
+        Assert.False(MediaFoundationDrainRestart.ShouldRecreateAfterSoftwareStall(false, allowRecreate: false, picturesProduced: 2, consecutiveMisses: 4));
+    }
+
+    /// <summary>
+    /// Behavior measured on the Microsoft software H.264 decoder: the first
+    /// sample is held, drain forces that picture out, and the same object then
+    /// refuses input. Flush, begin-streaming, and start-of-stream do not revive
+    /// it. A new object holds the replacement keyframe and emits on the next
+    /// access unit. Media Foundation cannot run on Linux CI.
+    /// </summary>
+    private sealed class SoftwareDecoderStandIn
+    {
+        private bool _alive = true;
+        private bool _holding;
+        private bool _picturePending;
+
+        public List<int> Messages { get; } = [];
+
+        public int Pictures { get; private set; }
+
+        public int Releases { get; private set; }
+
+        public bool Discontinuity { get; private set; }
+
+        public int ProcessInput()
+        {
+            if (!_alive)
+            {
+                return MediaFoundationDrainRestart.NotAccepting;
+            }
+
+            _holding = true;
+            return 0;
+        }
+
+        public int ProcessMessage(int message)
+        {
+            Messages.Add(message);
+            if (message == MediaFoundationDrainRestart.MessageDrain && _holding)
+            {
+                _holding = false;
+                _picturePending = true;
+                _alive = false;
+            }
+
+            if (message == MediaFoundationDrainRestart.MessageFlush
+                || message == MediaFoundationDrainRestart.MessageBeginStreaming
+                || message == MediaFoundationDrainRestart.MessageStartOfStream)
+            {
+                _alive = false;
+                _holding = false;
+            }
+
+            return 0;
+        }
+
+        public bool Pull()
+        {
+            if (!_picturePending)
+            {
+                return false;
+            }
+
+            _picturePending = false;
+            Pictures++;
+            return true;
+        }
+
+        public void Release()
+        {
+            Releases++;
+            _alive = true;
+            _holding = false;
+            _picturePending = false;
+        }
+
+        public MediaFoundationDrainRestart.SubmitResult SubmitReplacement()
+        {
+            if (!_alive)
+            {
+                return new MediaFoundationDrainRestart.SubmitResult();
+            }
+
+            Discontinuity = true;
+            _holding = true;
+            return new MediaFoundationDrainRestart.SubmitResult { Accepted = true, Picture = false };
+        }
+
+        public bool SubmitFollowingFrame()
+        {
+            if (!_alive || !_holding)
+            {
+                return false;
+            }
+
+            _holding = false;
+            Pictures++;
+            return true;
+        }
     }
 
     [Fact]

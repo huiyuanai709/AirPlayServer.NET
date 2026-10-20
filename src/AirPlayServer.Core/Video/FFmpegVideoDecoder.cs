@@ -47,6 +47,7 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
     private readonly IAirPlayLog _log;
     private readonly BgraBufferPool _buffers;
     private readonly object _gate = new();
+    private readonly nint _codec;
     private readonly nint _frame;
     private nint _context;
     private H264ColorSignals _bitstream;
@@ -54,11 +55,13 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
     private int _loggedColor;
     private int _loggedFormat;
     private int _loggedSend;
+    private bool _dropUntilKey;
     private BgraReuseSlot _reuse;
 
-    private FFmpegDecodeSession(FFmpegLibrary library, nint context, nint frame, IAirPlayLog? log, string name, BgraBufferPool buffers)
+    private FFmpegDecodeSession(FFmpegLibrary library, nint codec, nint context, nint frame, IAirPlayLog? log, string name, BgraBufferPool buffers)
     {
         _library = library;
+        _codec = codec;
         _context = context;
         _frame = frame;
         _log = log ?? NullAirPlayLog.Instance;
@@ -131,7 +134,7 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
             return false;
         }
 
-        session = new FFmpegDecodeSession(library, context, frame, log, name, buffers ?? new BgraBufferPool());
+        session = new FFmpegDecodeSession(library, codec, context, frame, log, name, buffers ?? new BgraBufferPool());
         return true;
     }
 
@@ -150,21 +153,27 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
 
     internal void Reset()
     {
-        if (!IsOpen)
+        if (Volatile.Read(ref _disposed) != 0)
         {
             return;
         }
 
         lock (_gate)
         {
-            if (_context != 0)
+            if (_disposed != 0)
             {
-                _library.Flush(_context);
+                return;
             }
+
+            // avcodec_flush_buffers clears the DPB but leaves HEVC POC tracking.
+            // The next P-frame then logs "Could not find ref with POC" and
+            // "Error constructing the frame RPS" forever. A new context does not.
+            ReopenLocked();
+            _dropUntilKey = true;
         }
     }
 
-    internal bool TryDecode(ReadOnlySpan<byte> annexB, out DecodedFrame frame)
+    internal bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
     {
         frame = default;
         if (!IsOpen || annexB.IsEmpty)
@@ -179,24 +188,135 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
                 return false;
             }
 
-            if (!Send(annexB, out var drained))
+            if (_dropUntilKey && !keyFrame)
             {
-                ReturnFrame(drained);
                 return false;
             }
 
-            if (Receive(out frame))
+            var status = DecodeOnce(annexB, out frame);
+            if (status == DecodeStatus.Picture)
             {
-                ReturnFrame(drained);
+                _dropUntilKey = false;
                 return true;
             }
 
-            // The decoder was full, so one picture was pulled out to make room.
-            // If the new packet does not produce its own picture yet, that
-            // drained picture is still the latest frame.
-            frame = drained;
-            return drained.Width > 0;
+            if (status == DecodeStatus.Accepted)
+            {
+                // The keyframe is in the new context. The picture can come
+                // out on the next access unit. Dropping that unit leaves the
+                // IDR stuck and the window stays on the last frame.
+                _dropUntilKey = false;
+                return false;
+            }
+
+            if (status != DecodeStatus.Hard)
+            {
+                return false;
+            }
+
+            // Missing refs or a broken RPS. Replacing the context stops the
+            // per-frame av_log flood. Only the next keyframe is fed to it.
+            ReopenLocked();
+            _dropUntilKey = true;
+            if (!keyFrame || _context == 0)
+            {
+                frame = default;
+                return false;
+            }
+
+            status = DecodeOnce(annexB, out frame);
+            if (status == DecodeStatus.Picture)
+            {
+                _dropUntilKey = false;
+                return true;
+            }
+
+            if (status == DecodeStatus.Accepted)
+            {
+                _dropUntilKey = false;
+                frame = default;
+                return false;
+            }
+
+            _dropUntilKey = true;
+            frame = default;
+            return false;
         }
+    }
+
+    private enum DecodeStatus
+    {
+        NeedMore = 0,
+        Picture = 1,
+        Hard = 2,
+
+        /// <summary>The packet was accepted and no picture is ready yet.</summary>
+        Accepted = 3,
+    }
+
+    private DecodeStatus DecodeOnce(ReadOnlySpan<byte> annexB, out DecodedFrame frame)
+    {
+        frame = default;
+        if (!Send(annexB, out var drained, out var hard))
+        {
+            ReturnFrame(drained);
+            return hard ? DecodeStatus.Hard : DecodeStatus.NeedMore;
+        }
+
+        if (Receive(out frame, out hard))
+        {
+            ReturnFrame(drained);
+            return DecodeStatus.Picture;
+        }
+
+        if (hard)
+        {
+            ReturnFrame(drained);
+            frame = default;
+            return DecodeStatus.Hard;
+        }
+
+        // The decoder was full, so one picture was pulled out to make room.
+        // If the new packet does not produce its own picture yet, that
+        // drained picture is still the latest frame.
+        frame = drained;
+        return drained.Width > 0 ? DecodeStatus.Picture : DecodeStatus.Accepted;
+    }
+
+    private void ReopenLocked()
+    {
+        if (_context != 0)
+        {
+            var dying = _context;
+            _context = 0;
+            _library.FreeContext(&dying);
+        }
+
+        if (_codec == 0 || _disposed != 0)
+        {
+            return;
+        }
+
+        var context = _library.AllocContext(_codec);
+        if (context == 0)
+        {
+            _log.Log(AirPlayLogLevel.Warning, Name + " could not allocate a new decode context.");
+            return;
+        }
+
+        var opened = _library.OpenCapped(context, _codec);
+        if (opened < 0)
+        {
+            _library.FreeContext(&context);
+            _log.Log(AirPlayLogLevel.Warning, Name + " could not reopen (" + _library.DescribeError(opened) + ").");
+            return;
+        }
+
+        _context = context;
+        _loggedSend = 0;
+        _log.Log(
+            AirPlayLogLevel.Information,
+            Name + " 已重建解码器，旧的参考帧和 POC 已丢掉。Reopened the decoder. Previous reference frames and POC state were dropped.");
     }
 
     public void Dispose()
@@ -223,9 +343,10 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
         }
     }
 
-    private bool Send(ReadOnlySpan<byte> annexB, out DecodedFrame drained)
+    private bool Send(ReadOnlySpan<byte> annexB, out DecodedFrame drained, out bool hard)
     {
         drained = default;
+        hard = false;
         if (annexB.Length <= 0 || annexB.Length > 8 * 1024 * 1024)
         {
             return false;
@@ -257,13 +378,15 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
         var result = _library.SendPacket(_context, packet);
         if (result == FFmpegLibrary.ErrorAgain)
         {
-            Receive(out drained);
+            Receive(out drained, out _);
             result = _library.SendPacket(_context, packet);
         }
 
         _library.PacketFree(&packet);
         if (result < 0)
         {
+            // Includes a second EAGAIN. The context is not making progress.
+            hard = true;
             if (Interlocked.Exchange(ref _loggedSend, 1) == 0)
             {
                 _log.Log(AirPlayLogLevel.Warning, Name + " send failed (" + _library.DescribeError(result) + ").");
@@ -275,9 +398,10 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
         return true;
     }
 
-    private bool Receive(out DecodedFrame frame)
+    private bool Receive(out DecodedFrame frame, out bool hard)
     {
         frame = default;
+        hard = false;
         var produced = false;
         while (_context != 0)
         {
@@ -290,6 +414,11 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
 
             if (result < 0)
             {
+                if (!produced)
+                {
+                    hard = true;
+                }
+
                 if (Interlocked.Exchange(ref _loggedSend, 1) == 0)
                 {
                     _log.Log(AirPlayLogLevel.Warning, Name + " receive failed (" + _library.DescribeError(result) + ").");
@@ -427,10 +556,7 @@ internal sealed class FFmpegH264Decoder : IH264Decoder, IBgraReuseTarget, IDispo
     public void ClearReuse() => _session.ClearReuse();
 
     public bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
-    {
-        _ = keyFrame;
-        return _session.TryDecode(annexB, out frame);
-    }
+        => _session.TryDecode(annexB, keyFrame, out frame);
 
     public void Dispose() => _session.Dispose();
 
@@ -481,8 +607,7 @@ internal sealed class FFmpegHevcDecoder : IHevcDecoder, IBgraReuseTarget, IDispo
 
     public bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
     {
-        _ = keyFrame;
-        return _session.TryDecode(annexB, out frame);
+        return _session.TryDecode(annexB, keyFrame, out frame);
     }
 
     public void Dispose() => _session.Dispose();

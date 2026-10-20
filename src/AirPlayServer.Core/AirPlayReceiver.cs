@@ -179,7 +179,12 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 hevc,
                 options.MaxMirrors,
                 () => CreateExtraMirror(log, advertisesHevc, separateFairPlay, unwrapper, fairPlay, buffers),
-                fairPlay);
+                fairPlay,
+                options.DecodeTiming);
+            if (options.DecodeTiming != DecodeTimingMode.Off)
+            {
+                log.Log(AirPlayLogLevel.Information, DecodeTiming.Describe(options.DecodeTiming));
+            }
             if (options.PublishDemoFrame)
             {
                 DemoFrame.Publish(frames, options.DisplayWidth, options.DisplayHeight);

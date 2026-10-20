@@ -135,6 +135,42 @@ public class HostArgsTests
     }
 
     [Fact]
+    public void Decode_timing_defaults_off_and_the_flag_selects_sample_or_every()
+    {
+        var previous = Environment.GetEnvironmentVariable("AIRPLAY_DECODE_TIMING");
+        Environment.SetEnvironmentVariable("AIRPLAY_DECODE_TIMING", null);
+        try
+        {
+            Assert.Equal(DecodeTimingMode.Off, HostArgs.Parse([]).Options.DecodeTiming);
+            Assert.Equal(DecodeTimingMode.Sample, HostArgs.Parse(["--decode-timing"]).Options.DecodeTiming);
+            Assert.Equal(DecodeTimingMode.Sample, HostArgs.Parse(["--decode-timing", "sample", "--h265"]).Options.DecodeTiming);
+            Assert.True(HostArgs.Parse(["--decode-timing", "sample", "--h265"]).Options.AcceptHevc);
+            Assert.Equal(DecodeTimingMode.Every, HostArgs.Parse(["--decode-timing", "every"]).Options.DecodeTiming);
+            Assert.Equal(DecodeTimingMode.Off, HostArgs.Parse(["--no-decode-timing"]).Options.DecodeTiming);
+            Assert.Contains("--decode-timing", HostArgs.HelpText, StringComparison.Ordinal);
+            Assert.Contains("us", HostArgs.HelpText, StringComparison.Ordinal);
+            Assert.Contains("AIRPLAY_DECODE_TIMING", HostArgs.HelpText, StringComparison.Ordinal);
+
+            var bad = Assert.Throws<ArgumentException>(() => HostArgs.Parse(["--decode-timing", "fast"]));
+            Assert.Contains("sample", bad.Message, StringComparison.Ordinal);
+            var both = Assert.Throws<ArgumentException>(() => HostArgs.Parse(["--decode-timing", "--no-decode-timing"]));
+            Assert.Contains("--no-decode-timing", both.Message, StringComparison.Ordinal);
+
+            Environment.SetEnvironmentVariable("AIRPLAY_DECODE_TIMING", "every");
+            Assert.Equal(DecodeTimingMode.Every, HostArgs.Parse([]).Options.DecodeTiming);
+            Assert.Equal(DecodeTimingMode.Sample, HostArgs.Parse(["--decode-timing"]).Options.DecodeTiming);
+            Assert.Equal(DecodeTimingMode.Off, HostArgs.Parse(["--no-decode-timing"]).Options.DecodeTiming);
+            Environment.SetEnvironmentVariable("AIRPLAY_DECODE_TIMING", "nope");
+            var env = Assert.Throws<ArgumentException>(() => HostArgs.Parse([]));
+            Assert.Contains("AIRPLAY_DECODE_TIMING", env.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AIRPLAY_DECODE_TIMING", previous);
+        }
+    }
+
+    [Fact]
     public void H265_is_opt_in_and_leaves_the_advertised_screen()
     {
         Assert.False(HostArgs.Parse([]).Options.AcceptHevc);

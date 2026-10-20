@@ -11,10 +11,11 @@ namespace AirPlayServer.Core.Video;
 /// (CLSID_CMSH264DecoderMFT). Draining the hardware transform to force the
 /// first picture is not used: that flush drops reference frames and the DXGI
 /// worker threads keep spinning while the window stays on the last picture.
-/// The software decoder may drain that first IDR. The drained object is then
-/// released and the keyframe is submitted to a new software transform.
-/// Flushing the drained object leaves the window on that one frame after
-/// resume. See <see cref="MediaFoundationDrainRestart"/>.
+/// The software decoder is not drained. <c>MFT_MESSAGE_COMMAND_DRAIN</c> forces
+/// one picture out and ends the stream: v0.1.12 flushed that object, v0.1.14
+/// released it and resubmitted the keyframe, and the window still stayed on
+/// that frame. The IDR stays in the open transform. The next access unit is
+/// what pulls the picture. See <see cref="MediaFoundationDrainRestart"/>.
 /// The software decoder's documented outputs are NV12, YUY2, and planar 4:2:0, not RGB.
 /// RGB32/ARGB32 are taken when a transform lists them, and the output type is
 /// stamped with the resolved matrix and range so Media Foundation converts.
@@ -51,7 +52,6 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReu
     private static readonly Guid SequenceHeader = Guid.Parse("3c036de7-3ad0-4c9e-9216-ee6d6ac21cb3");
     private static readonly Guid DefaultStride = Guid.Parse("644b4e48-1e02-4516-b0eb-c01ca9d49ac6");
     private static readonly Guid CleanPoint = Guid.Parse("9cdf01d8-a0f0-43ba-b077-eaa06cbd728a");
-    private static readonly Guid Discontinuity = MediaFoundationDrainRestart.DiscontinuityAttribute;
     private static readonly Guid TransformAsync = Guid.Parse("f81a699a-649a-497d-8c73-29f8fed6ad7a");
     private static readonly Guid LowLatency = Guid.Parse("9c27891a-ed7a-40e1-88e8-b22727a024ee");
     private static readonly Guid D3DAware = Guid.Parse("eaa35c29-775e-488e-9b61-b3283e49583b");
@@ -91,8 +91,6 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReu
     private int _disposed;
     private int _pictures;
     private int _consecutiveMisses;
-    private bool _markDiscontinuity;
-    private bool _inputAccepted;
     private byte[]? _lastKeyframe;
     private byte[]? _contiguous;
     private const int MaxKeyframeBytes = 4 * 1024 * 1024;
@@ -274,10 +272,9 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReu
         }
     }
 
-    private bool DecodeLocked(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame, bool allowHardwareFallback, bool allowDrain = true, bool allowRecreate = true)
+    private bool DecodeLocked(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame, bool allowHardwareFallback, bool allowRecreate = true)
     {
         frame = default;
-        _inputAccepted = false;
         if (!EnsureTransform() || !_typesReady && !ApplyTypes())
         {
             return false;
@@ -321,8 +318,6 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReu
 
                 return false;
             }
-
-            _inputAccepted = true;
         }
         finally
         {
@@ -330,27 +325,6 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReu
         }
 
         var produced = Pull(ref frame);
-        var drain = MediaFoundationDrainRestart.For(
-            allowDrain,
-            produced == PullResult.Unsupported,
-            frame.Width != 0,
-            keyFrame,
-            _pictures,
-            _hardware);
-        if (drain.Drain && drain.ReplaceTransform)
-        {
-            // The IDR can sit inside the software transform until it is drained.
-            // Hardware is not drained. The drained software object is not flushed:
-            // that is the v0.1.12 resume freeze. Release it and submit this
-            // keyframe to a new software transform that is not drained.
-            if (!ContinueAfterDrain(annexB, drain.MarkDiscontinuity, ref frame))
-            {
-                return false;
-            }
-
-            return true;
-        }
-
         if (produced == PullResult.Unsupported && _hardware && allowHardwareFallback)
         {
             return AbandonHardware(
@@ -385,87 +359,6 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReu
         return false;
     }
 
-    private bool ContinueAfterDrain(ReadOnlySpan<byte> annexB, bool markDiscontinuity, ref DecodedFrame frame)
-    {
-        var drained = frame;
-        frame = default;
-        DecodedFrame replacement = default;
-        // The restart callback cannot capture the span or the out parameter.
-        var keyframe = annexB.ToArray();
-        var restart = MediaFoundationDrainRestart.ContinueAfterSoftwareDrain(
-            ProcessDrainMessage,
-            PullDrained,
-            ReleaseTransform,
-            Submit);
-
-        int ProcessDrainMessage(int message)
-            => _transform == 0 ? unchecked((int)0x80004005) : Slots.ProcessMessage(_transform, message, 0);
-
-        bool PullDrained()
-        {
-            Pull(ref drained);
-            return drained.Width != 0;
-        }
-
-        MediaFoundationDrainRestart.SubmitResult Submit()
-            => SubmitReplacement(keyframe, markDiscontinuity, ref drained, out replacement);
-
-        if (restart.DrainHresult < 0)
-        {
-            _log.Log(
-                AirPlayLogLevel.Warning,
-                "软件 H.264 drain 返回 0x" + restart.DrainHresult.ToString("X8") + "，已丢掉该变换并重建。Software H.264 drain returned 0x" + restart.DrainHresult.ToString("X8") + ". Released that transform.");
-        }
-        else
-        {
-            _log.Log(
-                AirPlayLogLevel.Information,
-                "软件 H.264 在 drain 后已换新解码器，没有在同一只变换上 flush。Software H.264 was replaced after drain. The drained transform was not flushed.");
-        }
-
-        if (restart.UseReplacementPicture)
-        {
-            frame = replacement;
-            return true;
-        }
-
-        if (restart.PublishDrainedPicture && drained.Width != 0)
-        {
-            frame = drained;
-            ReleasePicture(ref replacement);
-            NotePicture();
-            return true;
-        }
-
-        ReleasePicture(ref drained);
-        ReleasePicture(ref replacement);
-        return false;
-    }
-
-    private MediaFoundationDrainRestart.SubmitResult SubmitReplacement(ReadOnlySpan<byte> annexB, bool markDiscontinuity, ref DecodedFrame drained, out DecodedFrame frame)
-    {
-        _markDiscontinuity = markDiscontinuity;
-        try
-        {
-            var picture = DecodeLocked(annexB, keyFrame: true, out frame, allowHardwareFallback: false, allowDrain: false, allowRecreate: false)
-                && frame.Width != 0;
-            if (picture)
-            {
-                ReleasePicture(ref drained);
-            }
-
-            return new MediaFoundationDrainRestart.SubmitResult
-            {
-                Accepted = _inputAccepted,
-                Picture = picture,
-            };
-        }
-        finally
-        {
-            _markDiscontinuity = false;
-        }
-    }
-
     private bool RecreateSoftware(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
     {
         frame = default;
@@ -476,12 +369,12 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReu
             AirPlayLogLevel.Warning,
             "软件 H.264 不再出画，已丢掉该变换并重建。Software H.264 stopped publishing. Released that transform and created another.");
         DecodedFrame latest = default;
-        if (replayDifferent && replay is not null && DecodeDiscontinuous(replay, keyFrame: true, out var keyed) && keyed.Width != 0)
+        if (replayDifferent && replay is not null && DecodeLocked(replay, keyFrame: true, out var keyed, allowHardwareFallback: false, allowRecreate: false) && keyed.Width != 0)
         {
             latest = keyed;
         }
 
-        if (DecodeDiscontinuous(annexB, keyFrame, out var current) && current.Width != 0)
+        if (DecodeLocked(annexB, keyFrame, out var current, allowHardwareFallback: false, allowRecreate: false) && current.Width != 0)
         {
             ReleasePicture(ref latest);
             latest = current;
@@ -489,19 +382,6 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReu
 
         frame = latest;
         return latest.Width != 0;
-    }
-
-    private bool DecodeDiscontinuous(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
-    {
-        _markDiscontinuity = true;
-        try
-        {
-            return DecodeLocked(annexB, keyFrame, out frame, allowHardwareFallback: false, allowDrain: false, allowRecreate: false);
-        }
-        finally
-        {
-            _markDiscontinuity = false;
-        }
     }
 
     private bool AbandonHardware(ReadOnlySpan<byte> annexB, bool keyFrame, string reason, out DecodedFrame frame)
@@ -515,16 +395,14 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReu
         DecodedFrame latest = default;
         if (replayDifferent && replay is not null)
         {
-            // Keep the IDR in the new decoder. Draining between the two units
-            // would flush the reference the following slice still needs.
-            if (DecodeLocked(replay, true, out var keyed, allowHardwareFallback: false, allowDrain: false) && keyed.Width != 0)
+            // Keep the IDR in the new decoder. The following slice still needs it.
+            if (DecodeLocked(replay, true, out var keyed, allowHardwareFallback: false, allowRecreate: false) && keyed.Width != 0)
             {
                 latest = keyed;
             }
         }
 
-        var drainSingleKeyframe = !replayDifferent;
-        if (DecodeLocked(annexB, keyFrame, out var current, allowHardwareFallback: false, allowDrain: drainSingleKeyframe) && current.Width != 0)
+        if (DecodeLocked(annexB, keyFrame, out var current, allowHardwareFallback: false, allowRecreate: false) && current.Width != 0)
         {
             latest = current;
         }
@@ -849,11 +727,6 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReu
             if (keyFrame)
             {
                 Slots.SetUInt32(sample, CleanPoint, 1);
-            }
-
-            if (_markDiscontinuity)
-            {
-                Slots.SetUInt32(sample, Discontinuity, 1);
             }
 
             return true;

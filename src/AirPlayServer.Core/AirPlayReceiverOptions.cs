@@ -136,6 +136,14 @@ public sealed class AirPlayReceiverOptions
     /// <summary>TapClock JPEG export. Null or without an endpoint and directory disables it.</summary>
     public TapClockExportOptions? TapClock { get; set; }
 
+    /// <summary>
+    /// Prints the time spent in each decode call. Off unless the host passes
+    /// <c>--decode-timing</c> or <c>AIRPLAY_DECODE_TIMING</c>. The unit is
+    /// microseconds. Sample mode logs the first picture, every 30th, and any
+    /// access unit at or above 20000 us.
+    /// </summary>
+    public DecodeTimingMode DecodeTiming { get; set; } = DecodeTimingMode.Off;
+
     public void Validate()
     {
         if (string.IsNullOrWhiteSpace(Name))

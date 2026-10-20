@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -31,6 +32,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
     private readonly IMediaKeyUnwrapper _unwrapper;
     private readonly byte[]? _labKey;
     private readonly IAirPlayLog _log;
+    private readonly DecodeTimingLog _decodeTiming;
     private readonly MirrorSessionTracker _sessions = new();
     private readonly MirrorDecryptor _decryptor = new();
     private readonly CancellationTokenSource _cancellation = new();
@@ -70,6 +72,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
     private int _loggedBadAvcc;
     private int _consecutiveBadAvcc;
     private bool _prependParameterSets;
+    private bool _awaitSync;
     private bool _hevcRejected;
     private bool _senderPaused;
     private bool _discardHeld;
@@ -96,7 +99,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
         bool acceptHevc,
         IHevcDecoder? hevcDecoder,
         IFairPlaySetup? fairPlay,
-        MirrorSessionHub sessionsHub)
+        MirrorSessionHub sessionsHub,
+        DecodeTimingMode decodeTiming)
     {
         _data = data;
         _timing = timing;
@@ -108,6 +112,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
         _unwrapper = unwrapper;
         _labKey = labKey;
         _log = log;
+        _decodeTiming = new DecodeTimingLog(decodeTiming, log);
         FairPlay = fairPlay;
         Activity = new MirrorActivity
         {
@@ -200,7 +205,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
         bool acceptHevc,
         IHevcDecoder? hevcDecoder,
         IFairPlaySetup? fairPlay,
-        MirrorSessionHub sessionsHub)
+        MirrorSessionHub sessionsHub,
+        DecodeTimingMode decodeTiming = DecodeTimingMode.Off)
     {
         ArgumentNullException.ThrowIfNull(sessionsHub);
         Socket? data = null;
@@ -221,7 +227,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 acceptHevc,
                 hevcDecoder,
                 fairPlay,
-                sessionsHub);
+                sessionsHub,
+                decodeTiming);
         }
         catch
         {
@@ -823,11 +830,11 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
             if (_senderPaused)
             {
-                // Video resumed without a 0x16 codec packet. Drop pre-lock references
-                // so the next IDR does not blend into the frozen picture.
+                // Video resumed without a codec packet. One reset, then only an
+                // IDR is fed. A P-frame here used to land in an empty DPB.
                 _senderPaused = false;
                 _prependParameterSets = true;
-                ResetDecodersLocked();
+                BeginDiscontinuityLocked();
             }
 
             if (!_decryptor.MediaKeysReady && !TryFinishArmLocked())
@@ -862,6 +869,19 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
             _consecutiveBadAvcc = 0;
             Activity.AcceptAccessUnit();
+            if (_awaitSync)
+            {
+                var hevc = _codec == MirrorVideoCodec.Hevc;
+                if (!MirrorDiscontinuity.IsSync(hevc, keyFrame, accessUnit))
+                {
+                    // Not a decode miss. The decoder must not see this slice.
+                    return;
+                }
+
+                _awaitSync = false;
+                keyFrame = true;
+            }
+
             if (_hevcRejected && _codec != MirrorVideoCodec.Hevc)
             {
                 if (Interlocked.Exchange(ref _loggedHevcUnavailable, 1) == 0)
@@ -944,14 +964,12 @@ internal sealed class MirrorPipe : IAsyncDisposable
             {
                 _decoder.Configure(sequence, picture);
             }
-            else if (resume)
+
+            if (MirrorDiscontinuity.ShouldResetDecoder(resume, _awaitSync))
             {
-                // Releases the transform. The next keyframe opens a software MFT
-                // with no pictures yet, which is the drain path in
-                // MediaFoundationDrainRestart. That path releases the drained
-                // object and submits the keyframe to a new one. Flushing the
-                // drained object is what left the window on one frame.
-                _decoder.Reset();
+                // Same SPS as before the lock. Configure would keep the open
+                // decoder, whose references no longer match the phone.
+                BeginDiscontinuityLocked();
             }
 
             PresentHeldKeyframeLocked();
@@ -1024,11 +1042,13 @@ internal sealed class MirrorPipe : IAsyncDisposable
             {
                 _hevc.Configure(video, sequence, picture);
             }
-            else if (resume)
+
+            if (MirrorDiscontinuity.ShouldResetDecoder(resume, _awaitSync))
             {
-                // Same as H.264: drain forces the first picture, then the drained
-                // object is released. A flush of that object does not keep painting.
-                _hevc.Reset();
+                // avcodec_flush_buffers is not enough: HEVC keeps POC/RPS and
+                // then logs "Could not find ref with POC" on every P-frame.
+                // Reset recreates the context. Slices wait for the next IRAP.
+                BeginDiscontinuityLocked();
             }
 
             PresentHeldKeyframeLocked();
@@ -1037,17 +1057,35 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
     private bool NoteSenderPauseLocked(MirrorHeader header)
     {
-        var resume = header.SenderResumed || (_senderPaused && !header.SenderPaused);
+        // 0x16 / 0x1e is also the ordinary parameter-set packet. Reset only
+        // on the edge out of pause. Resetting every 0x16 drops a live DPB.
+        var resume = MirrorDiscontinuity.LeavingPause(_senderPaused, header.SenderPaused, header.SenderResumed);
         if (header.SenderPaused)
         {
             _senderPaused = true;
         }
-        else if (header.SenderResumed)
+        else if (header.SenderResumed || resume)
         {
             _senderPaused = false;
         }
 
         return resume;
+    }
+
+    private void BeginDiscontinuityLocked()
+    {
+        if (_awaitSync)
+        {
+            return;
+        }
+
+        _awaitSync = true;
+        _prependParameterSets = true;
+        _consecutiveDecodeMisses = 0;
+        ResetDecodersLocked();
+        _log.Log(
+            AirPlayLogLevel.Information,
+            "镜像要等下一个关键帧再解码，锁屏前的参考帧已丢掉。Waiting for the next keyframe before decoding. Pre-lock reference frames were dropped.");
     }
 
     private void PresentHeldKeyframeLocked()
@@ -1059,6 +1097,16 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
         var held = _heldKeyframe;
         _heldKeyframe = null;
+        if (_awaitSync)
+        {
+            if (!MirrorDiscontinuity.IsSync(_codec == MirrorVideoCodec.Hevc, keyFrameFlag: true, held))
+            {
+                return;
+            }
+
+            _awaitSync = false;
+        }
+
         if (!PresentAnnexLocked(held, keyFrame: true))
         {
             NoteDecodeMissLocked();
@@ -1067,11 +1115,14 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
     private void NoteDecodeMissLocked()
     {
-        // One access unit with no picture is normal hardware latency. Logging
-        // it immediately looks like the stuck-black failure the phone just hit.
+        // One access unit with no picture is normal decoder latency. Two misses
+        // means the DPB no longer matches the phone. Rebuild and wait for an
+        // IDR instead of feeding every later P-frame to FFmpeg (that is the
+        // "Could not find ref with POC" flood, and DecodedFrames stops moving).
         _consecutiveDecodeMisses++;
         if (_consecutiveDecodeMisses >= HardwareDecodeStall.MissesWithNoPicture)
         {
+            BeginDiscontinuityLocked();
             LogDecodeMissLocked();
         }
     }
@@ -1154,10 +1205,16 @@ internal sealed class MirrorPipe : IAsyncDisposable
         }
 
         var finished = false;
+        var decoderName = hevc ? _hevc?.Name ?? "hevc" : _decoder.Name;
+        long decodeUs = 0;
+        var timed = false;
+        var pictureWidth = 0;
+        var pictureHeight = 0;
         try
         {
             bool produced;
             DecodedFrame frame = default;
+            var started = _decodeTiming.Enabled ? Stopwatch.GetTimestamp() : 0;
             if (hevc)
             {
                 produced = _hevc is not null && _hevc.TryDecode(presented, keyFrame, out frame);
@@ -1167,10 +1224,19 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 produced = _decoder.TryDecode(presented, keyFrame, out frame);
             }
 
-            if (!produced)
+            if (_decodeTiming.Enabled)
+            {
+                decodeUs = DecodeTiming.TicksToMicroseconds(Stopwatch.GetTimestamp() - started);
+                timed = true;
+            }
+
+            if (!produced || frame.Width == 0)
             {
                 return false;
             }
+
+            pictureWidth = frame.Width;
+            pictureHeight = frame.Height;
 
             if (offered && reuse is not null && frame.Owned is null && frame.RefersTo(reuse))
             {
@@ -1203,6 +1269,15 @@ internal sealed class MirrorPipe : IAsyncDisposable
             if (offered && !finished)
             {
                 _frames.CancelReuse();
+            }
+
+            if (timed)
+            {
+                // DecodedFrames already includes this picture when publish called
+                // NoteDecoded. The name is the decoder that ran: media-foundation,
+                // media-foundation-hardware, media-foundation-hevc(-hardware),
+                // ffmpeg-h264, or ffmpeg-hevc.
+                _decodeTiming.Note(decoderName, decodeUs, pictureWidth > 0, pictureWidth, pictureHeight, Activity.DecodedFrames);
             }
         }
     }
@@ -1485,6 +1560,12 @@ internal sealed class MirrorPipe : IAsyncDisposable
 
     private void ResetDecodersLocked()
     {
+        // The decoded picture buffer is empty after this. A following P-frame
+        // keeps the window on the last picture (Media Foundation) or logs
+        // "Could not find ref with POC" (FFmpeg HEVC). The next IDR or IRAP
+        // is the first unit that may be decoded.
+        _awaitSync = true;
+        _consecutiveDecodeMisses = 0;
         _decoder.Reset();
         _hevc?.Reset();
     }

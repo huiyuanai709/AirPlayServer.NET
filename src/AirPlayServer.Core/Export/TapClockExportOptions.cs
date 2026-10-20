@@ -12,7 +12,10 @@ public sealed class TapClockExportOptions
     /// <summary>IPv4 host or DNS name and port, for example 127.0.0.1:42125.</summary>
     public string? Endpoint { get; set; }
 
-    /// <summary>Directory that receives mirror.jpg via a .part rename.</summary>
+    /// <summary>
+    /// Directory that receives one JPEG per mirror data peer, named
+    /// <c>mirror-192.168.5.20.jpg</c>. No peer yet is <c>mirror-unknown.jpg</c>.
+    /// </summary>
     public string? WatchDirectory { get; set; }
 
     public double FramesPerSecond { get; set; } = DefaultFramesPerSecond;

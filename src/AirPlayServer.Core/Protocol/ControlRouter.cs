@@ -83,7 +83,7 @@ internal sealed class ControlRouter
             if (request.Body[0] == 0)
             {
                 session.PairVerifyFinish(request.Body);
-                _mirror.NotePairingSecret(session.SharedSecret.Span);
+                _mirror.NotePairingSecret(session.SharedSecret.Span, remote);
                 return Http1Response.Bytes(200, "application/octet-stream", []);
             }
 
@@ -113,14 +113,15 @@ internal sealed class ControlRouter
 
         if (Is(request, "POST", "/fp-setup"))
         {
-            if (_fairPlay is not null)
+            var buffer = new byte[4096];
+            if (_mirror.TryRespondFairPlay(remote, request.Body, buffer, _fairPlay, out var written, out var refused))
             {
-                var buffer = new byte[4096];
-                if (_fairPlay.TryRespond(request.Body, buffer, out var written) && written is > 0 and <= 4096)
-                {
-                    _mirror.RetryPendingFairPlay();
-                    return Http1Response.Bytes(200, "application/octet-stream", buffer[..written]);
-                }
+                return Http1Response.Bytes(200, "application/octet-stream", buffer[..written]);
+            }
+
+            if (refused)
+            {
+                return Http1Response.Text(503, "Concurrent mirror limit reached.");
             }
 
             return NotImplemented("FairPlay setup is not implemented.");

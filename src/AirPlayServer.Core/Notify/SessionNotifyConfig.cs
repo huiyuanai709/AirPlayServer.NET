@@ -245,6 +245,14 @@ public sealed class MirrorStatusBody
 
     [JsonPropertyName("disconnect_pending")]
     public bool DisconnectPending { get; set; }
+
+    /// <summary>
+    /// Every mirror session. Omitted when the caller only has the primary tracker.
+    /// Child objects do not nest this array again.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [JsonPropertyName("sessions")]
+    public MirrorStatusBody[]? Sessions { get; set; }
 }
 
 public sealed class SessionNotifySaveResult
@@ -270,6 +278,7 @@ public sealed class SessionNotifySaveResult
 [JsonSerializable(typeof(TapClockEventBody))]
 [JsonSerializable(typeof(WebhookEventBody))]
 [JsonSerializable(typeof(MirrorStatusBody))]
+[JsonSerializable(typeof(MirrorStatusBody[]))]
 [JsonSerializable(typeof(SessionNotifySaveResult))]
 public sealed partial class SessionNotifyJsonContext : JsonSerializerContext;
 

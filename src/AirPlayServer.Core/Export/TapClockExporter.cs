@@ -6,7 +6,9 @@ namespace AirPlayServer.Core.Export;
 
 /// <summary>
 /// Pushes the latest decoded frame to TapClock as an ATBF type-3 JPEG.
-/// TCP is preferred (host port 42125). A watch directory is the fallback.
+/// TCP is preferred (host port 42125). A watch directory writes one JPEG per
+/// mirror data peer (<c>mirror-192.168.5.20.jpg</c>). The ATBF header stays
+/// type 3 with flags 0; it has no peer field, so the log names the data peer.
 /// Nothing is sent until a frame exists, and a repeated generation is not sent again.
 /// </summary>
 internal sealed class TapClockExporter : IAsyncDisposable
@@ -14,22 +16,24 @@ internal sealed class TapClockExporter : IAsyncDisposable
     internal static readonly TimeSpan ConnectAttemptTimeout = TimeSpan.FromSeconds(2);
 
     private readonly TapClockExportOptions _options;
-    private readonly FrameSlot _frames;
+    private readonly Func<IReadOnlyList<TapClockExportSource>> _sources;
+    private readonly Dictionary<FrameSlot, long> _sentGeneration = new();
+    private readonly HashSet<string> _loggedPaths = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _loggedTcpPeers = new(StringComparer.Ordinal);
     private readonly IAirPlayLog _log;
     private readonly CancellationTokenSource _cancellation;
     private readonly Task _loop;
     private int _delivered;
-    private int _loggedSend;
     private int _connectFailed;
     private int _fileFailed;
     private long _nextConnectLog;
     private long _nextFileLog;
     private int _disposed;
 
-    private TapClockExporter(TapClockExportOptions options, FrameSlot frames, IAirPlayLog log, CancellationToken cancellationToken)
+    private TapClockExporter(TapClockExportOptions options, Func<IReadOnlyList<TapClockExportSource>> sources, IAirPlayLog log, CancellationToken cancellationToken)
     {
         _options = options;
-        _frames = frames;
+        _sources = sources;
         _log = log;
         _cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _loop = Task.Run(RunAsync);
@@ -38,11 +42,20 @@ internal sealed class TapClockExporter : IAsyncDisposable
     public int FramesDelivered => Volatile.Read(ref _delivered);
 
     public static TapClockExporter Start(TapClockExportOptions options, FrameSlot frames, IAirPlayLog log, CancellationToken cancellationToken)
+        => Start(options, frames, log, cancellationToken, peer: null);
+
+    public static TapClockExporter Start(TapClockExportOptions options, FrameSlot frames, IAirPlayLog log, CancellationToken cancellationToken, Func<IPAddress?>? peer)
+    {
+        ArgumentNullException.ThrowIfNull(frames);
+        return Start(options, () => new TapClockExportSource[] { new(frames, peer?.Invoke()) }, log, cancellationToken);
+    }
+
+    internal static TapClockExporter Start(TapClockExportOptions options, Func<IReadOnlyList<TapClockExportSource>> sources, IAirPlayLog log, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(frames);
+        ArgumentNullException.ThrowIfNull(sources);
         options.Validate();
-        return new TapClockExporter(options, frames, log, cancellationToken);
+        return new TapClockExporter(options, sources, log, cancellationToken);
     }
 
     public async Task<bool> WaitForDeliveryAsync(int count, TimeSpan timeout, CancellationToken cancellationToken = default)
@@ -91,7 +104,6 @@ internal sealed class TapClockExporter : IAsyncDisposable
         }
 
         Socket? socket = null;
-        long sentGeneration = 0;
         try
         {
             if (!string.IsNullOrWhiteSpace(_options.Endpoint))
@@ -105,32 +117,47 @@ internal sealed class TapClockExporter : IAsyncDisposable
                 var height = 0;
                 try
                 {
-                    byte[]? jpeg = null;
-                    var generation = 0L;
-                    if (_frames.TryLease(out width, out height, out var stride, out var pixels, out generation, out var lease))
+                    var pending = new List<PendingJpeg>(4);
+                    foreach (var source in _sources())
                     {
+                        if (!source.Frames.TryLease(out width, out height, out var stride, out var pixels, out var generation, out var lease))
+                        {
+                            continue;
+                        }
+
                         using (lease)
                         {
-                            if (generation != sentGeneration)
+                            if (_sentGeneration.TryGetValue(source.Frames, out var sent) && sent == generation)
                             {
-                                jpeg = BaselineJpegEncoder.EncodeBgra(pixels, width, height, stride, _options.JpegQuality);
+                                continue;
                             }
+
+                            var jpeg = BaselineJpegEncoder.EncodeBgra(pixels, width, height, stride, _options.JpegQuality);
+                            pending.Add(new PendingJpeg(source.Frames, generation, jpeg, source.Peer));
                         }
                     }
 
-                    if (jpeg is not null)
+                    if (pending.Count == 0)
                     {
-                        var attempt = await DeliverAsync(jpeg, socket, cancellationToken).ConfigureAwait(false);
-                        socket = attempt.Socket;
-                        if (attempt.Delivered)
+                        if (socket is null && !string.IsNullOrWhiteSpace(_options.Endpoint))
                         {
-                            sentGeneration = generation;
-                            Interlocked.Increment(ref _delivered);
+                            socket = await EnsureConnectedAsync(socket, cancellationToken).ConfigureAwait(false);
                         }
                     }
-                    else if (socket is null && !string.IsNullOrWhiteSpace(_options.Endpoint))
+                    else
                     {
-                        socket = await EnsureConnectedAsync(socket, cancellationToken).ConfigureAwait(false);
+                        foreach (var item in pending)
+                        {
+                            var attempt = await DeliverAsync(item.Jpeg, socket, item.Peer, cancellationToken).ConfigureAwait(false);
+                            socket = attempt.Socket;
+                            if (!attempt.Delivered)
+                            {
+                                continue;
+                            }
+
+                            _sentGeneration[item.Frames] = item.Generation;
+                            Interlocked.Increment(ref _delivered);
+                        }
                     }
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -161,13 +188,13 @@ internal sealed class TapClockExporter : IAsyncDisposable
         }
     }
 
-    private async Task<ExportAttempt> DeliverAsync(byte[] jpeg, Socket? socket, CancellationToken cancellationToken)
+    private async Task<ExportAttempt> DeliverAsync(byte[] jpeg, Socket? socket, IPAddress? peer, CancellationToken cancellationToken)
     {
         var wantTcp = !string.IsNullOrWhiteSpace(_options.Endpoint);
         var tcpOk = !wantTcp;
         if (wantTcp)
         {
-            socket = await SendJpegAsync(socket, jpeg, cancellationToken).ConfigureAwait(false);
+            socket = await SendJpegAsync(socket, jpeg, peer, cancellationToken).ConfigureAwait(false);
             tcpOk = socket is not null;
         }
 
@@ -175,13 +202,16 @@ internal sealed class TapClockExporter : IAsyncDisposable
         var fileOk = !wantFile;
         if (wantFile)
         {
+            var fileName = MirrorExportNames.JpegFileName(peer);
+            var fullPath = Path.GetFullPath(Path.Combine(_options.WatchDirectory!, fileName));
             try
             {
-                await AtomicImageFile.WriteJpegAsync(_options.WatchDirectory!, jpeg, cancellationToken).ConfigureAwait(false);
+                await AtomicImageFile.WriteJpegAsync(_options.WatchDirectory!, fileName, jpeg, cancellationToken).ConfigureAwait(false);
                 fileOk = true;
-                if (!wantTcp && Interlocked.Exchange(ref _loggedSend, 1) == 0)
+                if (_loggedPaths.Add(fullPath))
                 {
-                    _log.Log(AirPlayLogLevel.Information, "TapClock JPEG written to " + Path.Combine(_options.WatchDirectory!, "mirror.jpg"));
+                    var who = peer is null ? "未知 / unknown" : peer.ToString();
+                    _log.Log(AirPlayLogLevel.Information, "TapClock JPEG 已写入 " + fullPath + "。来源 " + who + "。 TapClock JPEG written to " + fullPath + ". Source " + who + ".");
                 }
             }
             catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException) && !cancellationToken.IsCancellationRequested)
@@ -209,7 +239,7 @@ internal sealed class TapClockExporter : IAsyncDisposable
         _log.Log(AirPlayLogLevel.Warning, "TapClock watch file was not published: " + ex.Message);
     }
 
-    private async Task<Socket?> SendJpegAsync(Socket? socket, byte[] jpeg, CancellationToken cancellationToken)
+    private async Task<Socket?> SendJpegAsync(Socket? socket, byte[] jpeg, IPAddress? peer, CancellationToken cancellationToken)
     {
         if (!TapClockExportOptions.TryParseEndpoint(_options.Endpoint!, out var host, out var port))
         {
@@ -238,9 +268,15 @@ internal sealed class TapClockExporter : IAsyncDisposable
                 sent += count;
             }
 
-            if (Interlocked.Exchange(ref _loggedSend, 1) == 0)
+            var who = peer is null ? "unknown" : peer.ToString();
+            if (_loggedTcpPeers.Add(who))
             {
-                _log.Log(AirPlayLogLevel.Information, "TapClock ATBF JPEG sent to " + host + ":" + port + " (type 3, flags 0, " + jpeg.Length + " bytes).");
+                _log.Log(
+                    AirPlayLogLevel.Information,
+                    "TapClock ATBF JPEG 已发送到 " + host + ":" + port + "，镜像数据来源 " + who
+                    + "（type 3, flags 0, " + jpeg.Length + " bytes）。ATBF 头不含来源地址。"
+                    + " TapClock ATBF JPEG sent to " + host + ":" + port + ", mirror data peer " + who
+                    + " (type 3, flags 0, " + jpeg.Length + " bytes). The ATBF header does not carry the source address.");
             }
 
             return socket;
@@ -399,4 +435,6 @@ internal sealed class TapClockExporter : IAsyncDisposable
     }
 
     private readonly record struct ExportAttempt(bool Delivered, Socket? Socket);
+
+    private readonly record struct PendingJpeg(FrameSlot Frames, long Generation, byte[] Jpeg, IPAddress? Peer);
 }

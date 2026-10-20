@@ -24,6 +24,7 @@ internal static class SessionNotifyPage
                 <div>名称 <span id="status-name" class="text-slate-900"></span></div>
                 <div>开始时间 <span id="status-since" class="text-slate-900"></span></div>
                 <div>会话 <span id="status-session" class="font-mono text-slate-900"></span></div>
+                <div>各路会话 <span id="status-sessions" class="text-slate-900"></span></div>
               </dl>
             </section>
             <form id="form" class="bg-white rounded-xl shadow p-4 space-y-4">
@@ -73,6 +74,11 @@ internal static class SessionNotifyPage
               document.getElementById("status-name").textContent = status.name || "—";
               document.getElementById("status-since").textContent = status.since || "—";
               document.getElementById("status-session").textContent = status.session_id || "—";
+              const sessions = Array.isArray(status.sessions) ? status.sessions : [];
+              const list = document.getElementById("status-sessions");
+              list.textContent = sessions.length === 0
+                ? "—"
+                : sessions.map((item) => (item.connected ? "已连接 " : "未连接 ") + (item.name || "—") + " " + (item.session_id || "")).join("；");
             }
 
             async function refreshStatus() {

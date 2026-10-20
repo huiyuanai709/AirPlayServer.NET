@@ -1,22 +1,35 @@
 namespace AirPlayServer.Core.Export;
 
 /// <summary>
-/// Writes the latest JPEG as mirror.jpg. The bytes land in a uniquely named temp
-/// file in the same directory, then that file replaces mirror.jpg. The temp file
-/// is closed before the replace, so this process does not keep either path locked.
+/// Writes one JPEG under a caller-chosen file name. The bytes land in a uniquely
+/// named temp file in the same directory, then that file replaces the destination.
+/// The temp file is closed before the replace, so this process does not keep
+/// either path locked. The name is a single path segment such as
+/// <c>mirror-192.168.5.20.jpg</c>.
 /// </summary>
 internal static class AtomicImageFile
 {
     public static Task WriteJpegAsync(string directory, ReadOnlyMemory<byte> jpeg, CancellationToken cancellationToken)
-        => WriteJpegAsync(directory, jpeg, MoveIntoPlace, cancellationToken);
+        => WriteJpegAsync(directory, MirrorExportNames.UnknownFileName, jpeg, MoveIntoPlace, cancellationToken);
+
+    public static Task WriteJpegAsync(string directory, string fileName, ReadOnlyMemory<byte> jpeg, CancellationToken cancellationToken)
+        => WriteJpegAsync(directory, fileName, jpeg, MoveIntoPlace, cancellationToken);
 
     /// <summary>
     /// <paramref name="replace"/> is the first publish attempt. Tests pass a
     /// stand-in that throws the Windows <see cref="UnauthorizedAccessException"/>
-    /// <c>File.Move</c> raises when a reader has mirror.jpg open without delete sharing.
+    /// <c>File.Move</c> raises when a reader has the destination open without delete sharing.
     /// </summary>
+    internal static Task WriteJpegAsync(
+        string directory,
+        ReadOnlyMemory<byte> jpeg,
+        Action<string, string> replace,
+        CancellationToken cancellationToken)
+        => WriteJpegAsync(directory, MirrorExportNames.UnknownFileName, jpeg, replace, cancellationToken);
+
     internal static async Task WriteJpegAsync(
         string directory,
+        string fileName,
         ReadOnlyMemory<byte> jpeg,
         Action<string, string> replace,
         CancellationToken cancellationToken)
@@ -32,7 +45,8 @@ internal static class AtomicImageFile
             throw new IOException("TapClock watch directory \"" + fullDirectory + "\" is not writable: " + ex.Message, ex);
         }
 
-        var finalPath = Path.Combine(fullDirectory, "mirror.jpg");
+        var safeName = SafeFileName(fileName);
+        var finalPath = Path.Combine(fullDirectory, safeName);
         var partialPath = Path.Combine(fullDirectory, "mirror-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
@@ -112,5 +126,16 @@ internal static class AtomicImageFile
         using var destination = new FileStream(finalPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
         source.CopyTo(destination);
         destination.Flush(flushToDisk: true);
+    }
+
+    private static string SafeFileName(string fileName)
+    {
+        var name = Path.GetFileName(fileName);
+        if (string.IsNullOrWhiteSpace(name) || name is "." or ".." || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            return MirrorExportNames.UnknownFileName;
+        }
+
+        return name;
     }
 }

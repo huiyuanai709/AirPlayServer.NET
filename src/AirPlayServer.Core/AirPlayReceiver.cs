@@ -17,7 +17,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
     private readonly MdnsAnnouncer? _announcer;
     private readonly MirrorRuntime _mirror;
     private readonly TapClockExporter? _tapClock;
-    private readonly IAsyncDisposable? _window;
+    private readonly IAsyncDisposable? _windows;
     private readonly NativeMediaKeyModule? _plugin;
     private readonly int _displayWidth;
     private readonly int _displayHeight;
@@ -29,7 +29,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         MdnsAnnouncer? announcer,
         MirrorRuntime mirror,
         TapClockExporter? tapClock,
-        IAsyncDisposable? window,
+        IAsyncDisposable? windows,
         NativeMediaKeyModule? plugin,
         FrameSlot frames,
         string deviceId,
@@ -45,7 +45,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         _announcer = announcer;
         _mirror = mirror;
         _tapClock = tapClock;
-        _window = window;
+        _windows = windows;
         _plugin = plugin;
         Frames = frames;
         DeviceId = deviceId;
@@ -88,6 +88,12 @@ public sealed class AirPlayReceiver : IAsyncDisposable
     /// </summary>
     public MirrorSessionTracker Sessions => _mirror.Sessions;
 
+    /// <summary>
+    /// Connect and disconnect events for every concurrent mirror. Each device
+    /// keeps its own <c>session_id</c>. Shutdown does not emit disconnected.
+    /// </summary>
+    public MirrorSessionHub SessionEvents => _mirror.SessionEvents;
+
     public event EventHandler<AirPlaySessionEstablishedEventArgs>? SessionEstablished;
 
     public static async Task<AirPlayReceiver> StartAsync(AirPlayReceiverOptions options, CancellationToken cancellationToken = default)
@@ -105,7 +111,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         ControlServer? control = null;
         MirrorRuntime? mirror = null;
         TapClockExporter? tapClock = null;
-        IAsyncDisposable? window = null;
+        MirrorWindowGroup? windows = null;
         NativeMediaKeyModule? plugin = null;
         IH264Decoder? decoder = null;
         IHevcDecoder? hevc = null;
@@ -153,6 +159,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
 
             var unwrapper = options.MediaKeyUnwrapper ?? (plugin is { HasUnwrap: true } ? plugin : null);
             var fairPlay = options.FairPlaySetup ?? (plugin is { HasFairPlay: true } ? plugin : null);
+            var separateFairPlay = fairPlay is FairPlayKeys && ReferenceEquals(fairPlay, unwrapper);
             ReadOnlySpan<byte> labKey = options.LabContentKey is null ? [] : options.LabContentKey;
             ArgumentNullException.ThrowIfNull(decoder);
             mirror = MirrorRuntime.Start(
@@ -164,7 +171,10 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 labKey,
                 log,
                 advertisesHevc,
-                hevc);
+                hevc,
+                options.MaxMirrors,
+                () => CreateExtraMirror(log, advertisesHevc, separateFairPlay, unwrapper, fairPlay),
+                fairPlay);
             if (options.PublishDemoFrame)
             {
                 DemoFrame.Publish(frames, options.DisplayWidth, options.DisplayHeight);
@@ -172,28 +182,33 @@ public sealed class AirPlayReceiver : IAsyncDisposable
 
             if (options.TapClock is { Enabled: true })
             {
-                tapClock = TapClockExporter.Start(options.TapClock, frames, log, CancellationToken.None);
+                tapClock = TapClockExporter.Start(options.TapClock, mirror.ExportSources, log, CancellationToken.None);
             }
 
             if (options.ShowWindow && !OperatingSystem.IsWindows())
             {
                 log.Log(AirPlayLogLevel.Information, "Windows display window is not created on this OS. Frames can still be exported.");
             }
-#if WINDOWS_HOST
-            if (options.ShowWindow && OperatingSystem.IsWindows())
+            var windowGroup = new MirrorWindowGroup();
+            windows = windowGroup;
+            var logicalWidth = options.TapClockLogicalScreen?.Width ?? 0;
+            var logicalHeight = options.TapClockLogicalScreen?.Height ?? 0;
+            if (options.ShowWindow)
             {
-                // 0,0 keeps the hover readout in decoded-frame pixels (TapClock identity
-                // when no screen is configured). A --model size is the absolute screen.
-                var logical = options.TapClockLogicalScreen;
-                window = WindowsDisplayWindow.Start(
-                    frames,
-                    instance,
-                    log,
-                    logical?.Width ?? 0,
-                    logical?.Height ?? 0,
-                    CancellationToken.None);
+                windowGroup.Add(mirror.Primary, MirrorWindows.TryOpen(frames, instance, log, logicalWidth, logicalHeight, CancellationToken.None));
             }
-#endif
+
+            mirror.PipeAdded += pipe =>
+            {
+                if (!options.ShowWindow)
+                {
+                    return;
+                }
+
+                var title = string.IsNullOrWhiteSpace(pipe.DeviceName) ? "镜像 " + pipe.Activity.DataPort : pipe.DeviceName;
+                windowGroup.Add(pipe, MirrorWindows.TryOpen(pipe.Frames, title, log, logicalWidth, logicalHeight, CancellationToken.None));
+            };
+            mirror.DeviceNamed += windowGroup.Rename;
             control = ControlServer.Start(
                 airPlay,
                 raop,
@@ -220,7 +235,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 announcer,
                 mirror,
                 tapClock,
-                window,
+                windows,
                 plugin,
                 frames,
                 advertisement.DeviceId,
@@ -232,7 +247,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 hevc?.Name ?? "unavailable");
             mirror = null;
             tapClock = null;
-            window = null;
+            windows = null;
             plugin = null;
             return receiver;
         }
@@ -247,9 +262,9 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 }
             }
 
-            if (window is not null)
+            if (windows is not null)
             {
-                await window.DisposeAsync().ConfigureAwait(false);
+                await windows.DisposeAsync().ConfigureAwait(false);
             }
 
             if (tapClock is not null)
@@ -288,9 +303,9 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         }
 
         _control.SessionEstablished -= OnSessionEstablished;
-        if (_window is not null)
+        if (_windows is not null)
         {
-            await _window.DisposeAsync().ConfigureAwait(false);
+            await _windows.DisposeAsync().ConfigureAwait(false);
         }
 
         if (_tapClock is not null)
@@ -311,4 +326,85 @@ public sealed class AirPlayReceiver : IAsyncDisposable
 
     private void OnSessionEstablished(object? sender, AirPlaySessionEstablishedEventArgs args)
         => SessionEstablished?.Invoke(this, args);
+
+    private static MirrorEndpointResources CreateExtraMirror(
+        IAirPlayLog log,
+        bool acceptHevc,
+        bool separateFairPlay,
+        IMediaKeyUnwrapper? unwrapper,
+        IFairPlaySetup? fairPlay)
+    {
+        var frames = new FrameSlot();
+        var decoder = H264Decoders.Create(log, load: null, frames.Buffers);
+        IHevcDecoder? hevc = acceptHevc ? HevcDecoders.Create(log, load: null, frames.Buffers) : null;
+        FairPlayKeys? keys = separateFairPlay ? new FairPlayKeys() : null;
+        return new MirrorEndpointResources
+        {
+            Frames = frames,
+            Decoder = decoder,
+            Hevc = hevc,
+            Unwrapper = keys ?? unwrapper,
+            FairPlay = keys ?? fairPlay,
+        };
+    }
+
+    private sealed class MirrorWindowGroup : IAsyncDisposable
+    {
+        private readonly object _gate = new();
+        private readonly List<IMirrorWindow> _open = [];
+        private readonly Dictionary<MirrorPipe, IMirrorWindow> _byPipe = new();
+        private int _disposed;
+
+        public void Add(MirrorPipe pipe, IMirrorWindow? window)
+        {
+            if (window is null)
+            {
+                return;
+            }
+
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                _ = window.DisposeAsync();
+                return;
+            }
+
+            lock (_gate)
+            {
+                _open.Add(window);
+                _byPipe[pipe] = window;
+            }
+        }
+
+        public void Rename(MirrorPipe pipe)
+        {
+            IMirrorWindow? window;
+            lock (_gate)
+            {
+                _byPipe.TryGetValue(pipe, out window);
+            }
+
+            window?.SetDeviceName(pipe.DeviceName);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            IMirrorWindow[] copy;
+            lock (_gate)
+            {
+                copy = _open.ToArray();
+                _open.Clear();
+                _byPipe.Clear();
+            }
+
+            foreach (var window in copy)
+            {
+                await window.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+    }
 }

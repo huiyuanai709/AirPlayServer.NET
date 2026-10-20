@@ -194,13 +194,14 @@ public sealed class MirrorAndExportTests
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         var slot = new FrameSlot();
         DemoFrame.Publish(slot, 32, 24);
+        var log = new ListLog();
         var options = new TapClockExportOptions
         {
             Endpoint = "127.0.0.1:" + port,
             WatchDirectory = directory,
             FramesPerSecond = 20,
         };
-        await using var exporter = TapClockExporter.Start(options, slot, NullAirPlayLog.Instance, CancellationToken.None);
+        await using var exporter = TapClockExporter.Start(options, slot, log, CancellationToken.None, () => IPAddress.Parse("192.168.5.20"));
         using var client = await listener.AcceptTcpClientAsync();
         await using var stream = client.GetStream();
         var header = new byte[AtbfFraming.HeaderLength];
@@ -213,8 +214,13 @@ public sealed class MirrorAndExportTests
         Assert.Equal(new byte[] { 0xFF, 0xD8 }, jpeg[..2]);
         Assert.Equal(new byte[] { 0xFF, 0xD9 }, jpeg[^2..]);
         Assert.True(await exporter.WaitForDeliveryAsync(1, TimeSpan.FromSeconds(2)));
-        Assert.True(File.Exists(Path.Combine(directory, "mirror.jpg")));
-        Assert.False(File.Exists(Path.Combine(directory, "mirror.jpg.part")));
+        var jpegPath = Path.GetFullPath(Path.Combine(directory, "mirror-192.168.5.20.jpg"));
+        Assert.True(File.Exists(jpegPath));
+        Assert.False(File.Exists(Path.Combine(directory, "mirror.jpg")));
+        Assert.False(File.Exists(Path.Combine(directory, "mirror-unknown.jpg")));
+        Assert.True(log.Contains(jpegPath));
+        Assert.True(log.Contains("192.168.5.20"));
+        Assert.True(log.Contains("type 3"));
         Directory.Delete(directory, recursive: true);
     }
 
@@ -295,7 +301,7 @@ public sealed class MirrorAndExportTests
             second,
             (_, _) => throw new UnauthorizedAccessException("Access to the path is denied."),
             CancellationToken.None);
-        var finalPath = Path.Combine(directory, "mirror.jpg");
+        var finalPath = Path.Combine(directory, "mirror-unknown.jpg");
         Assert.Equal(second, await File.ReadAllBytesAsync(finalPath));
         Assert.Empty(Directory.GetFiles(directory, "mirror-*.tmp"));
         await using (var held = new FileStream(finalPath, FileMode.Open, FileAccess.Read, FileShare.None))
@@ -311,7 +317,7 @@ public sealed class MirrorAndExportTests
     {
         var directory = Path.Combine(Path.GetTempPath(), "airplay-tapclock-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
-        var finalPath = Path.Combine(directory, "mirror.jpg");
+        var finalPath = Path.Combine(directory, "mirror-unknown.jpg");
         Directory.CreateDirectory(finalPath);
         var denied = await Assert.ThrowsAsync<IOException>(() => AtomicImageFile.WriteJpegAsync(
             directory,
@@ -320,6 +326,57 @@ public sealed class MirrorAndExportTests
             CancellationToken.None));
         Assert.Contains(finalPath, denied.Message, StringComparison.Ordinal);
         Assert.Empty(Directory.GetFiles(directory, "mirror-*.tmp"));
+        Directory.Delete(directory, recursive: true);
+    }
+
+    [Fact]
+    public void Export_file_names_keep_ipv4_and_replace_ipv6_colons()
+    {
+        Assert.Equal(MirrorExportNames.UnknownFileName, MirrorExportNames.JpegFileName(null));
+        Assert.Equal("mirror-unknown.jpg", MirrorExportNames.JpegFileName(null));
+        Assert.Equal("mirror-192.168.5.20.jpg", MirrorExportNames.JpegFileName(IPAddress.Parse("192.168.5.20")));
+        Assert.Equal("mirror-2001-db8--1.jpg", MirrorExportNames.JpegFileName(IPAddress.Parse("2001:db8::1")));
+        Assert.Equal("mirror-fe80--1-eth0.jpg", "mirror-" + MirrorExportNames.Sanitize("fe80::1%eth0") + ".jpg");
+        Assert.DoesNotContain(":", MirrorExportNames.JpegFileName(IPAddress.IPv6Loopback), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Two_peer_jpegs_do_not_overwrite_and_names_stay_in_the_directory()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "airplay-peers-" + Guid.NewGuid().ToString("N"));
+        var first = new byte[] { 0xFF, 0xD8, 1, 0xFF, 0xD9 };
+        var second = new byte[] { 0xFF, 0xD8, 2, 0xFF, 0xD9 };
+        var third = new byte[] { 0xFF, 0xD8, 3, 0xFF, 0xD9 };
+        await AtomicImageFile.WriteJpegAsync(directory, "mirror-192.168.5.20.jpg", first, CancellationToken.None);
+        await AtomicImageFile.WriteJpegAsync(directory, "mirror-192.168.5.21.jpg", second, CancellationToken.None);
+        await AtomicImageFile.WriteJpegAsync(directory, "../mirror-escaped.jpg", third, CancellationToken.None);
+        Assert.Equal(first, await File.ReadAllBytesAsync(Path.Combine(directory, "mirror-192.168.5.20.jpg")));
+        Assert.Equal(second, await File.ReadAllBytesAsync(Path.Combine(directory, "mirror-192.168.5.21.jpg")));
+        Assert.Equal(third, await File.ReadAllBytesAsync(Path.Combine(directory, "mirror-escaped.jpg")));
+        Assert.False(File.Exists(Path.Combine(Directory.GetParent(directory)!.FullName, "mirror-escaped.jpg")));
+        Directory.Delete(directory, recursive: true);
+    }
+
+    [Fact]
+    public async Task Directory_export_uses_the_data_peer_and_logs_the_full_path()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "airplay-peer-log-" + Guid.NewGuid().ToString("N"));
+        var slot = new FrameSlot();
+        DemoFrame.Publish(slot, 16, 16);
+        var log = new ListLog();
+        var options = new TapClockExportOptions
+        {
+            WatchDirectory = directory,
+            FramesPerSecond = 20,
+        };
+        await using var exporter = TapClockExporter.Start(options, slot, log, CancellationToken.None, () => IPAddress.Parse("192.168.5.20"));
+        Assert.True(await exporter.WaitForDeliveryAsync(1, TimeSpan.FromSeconds(2)));
+        var path = Path.GetFullPath(Path.Combine(directory, "mirror-192.168.5.20.jpg"));
+        Assert.True(File.Exists(path));
+        Assert.False(File.Exists(Path.Combine(directory, "mirror.jpg")));
+        Assert.False(File.Exists(Path.Combine(directory, "mirror-unknown.jpg")));
+        Assert.True(log.Contains(path));
+        Assert.True(log.Contains("192.168.5.20"));
         Directory.Delete(directory, recursive: true);
     }
 

@@ -116,7 +116,7 @@ public sealed class LocalNetworkTests
     }
 
     [Fact]
-    public void Any_advertises_every_real_lan_and_skips_hyperv()
+    public void Any_advertises_one_gateway_lan_and_skips_hyperv()
     {
         var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any,
         [
@@ -125,9 +125,8 @@ public sealed class LocalNetworkTests
             Nic("Wi-Fi", "192.168.1.20", type: NetworkInterfaceType.Wireless80211, gateway: true),
         ]);
 
-        Assert.Equal(2, nics.Count);
+        Assert.Single(nics);
         Assert.Equal(IPAddress.Parse("192.168.5.15"), nics[0].Address);
-        Assert.Equal(IPAddress.Parse("192.168.1.20"), nics[1].Address);
         Assert.Equal(IPAddress.Parse("192.168.5.15"), LocalNetwork.SelectAdvertisementAddress(IPAddress.Any,
         [
             Nic("vEthernet (Default Switch)", "172.17.96.1", gateway: true, description: "Hyper-V Virtual Ethernet Adapter"),
@@ -137,7 +136,7 @@ public sealed class LocalNetworkTests
     }
 
     [Fact]
-    public void Preferred_lan_stays_primary_and_a_second_real_nic_is_still_advertised()
+    public void Gateway_lan_is_the_only_advertised_address()
     {
         var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any,
         [
@@ -145,8 +144,61 @@ public sealed class LocalNetworkTests
             Nic("Wi-Fi", "192.168.1.20", type: NetworkInterfaceType.Wireless80211, gateway: true),
         ]);
 
+        Assert.Single(nics);
         Assert.Equal(IPAddress.Parse("192.168.1.20"), nics[0].Address);
-        Assert.Equal(IPAddress.Parse("192.168.5.15"), nics[1].Address);
+    }
+
+    [Fact]
+    public void Wifi_plus_mobile_hotspot_advertises_only_wifi()
+    {
+        // Hotspot is enumerated first and has a gateway, which is how Windows
+        // ICS often shows up next to the real Wi-Fi adapter.
+        AdvertisementCandidate[] candidates =
+        [
+            Nic("Local Area Connection* 2", "192.168.137.1", gateway: true, description: "Microsoft Wi-Fi Direct Virtual Adapter"),
+            Nic("Wi-Fi", "172.16.88.168", type: NetworkInterfaceType.Wireless80211, gateway: true, description: "Intel(R) Wi-Fi 6 AX201"),
+        ];
+
+        var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any, candidates);
+
+        Assert.Single(nics);
+        Assert.Equal("Wi-Fi", nics[0].Name);
+        Assert.Equal(IPAddress.Parse("172.16.88.168"), nics[0].Address);
+        Assert.Equal(IPAddress.Parse("172.16.88.168"), LocalNetwork.SelectAdvertisementAddress(IPAddress.Any, candidates));
+    }
+
+    [Fact]
+    public void Hotspot_markers_and_ics_subnet_lose_to_a_lan()
+    {
+        // Listed first, with a gateway, under names that would otherwise win.
+        AdvertisementCandidate[] hotspotFirst =
+        [
+            Nic("Ethernet", "192.168.137.1", gateway: true, description: "Intel(R) Ethernet Connection"),
+            Nic("以太网 2", "10.42.0.1", gateway: true, description: "Microsoft Wi-Fi Direct Virtual Adapter #2"),
+            Nic("本地连接* 1", "192.168.50.1", gateway: true, description: "WAN Miniport"),
+            Nic("Hotspot", "192.168.2.1", gateway: true, description: "Remote NDIS based Internet Sharing Device"),
+            Nic("Wi-Fi", "172.16.88.168", type: NetworkInterfaceType.Wireless80211, gateway: true, description: "Intel(R) Wi-Fi 6 AX201"),
+        ];
+
+        var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any, hotspotFirst);
+        Assert.Single(nics);
+        Assert.Equal(IPAddress.Parse("172.16.88.168"), nics[0].Address);
+        Assert.True(LocalNetwork.IsWindowsIcsSubnet(IPAddress.Parse("192.168.137.1")));
+        Assert.True(LocalNetwork.IsWindowsIcsSubnet(IPAddress.Parse("192.168.137.255")));
+        Assert.False(LocalNetwork.IsWindowsIcsSubnet(IPAddress.Parse("192.168.136.1")));
+        Assert.False(LocalNetwork.IsWindowsIcsSubnet(IPAddress.Parse("172.16.88.168")));
+    }
+
+    [Fact]
+    public void Hotspot_is_a_last_resort_when_nothing_else_is_up()
+    {
+        var nics = LocalNetwork.SelectAdvertisedNics(IPAddress.Any,
+        [
+            Nic("Local Area Connection* 2", "192.168.137.1", gateway: true, description: "Microsoft Wi-Fi Direct Virtual Adapter"),
+        ]);
+
+        Assert.Single(nics);
+        Assert.Equal(IPAddress.Parse("192.168.137.1"), nics[0].Address);
     }
 
     [Fact]
@@ -224,6 +276,13 @@ public sealed class LocalNetworkTests
             "Teredo Tunneling Pseudo-Interface",
             "isatap",
             "6to4",
+            "Local Area Connection* 2",
+            "本地连接* 1",
+            "Microsoft Wi-Fi Direct Virtual Adapter",
+            "Wi-Fi Direct Virtual Adapter #2",
+            "Microsoft Hosted Network Virtual Adapter",
+            "Wireless Hosted Network Virtual Adapter",
+            "Remote NDIS based Internet Sharing Device",
         ];
 
         foreach (var name in names)

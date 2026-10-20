@@ -116,16 +116,40 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
     {
         try
         {
-            var burst = true;
+            await RunStartupBurst(cancellationToken).ConfigureAwait(false);
+            var nextSteady = DateTime.UtcNow + MdnsCadence.SteadyIntervalFor(_receiving);
             while (!cancellationToken.IsCancellationRequested)
             {
                 var epoch = Volatile.Read(ref _networkEpoch);
-                var nics = ReadNics();
-                if (ApplyNics(nics) || RetryQuerySocket())
+                var remaining = nextSteady - DateTime.UtcNow;
+                if (remaining < TimeSpan.Zero)
                 {
-                    burst = true;
+                    remaining = TimeSpan.Zero;
                 }
 
+                var slice = remaining > MdnsCadence.AddressPollInterval ? MdnsCadence.AddressPollInterval : remaining;
+                if (slice > TimeSpan.Zero)
+                {
+                    await Task.Delay(slice, cancellationToken).ConfigureAwait(false);
+                }
+
+                var steadyDue = DateTime.UtcNow >= nextSteady;
+                var epochChanged = Volatile.Read(ref _networkEpoch) != epoch;
+                var changed = false;
+                var revived = false;
+                if (epochChanged || steadyDue)
+                {
+                    // One read after the flap goes quiet. Idle mirrors do not enumerate
+                    // on every NetworkChange callback, and a hotspot-only change does
+                    // not send. This task never resets a decoder or an RTSP session.
+                    if (epochChanged)
+                    {
+                        await Task.Delay(MdnsCadence.NetworkChangeDebounce, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    changed = ApplyNics(ReadNics());
+                    revived = RetryQuerySocket();
+                }
                 if (_nics.Count == 0 || !HasSendableSocket())
                 {
                     if (_nics.Count == 0)
@@ -133,57 +157,56 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
                         LogNoAddress();
                     }
 
-                    await WaitFor(MdnsCadence.SteadyIntervalFor(false), epoch, _nics, cancellationToken, interruptOnNetwork: true).ConfigureAwait(false);
+                    if (steadyDue)
+                    {
+                        nextSteady = DateTime.UtcNow + MdnsCadence.SteadyIntervalFor(false);
+                    }
+
                     continue;
                 }
 
                 _noAddressLogged = false;
-                if (burst)
+                if (!changed && !steadyDue && !revived)
                 {
-                    if (await SendBurst(epoch, cancellationToken).ConfigureAwait(false))
-                    {
-                        await Task.Delay(MdnsCadence.NetworkChangeDebounce, cancellationToken).ConfigureAwait(false);
-                        continue;
-                    }
-
-                    burst = false;
-                    epoch = Volatile.Read(ref _networkEpoch);
-                }
-
-                var reason = await WaitFor(
-                    MdnsCadence.SteadyIntervalFor(_receiving),
-                    epoch,
-                    _nics,
-                    cancellationToken,
-                    interruptOnNetwork: true).ConfigureAwait(false);
-                if (reason == WakeReason.Elapsed)
-                {
-                    await SendAnnouncement(cancellationToken).ConfigureAwait(false);
+                    // Same A record. Do not send again and do not touch the mirror.
                     continue;
                 }
 
-                await Task.Delay(MdnsCadence.NetworkChangeDebounce, cancellationToken).ConfigureAwait(false);
-                var after = ReadNics();
-                if (ApplyNics(after))
-                {
-                    burst = true;
-                    continue;
-                }
-
-                if (reason == WakeReason.NetworkEvent)
-                {
-                    if (RetryQuerySocket())
-                    {
-                        burst = true;
-                        continue;
-                    }
-
-                    await SendAnnouncement(cancellationToken).ConfigureAwait(false);
-                }
+                await SendAnnouncement(cancellationToken).ConfigureAwait(false);
+                nextSteady = DateTime.UtcNow + MdnsCadence.SteadyIntervalFor(_receiving);
             }
         }
         catch (OperationCanceledException)
         {
+        }
+    }
+
+    private async Task RunStartupBurst(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var epoch = Volatile.Read(ref _networkEpoch);
+            var nics = ReadNics();
+            ApplyNics(nics);
+            if (_nics.Count == 0 || !HasSendableSocket())
+            {
+                if (_nics.Count == 0)
+                {
+                    LogNoAddress();
+                }
+
+                await Task.Delay(MdnsCadence.SteadyIntervalFor(false), cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            _noAddressLogged = false;
+            var interrupted = await SendBurst(epoch, cancellationToken).ConfigureAwait(false);
+            if (!interrupted)
+            {
+                return;
+            }
+
+            await Task.Delay(MdnsCadence.NetworkChangeDebounce, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -239,7 +262,8 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
     private bool ApplyNics(IReadOnlyList<AdvertisedNic> nics)
     {
         var previous = _nics;
-        var changed = !MdnsCadence.SameAddresses(previous, nics);
+        // Address text only. MirrorPipe, decoders, and RTSP are not in this type.
+        var changed = MdnsCadence.ShouldRefreshAnnouncement(previous, nics);
         _nics = nics;
         if (nics.Count > 0)
         {
@@ -332,41 +356,38 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
             return;
         }
 
+        // One datagram, one A record. A second packet with another address for
+        // the same hostname is what made phones keep RTSP and stall the picture.
+        var target = PrimaryTarget(targets, nics);
         var sent = 0;
         var port = 0;
         string? lastError = null;
-        foreach (var target in targets)
+        if (!IPAddress.Any.Equals(target.PacketAddress) && !IPAddress.IsLoopback(target.PacketAddress))
         {
-            if (!IPAddress.Any.Equals(target.PacketAddress) && !IPAddress.IsLoopback(target.PacketAddress))
+            if (!MdnsSockets.TrySetMulticastInterface(target.Socket, target.PacketAddress) && !_multicastIfWarned)
             {
-                if (!MdnsSockets.TrySetMulticastInterface(target.Socket, target.PacketAddress) && !_multicastIfWarned)
-                {
-                    _multicastIfWarned = true;
-                    _log.Log(
-                        AirPlayLogLevel.Warning,
-                        "mDNS 无法把多播出口固定到 " + target.PacketAddress
-                        + "。Could not set IP_MULTICAST_IF for " + target.PacketAddress + ".");
-                }
+                _multicastIfWarned = true;
+                _log.Log(
+                    AirPlayLogLevel.Warning,
+                    "mDNS 无法把多播出口固定到 " + target.PacketAddress
+                    + "。Could not set IP_MULTICAST_IF for " + target.PacketAddress + ".");
             }
+        }
 
-            var packet = MdnsMessages.BuildAnnouncement(_advertisement, target.PacketAddress);
-            try
-            {
-                await target.Socket.SendToAsync(packet, SocketFlags.None, MdnsSockets.GroupEndpoint, cancellationToken).ConfigureAwait(false);
-                sent++;
-                if (port == 0 || target.Port != MdnsSockets.Port)
-                {
-                    port = target.Port;
-                }
-            }
-            catch (SocketException ex)
-            {
-                lastError = ex.Message;
-            }
-            catch (ObjectDisposedException)
-            {
-                return;
-            }
+        var packet = MdnsMessages.BuildAnnouncement(_advertisement, target.PacketAddress);
+        try
+        {
+            await target.Socket.SendToAsync(packet, SocketFlags.None, MdnsSockets.GroupEndpoint, cancellationToken).ConfigureAwait(false);
+            sent++;
+            port = target.Port;
+        }
+        catch (SocketException ex)
+        {
+            lastError = ex.Message;
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
         }
 
         if (sent == 0)
@@ -382,7 +403,7 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
                 sequence,
                 _advertisement.InstanceName,
                 _advertisement.DeviceId,
-                MdnsCadence.FormatNics(nics),
+                MdnsCadence.FormatNics(LoggedNic(nics, target)),
                 port,
                 _receiving));
     }
@@ -505,35 +526,30 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
 
             for (var i = _nicSockets.Count - 1; i >= 0; i--)
             {
-                if (!ContainsAddress(nics, _nicSockets[i].Address))
+                if (nics.Count == 0 || !_nicSockets[i].Address.Equals(nics[0].Address))
                 {
                     _nicSockets[i].Socket.Dispose();
                     _nicSockets.RemoveAt(i);
                 }
             }
 
-            foreach (var nic in nics)
+            // One socket. Extra NIC sockets were joined and sent a second A record.
+            if (nics.Count > 0 && !ContainsBound(nics[0].Address))
             {
-                if (ContainsBound(nic.Address))
-                {
-                    continue;
-                }
-
+                var nic = nics[0];
                 var receiveError = TryOpenNic(nic, receive: true);
-                if (ContainsBound(nic.Address))
+                if (!ContainsBound(nic.Address))
                 {
-                    continue;
-                }
+                    if (receiveError is not null)
+                    {
+                        errors.Add(nic.Address + ":5353 " + receiveError);
+                    }
 
-                if (receiveError is not null)
-                {
-                    errors.Add(nic.Address + ":5353 " + receiveError);
-                }
-
-                var sendError = TryOpenNic(nic, receive: false);
-                if (!ContainsBound(nic.Address) && sendError is not null)
-                {
-                    errors.Add(nic.Address + " send " + sendError);
+                    var sendError = TryOpenNic(nic, receive: false);
+                    if (!ContainsBound(nic.Address) && sendError is not null)
+                    {
+                        errors.Add(nic.Address + " send " + sendError);
+                    }
                 }
             }
 
@@ -615,14 +631,9 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
         }
 
         var desired = new List<IPAddress>();
-        foreach (var nic in nics)
+        if (nics.Count > 0 && !IPAddress.IsLoopback(nics[0].Address))
         {
-            if (IPAddress.IsLoopback(nic.Address) || ContainsIp(desired, nic.Address))
-            {
-                continue;
-            }
-
-            desired.Add(nic.Address);
+            desired.Add(nics[0].Address);
         }
 
         for (var i = _joined.Count - 1; i >= 0; i--)
@@ -654,6 +665,38 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
     {
         var token = _cancellation.Token;
         _loops.Add(Task.Run(() => ReceiveLoop(socket, boundAddress, token), token));
+    }
+
+    private static IReadOnlyList<AdvertisedNic> LoggedNic(IReadOnlyList<AdvertisedNic> nics, SendTarget target)
+    {
+        foreach (var nic in nics)
+        {
+            if (nic.Address.Equals(target.PacketAddress))
+            {
+                return [nic];
+            }
+        }
+
+        return [new AdvertisedNic(target.PacketAddress, PrefixLength: -1, Name: "primary")];
+    }
+
+    private static SendTarget PrimaryTarget(SendTarget[] targets, IReadOnlyList<AdvertisedNic> nics)
+    {
+        if (nics.Count == 0)
+        {
+            return targets[0];
+        }
+
+        var primary = nics[0].Address;
+        foreach (var target in targets)
+        {
+            if (target.PacketAddress.Equals(primary))
+            {
+                return target;
+            }
+        }
+
+        return targets[0];
     }
 
     private SendTarget[] SnapshotTargets(IReadOnlyList<AdvertisedNic> nics)
@@ -805,23 +848,14 @@ internal sealed class MdnsAnnouncer : IAsyncDisposable
     }
 
     private void OnNetworkChanged(object? sender, EventArgs e)
-        => Interlocked.Increment(ref _networkEpoch);
+    {
+        // Counter only. Do not enumerate adapters, send, or touch the mirror on
+        // this callback. Windows raises it in bursts for Mobile Hotspot / ICS.
+        Interlocked.Increment(ref _networkEpoch);
+    }
 
     private void OnAvailabilityChanged(object? sender, NetworkAvailabilityEventArgs e)
         => Interlocked.Increment(ref _networkEpoch);
-
-    private static bool ContainsAddress(IReadOnlyList<AdvertisedNic> nics, IPAddress address)
-    {
-        foreach (var nic in nics)
-        {
-            if (nic.Address.Equals(address))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
 
     private static bool ContainsIp(List<IPAddress> addresses, IPAddress address)
     {

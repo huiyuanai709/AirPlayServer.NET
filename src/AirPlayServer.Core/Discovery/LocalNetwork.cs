@@ -27,16 +27,27 @@ internal static class LocalNetwork
         "Teredo",
         "isatap",
         "6to4",
+        // Windows Mobile Hotspot, ICS, and Wi-Fi Direct. The asterisk is part of
+        // the adapter name ("Local Area Connection* 2"); a normal
+        // "Local Area Connection" has no asterisk and is still eligible.
+        "Local Area Connection*",
+        "本地连接*",
+        "本地连接＊",
+        "Microsoft Wi-Fi Direct",
+        "Wi-Fi Direct",
+        "Microsoft Hosted Network",
+        "Hosted Network Virtual",
+        "Wireless Hosted Network",
+        "Internet Sharing Device",
     ];
 
     public static IPAddress? SelectAdvertisementAddress(IPAddress listenAddress)
         => SelectAdvertisementAddress(listenAddress, EnumerateCandidates());
 
     /// <summary>
-    /// Primary IPv4 published when a single address is required. An explicit unicast
-    /// listen address is returned unchanged. <see cref="IPAddress.Any"/> prefers a
-    /// LAN address a phone can reach. The announcer publishes every address from
-    /// <see cref="SelectAdvertisedNics"/>, not only this one.
+    /// IPv4 published in mDNS. An explicit unicast listen address is returned
+    /// unchanged. <see cref="IPAddress.Any"/> prefers one reachable LAN address.
+    /// The announcer publishes that single address, not every NIC.
     /// </summary>
     internal static IPAddress? SelectAdvertisementAddress(
         IPAddress listenAddress,
@@ -50,10 +61,13 @@ internal static class LocalNetwork
         => SelectAdvertisedNics(listenAddress, EnumerateCandidates());
 
     /// <summary>
-    /// Every IPv4 the announcer should publish. An explicit unicast listen address
-    /// stays a single entry. <see cref="IPAddress.Any"/> returns each up, non-virtual
-    /// LAN address, preferred gateway LANs first, and falls back to one address only
-    /// when every up interface looks virtual or link-local.
+    /// The IPv4 the announcer should publish. An explicit unicast listen address
+    /// stays a single entry. <see cref="IPAddress.Any"/> returns one up, non-virtual
+    /// LAN address: the first gateway RFC1918 Wi-Fi or Ethernet interface in
+    /// enumeration order. Other real NICs are not added. A second A record for the
+    /// same hostname (especially Windows Mobile Hotspot <c>192.168.137.1</c>) leaves
+    /// the RTSP session up while the picture waits for a keyframe. Virtual, hotspot,
+    /// and link-local addresses are used only when nothing else is up.
     /// </summary>
     internal static IReadOnlyList<AdvertisedNic> SelectAdvertisedNics(
         IPAddress listenAddress,
@@ -118,8 +132,7 @@ internal static class LocalNetwork
 
     internal static IReadOnlyList<AdvertisedNic> ChooseReachableNics(IReadOnlyList<AdvertisementCandidate> candidates)
     {
-        var preferred = new List<AdvertisedNic>();
-        var reachable = new List<AdvertisedNic>();
+        AdvertisedNic? reachable = null;
         AdvertisedNic? fallback = null;
         var seen = new HashSet<IPAddress>();
 
@@ -137,41 +150,29 @@ internal static class LocalNetwork
 
             var nic = new AdvertisedNic(candidate.Address, candidate.PrefixLength, candidate.Name);
             fallback ??= nic;
-            if (IsIpv4LinkLocal(candidate.Address) || IsVirtualOrTunnel(candidate))
+            if (IsIpv4LinkLocal(candidate.Address) || IsVirtualOrTunnel(candidate) || IsWindowsIcsSubnet(candidate.Address))
             {
                 continue;
             }
 
+            // First gateway LAN wins. That is the pre-#41 choice, and it stays
+            // one A record even when Ethernet and Wi-Fi are both up.
             if (IsEthernetOrWireless(candidate.InterfaceType)
                 && IsRfc1918(candidate.Address)
                 && candidate.HasGateway)
             {
-                preferred.Add(nic);
-                continue;
+                return [nic];
             }
 
-            reachable.Add(nic);
+            reachable ??= nic;
         }
 
-        if (preferred.Count == 0 && reachable.Count == 0)
+        if (reachable is not null)
         {
-            return fallback is null ? [] : [fallback.Value];
+            return [reachable.Value];
         }
 
-        if (preferred.Count == 0)
-        {
-            return reachable;
-        }
-
-        if (reachable.Count == 0)
-        {
-            return preferred;
-        }
-
-        var combined = new List<AdvertisedNic>(preferred.Count + reachable.Count);
-        combined.AddRange(preferred);
-        combined.AddRange(reachable);
-        return combined;
+        return fallback is null ? [] : [fallback.Value];
     }
 
     /// <summary>
@@ -336,6 +337,22 @@ internal static class LocalNetwork
         }
 
         return bytes[0] == 192 && bytes[1] == 168;
+    }
+
+    /// <summary>
+    /// Windows Internet Connection Sharing and Mobile Hotspot use
+    /// <c>192.168.137.0/24</c> by default. The adapter is often a Wi-Fi Direct
+    /// virtual NIC, but the subnet is skipped even when the name looks ordinary.
+    /// </summary>
+    internal static bool IsWindowsIcsSubnet(IPAddress address)
+    {
+        if (address.AddressFamily != AddressFamily.InterNetwork)
+        {
+            return false;
+        }
+
+        var bytes = address.GetAddressBytes();
+        return bytes[0] == 192 && bytes[1] == 168 && bytes[2] == 137;
     }
 
     internal static bool IsIpv4LinkLocal(IPAddress address)

@@ -101,8 +101,9 @@ public sealed class MirrorAndExportTests
         slot.Publish(32, 24, frame, frame.Length / 24);
         Assert.Equal(1, slot.BufferAllocations);
 
+        // Nothing is leasing, so the next frame is written into the same array.
         slot.Publish(32, 24, frame, frame.Length / 24);
-        Assert.Equal(2, slot.BufferAllocations);
+        Assert.Equal(1, slot.BufferAllocations);
         var stable = slot.BufferAllocations;
         for (var i = 0; i < 8; i++)
         {
@@ -125,8 +126,9 @@ public sealed class MirrorAndExportTests
         var afterGrow = slot.BufferAllocations;
         Assert.True(afterGrow > stable);
         slot.Publish(32, 24, frame, frame.Length / 24);
+        var afterShrink = slot.BufferAllocations;
         slot.Publish(32, 24, frame, frame.Length / 24);
-        Assert.Equal(afterGrow, slot.BufferAllocations);
+        Assert.Equal(afterShrink, slot.BufferAllocations);
     }
 
     [Fact]

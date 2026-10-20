@@ -125,11 +125,16 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 LocalNetwork.SelectAdvertisementAddress(options.ListenAddress),
                 options.Name);
             var instance = ReceiverNames.InstanceLabel(options.Name);
-            var frames = new FrameSlot();
-            decoder = options.Decoder ?? H264Decoders.Create(log, load: null, frames.Buffers);
+            var buffers = BgraBufferPool.CreateShared();
+            var frames = new FrameSlot(buffers);
+            log.Log(
+                AirPlayLogLevel.Information,
+                "画面缓冲在各路镜像之间复用（按容量分档，空闲数组按档限流，未租出的画面不会按路各留一块）。"
+                + " BGRA frame buffers are shared across mirror sessions in size tiers. Idle arrays are capped per tier instead of keeping a spare full frame for every phone.");
+            decoder = options.Decoder ?? H264Decoders.Create(log, load: null, buffers);
             if (options.AcceptHevc)
             {
-                hevc = options.HevcDecoder ?? HevcDecoders.Create(log, load: null, frames.Buffers);
+                hevc = options.HevcDecoder ?? HevcDecoders.Create(log, load: null, buffers);
             }
 
             var advertisesHevc = HevcDecoders.ShouldAdvertise(options.AcceptHevc, hevc, log);
@@ -173,7 +178,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 advertisesHevc,
                 hevc,
                 options.MaxMirrors,
-                () => CreateExtraMirror(log, advertisesHevc, separateFairPlay, unwrapper, fairPlay),
+                () => CreateExtraMirror(log, advertisesHevc, separateFairPlay, unwrapper, fairPlay, buffers),
                 fairPlay);
             if (options.PublishDemoFrame)
             {
@@ -332,11 +337,12 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         bool acceptHevc,
         bool separateFairPlay,
         IMediaKeyUnwrapper? unwrapper,
-        IFairPlaySetup? fairPlay)
+        IFairPlaySetup? fairPlay,
+        BgraBufferPool buffers)
     {
-        var frames = new FrameSlot();
-        var decoder = H264Decoders.Create(log, load: null, frames.Buffers);
-        IHevcDecoder? hevc = acceptHevc ? HevcDecoders.Create(log, load: null, frames.Buffers) : null;
+        var frames = new FrameSlot(buffers);
+        var decoder = H264Decoders.Create(log, load: null, buffers);
+        IHevcDecoder? hevc = acceptHevc ? HevcDecoders.Create(log, load: null, buffers) : null;
         FairPlayKeys? keys = separateFairPlay ? new FairPlayKeys() : null;
         return new MirrorEndpointResources
         {

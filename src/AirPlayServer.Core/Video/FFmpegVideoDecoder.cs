@@ -54,6 +54,7 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
     private int _loggedColor;
     private int _loggedFormat;
     private int _loggedSend;
+    private BgraReuseSlot _reuse;
 
     private FFmpegDecodeSession(FFmpegLibrary library, nint context, nint frame, IAirPlayLog? log, string name, BgraBufferPool buffers)
     {
@@ -123,6 +124,11 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
         session = new FFmpegDecodeSession(library, context, frame, log, name, buffers ?? new BgraBufferPool());
         return true;
     }
+
+    internal void OfferReuse(byte[] buffer, int width, int height, int stride)
+        => _reuse.Offer(buffer, width, height, stride);
+
+    internal void ClearReuse() => _reuse.Clear();
 
     internal void SetBitstreamColor(H264ColorSignals color)
     {
@@ -329,7 +335,12 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
         }
 
         var byteCount = width * height * 4;
-        var pixels = _buffers.Rent(byteCount);
+        var reused = _reuse.TryTake(width, height, byteCount, out var pixels);
+        if (!reused)
+        {
+            pixels = _buffers.Rent(byteCount);
+        }
+
         var destination = pixels.AsSpan(0, byteCount);
         var copied = format switch
         {
@@ -345,7 +356,11 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
         };
         if (!copied)
         {
-            _buffers.Return(pixels);
+            if (!reused)
+            {
+                _buffers.Return(pixels);
+            }
+
             if (Interlocked.Exchange(ref _loggedFormat, 1) == 0)
             {
                 _log.Log(
@@ -357,7 +372,9 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
             return false;
         }
 
-        frame = DecodedFrame.Own(width, height, pixels, width * 4);
+        frame = reused
+            ? new DecodedFrame(width, height, pixels.AsMemory(0, byteCount), width * 4)
+            : DecodedFrame.Own(width, height, pixels, width * 4);
         return true;
     }
 
@@ -370,7 +387,7 @@ internal sealed unsafe class FFmpegDecodeSession : IDisposable
     }
 }
 
-internal sealed class FFmpegH264Decoder : IH264Decoder, IDisposable
+internal sealed class FFmpegH264Decoder : IH264Decoder, IBgraReuseTarget, IDisposable
 {
     private readonly FFmpegDecodeSession _session;
 
@@ -393,6 +410,11 @@ internal sealed class FFmpegH264Decoder : IH264Decoder, IDisposable
     }
 
     public void Reset() => _session.Reset();
+
+    public void OfferReuse(byte[] buffer, int width, int height, int stride)
+        => _session.OfferReuse(buffer, width, height, stride);
+
+    public void ClearReuse() => _session.ClearReuse();
 
     public bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
     {
@@ -418,7 +440,7 @@ internal sealed class FFmpegH264Decoder : IH264Decoder, IDisposable
     }
 }
 
-internal sealed class FFmpegHevcDecoder : IHevcDecoder, IDisposable
+internal sealed class FFmpegHevcDecoder : IHevcDecoder, IBgraReuseTarget, IDisposable
 {
     private readonly FFmpegDecodeSession _session;
 
@@ -441,6 +463,11 @@ internal sealed class FFmpegHevcDecoder : IHevcDecoder, IDisposable
     }
 
     public void Reset() => _session.Reset();
+
+    public void OfferReuse(byte[] buffer, int width, int height, int stride)
+        => _session.OfferReuse(buffer, width, height, stride);
+
+    public void ClearReuse() => _session.ClearReuse();
 
     public bool TryDecode(ReadOnlySpan<byte> annexB, bool keyFrame, out DecodedFrame frame)
     {

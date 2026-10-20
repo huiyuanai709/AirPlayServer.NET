@@ -18,7 +18,7 @@ namespace AirPlayServer.Core.Video;
 /// full-range BT.709. Output is BGRA for the window and TapClock path. This
 /// file is compiled only into a Windows host; it does not reference FFmpeg.
 /// </summary>
-internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposable
+internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IBgraReuseTarget, IDisposable
 {
     private const uint MfVersion = 0x00020070;
     private const uint MfStartupLite = 1;
@@ -66,6 +66,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
     private readonly IAirPlayLog _log;
     private readonly BgraBufferPool _buffers;
     private readonly object _gate = new();
+    private BgraReuseSlot _reuse;
     private byte[]? _sps;
     private byte[]? _pps;
     private nint _transform;
@@ -194,6 +195,11 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
             }
         }
     }
+
+    public void OfferReuse(byte[] buffer, int width, int height, int stride)
+        => _reuse.Offer(buffer, width, height, stride);
+
+    public void ClearReuse() => _reuse.Clear();
 
     public void Reset()
     {
@@ -590,7 +596,12 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
             ? _visibleHeight
             : codedHeight;
         var byteCount = visibleWidth * visibleHeight * 4;
-        var tight = _buffers.Rent(byteCount);
+        var reused = _reuse.TryTake(visibleWidth, visibleHeight, byteCount, out var tight);
+        if (!reused)
+        {
+            tight = _buffers.Rent(byteCount);
+        }
+
         var wrote = false;
         if (_rgb32)
         {
@@ -605,11 +616,17 @@ internal sealed unsafe class MediaFoundationH264Decoder : IH264Decoder, IDisposa
 
         if (!wrote)
         {
-            _buffers.Return(tight);
+            if (!reused)
+            {
+                _buffers.Return(tight);
+            }
+
             return false;
         }
 
-        frame = DecodedFrame.Own(visibleWidth, visibleHeight, tight, visibleWidth * 4);
+        frame = reused
+            ? new DecodedFrame(visibleWidth, visibleHeight, tight.AsMemory(0, byteCount), visibleWidth * 4)
+            : DecodedFrame.Own(visibleWidth, visibleHeight, tight, visibleWidth * 4);
         return true;
     }
 

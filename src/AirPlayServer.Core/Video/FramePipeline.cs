@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace AirPlayServer.Core.Video;
 
 /// <summary>
@@ -50,18 +52,31 @@ public readonly struct DecodedFrame
     public int Stride { get; }
 
     internal byte[]? Owned { get; }
+
+    internal bool RefersTo(byte[] buffer)
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        if (ReferenceEquals(Owned, buffer))
+        {
+            return true;
+        }
+
+        return MemoryMarshal.TryGetArray(Bgra, out ArraySegment<byte> segment)
+            && ReferenceEquals(segment.Array, buffer);
+    }
 }
 
 /// <summary>
 /// Latest-frame slot. Publishers overwrite; readers always observe the newest picture.
-/// There is no queue. Same-size frames reuse pooled BGRA arrays. A leased picture
-/// stays immutable until <see cref="Lease.Dispose"/>; the next publish writes a
-/// different array, so the window and TapClock can still be reading the previous one.
+/// There is no queue. When nothing has leased the current picture, the next frame
+/// is written into that same array. A leased picture stays immutable until
+/// <see cref="Lease.Dispose"/>; the next publish then uses a different array, so
+/// the window and TapClock can still be reading the previous one.
 /// </summary>
 public sealed class FrameSlot
 {
     private readonly object _gate = new();
-    private readonly BgraBufferPool _pool = new();
+    private readonly BgraBufferPool _pool;
     private Held? _current;
     private Held? _pin;
     private Held? _stateSpare;
@@ -70,6 +85,18 @@ public sealed class FrameSlot
     private int _height;
     private int _stride;
     private long _generation;
+    private bool _writing;
+
+    public FrameSlot()
+        : this(new BgraBufferPool())
+    {
+    }
+
+    internal FrameSlot(BgraBufferPool pool)
+    {
+        ArgumentNullException.ThrowIfNull(pool);
+        _pool = pool;
+    }
 
     /// <summary>Arrays allocated by <see cref="Buffers"/>. Stable once width and height stop changing.</summary>
     internal int BufferAllocations => _pool.Allocations;
@@ -91,6 +118,11 @@ public sealed class FrameSlot
     {
         Validate(width, height, stride, bgra.Length);
         var tight = width * 4;
+        if (TryOverwrite(width, height, tight, resident: null, bgra, stride, out var generation))
+        {
+            return generation;
+        }
+
         var copy = _pool.Rent(tight * height);
         if (!BgraRows.TryPack(bgra, stride, copy, width, height))
         {
@@ -102,8 +134,10 @@ public sealed class FrameSlot
     }
 
     /// <summary>
-    /// Publishes <paramref name="pixels"/> with no BGRA copy when the stride is
-    /// already tight. The slot owns the array after this returns.
+    /// Publishes <paramref name="pixels"/>. When the current picture is idle and
+    /// the same size, the bytes are copied into that array and <paramref name="pixels"/>
+    /// goes back to the pool. Otherwise a tight buffer is installed with no second copy.
+    /// The slot owns the installed array after this returns.
     /// </summary>
     internal long PublishOwned(int width, int height, byte[] pixels, int stride)
     {
@@ -119,6 +153,16 @@ public sealed class FrameSlot
         }
 
         var tight = width * 4;
+        if (TryOverwrite(width, height, tight, pixels, pixels, stride, out var generation))
+        {
+            if (!ReferenceEquals(pixels, CurrentBuffer()))
+            {
+                _pool.Return(pixels);
+            }
+
+            return generation;
+        }
+
         if (stride == tight)
         {
             return Install(width, height, pixels, tight);
@@ -140,7 +184,7 @@ public sealed class FrameSlot
     {
         lock (_gate)
         {
-            if (_current is null)
+            if (_current is null || _writing)
             {
                 width = 0;
                 height = 0;
@@ -190,7 +234,7 @@ public sealed class FrameSlot
     {
         lock (_gate)
         {
-            if (_current is null)
+            if (_current is null || _writing)
             {
                 width = 0;
                 height = 0;
@@ -210,6 +254,133 @@ public sealed class FrameSlot
             lease = new Lease(this, _current, _current.Stamp);
             return true;
         }
+    }
+
+    /// <summary>
+    /// Hands the current array to a decoder when nobody is reading it. Lease and
+    /// <see cref="TryRead"/> fail until <see cref="TryCompleteReuse"/> or
+    /// <see cref="CancelReuse"/>. The window keeps the last blit.
+    /// </summary>
+    internal bool TryPrepareReuse(out byte[] buffer, out int width, out int height, out int stride)
+    {
+        lock (_gate)
+        {
+            if (!CanOverwriteLocked(_width, _height, _stride))
+            {
+                buffer = [];
+                width = 0;
+                height = 0;
+                stride = 0;
+                return false;
+            }
+
+            _writing = true;
+            buffer = _current!.Data;
+            width = _width;
+            height = _height;
+            stride = _stride;
+            return true;
+        }
+    }
+
+    internal bool TryCompleteReuse(int width, int height, int stride, out long generation)
+    {
+        lock (_gate)
+        {
+            generation = 0;
+            if (!_writing || _current is null)
+            {
+                return false;
+            }
+
+            var need = (long)stride * height;
+            if (width <= 0 || height <= 0 || stride < width * 4 || need <= 0 || need > _current.Data.Length)
+            {
+                _writing = false;
+                return false;
+            }
+
+            _writing = false;
+            _width = width;
+            _height = height;
+            _stride = stride;
+            _current.Stamp++;
+            generation = ++_generation;
+            return true;
+        }
+    }
+
+    internal void CancelReuse()
+    {
+        lock (_gate)
+        {
+            _writing = false;
+        }
+    }
+
+    private byte[]? CurrentBuffer()
+    {
+        lock (_gate)
+        {
+            return _current?.Data;
+        }
+    }
+
+    private bool TryOverwrite(
+        int width,
+        int height,
+        int tightStride,
+        byte[]? resident,
+        ReadOnlySpan<byte> source,
+        int sourceStride,
+        out long generation)
+    {
+        lock (_gate)
+        {
+            generation = 0;
+            if (!CanOverwriteLocked(width, height, tightStride))
+            {
+                return false;
+            }
+
+            if (resident is not null && ReferenceEquals(resident, _current!.Data))
+            {
+                _width = width;
+                _height = height;
+                _stride = tightStride;
+                _current.Stamp++;
+                generation = ++_generation;
+                return true;
+            }
+
+            if (!BgraRows.TryPack(source, sourceStride, _current!.Data, width, height))
+            {
+                return false;
+            }
+
+            _width = width;
+            _height = height;
+            _stride = tightStride;
+            _current.Stamp++;
+            generation = ++_generation;
+            return true;
+        }
+    }
+
+    private bool CanOverwriteLocked(int width, int height, int tightStride)
+    {
+        if (_writing || _current is null || _current.Leases != 0 || _width <= 0 || _height <= 0)
+        {
+            return false;
+        }
+
+        if (width != _width || height != _height || tightStride != _stride || tightStride != width * 4)
+        {
+            return false;
+        }
+
+        var need = (long)tightStride * height;
+        return need > 0 && need <= _current.Data.Length;
     }
 
     private long Install(int width, int height, byte[] pixels, int stride)
@@ -355,6 +526,59 @@ public sealed class FrameSlot
         }
 
         public void Dispose() => _slot?.Release(_held, _stamp);
+    }
+}
+
+/// <summary>
+/// Optional hook so a decoder can write the next picture into the slot's current
+/// array instead of renting a second full frame. The offer is one picture and
+/// must be cleared after <see cref="IH264Decoder.TryDecode"/> returns.
+/// </summary>
+internal interface IBgraReuseTarget
+{
+    void OfferReuse(byte[] buffer, int width, int height, int stride);
+
+    void ClearReuse();
+}
+
+/// <summary>
+/// One offered BGRA array. <see cref="TryTake"/> succeeds only when the decoded
+/// picture is exactly that size, and it consumes the offer so a second picture
+/// from the same access unit rents a new array.
+/// </summary>
+internal struct BgraReuseSlot
+{
+    private byte[]? _buffer;
+    private int _width;
+    private int _height;
+    private int _stride;
+
+    internal void Offer(byte[] buffer, int width, int height, int stride)
+    {
+        _buffer = buffer;
+        _width = width;
+        _height = height;
+        _stride = stride;
+    }
+
+    internal void Clear() => _buffer = null;
+
+    internal bool TryTake(int width, int height, int byteCount, out byte[] buffer)
+    {
+        if (_buffer is null
+            || _width != width
+            || _height != height
+            || _stride != width * 4
+            || byteCount != _stride * height
+            || _buffer.Length < byteCount)
+        {
+            buffer = null!;
+            return false;
+        }
+
+        buffer = _buffer;
+        _buffer = null;
+        return true;
     }
 }
 

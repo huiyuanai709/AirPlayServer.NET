@@ -4,7 +4,9 @@ namespace AirPlayServer.Core.Media;
 
 /// <summary>
 /// Decoders, frame slot, and FairPlay state for one additional mirror.
-/// The arrays and the FairPlay handshake are not shared with another device.
+/// FairPlay, the decryptor, the sockets, and the decoder instance stay on this
+/// device. The BGRA pool may be the receiver-wide pool; a checked-out array is
+/// still owned by one session until it is returned.
 /// </summary>
 internal sealed class MirrorEndpointResources
 {

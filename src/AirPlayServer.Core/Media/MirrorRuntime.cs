@@ -372,7 +372,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         }
         else
         {
-            frames = new FrameSlot();
+            frames = new FrameSlot(_primary.Frames.Buffers);
             decoder = new UnavailableH264Decoder();
             hevc = null;
             unwrapper = null;

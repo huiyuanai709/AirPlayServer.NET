@@ -8,7 +8,7 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 
 ## 现在能做什么
 
-- 用 UDP 套接字向 `224.0.0.251:5353` 通告 `_airplay._tcp` 和 `_raop._tcp`，并回答匹配的 mDNS 查询。默认 `--listen 0.0.0.0` 时，A 记录选手机能到达的局域网 IPv4（跳过 Hyper-V `vEthernet`、WSL、Docker、Clash TAP、VPN 和 `169.254.0.0/16`；只剩这些地址才用第一张非回环网卡）。`--listen 192.168.x.y` 则监听和通告都用该地址。
+- 用 UDP 向 `224.0.0.251:5353` 通告 `_airplay._tcp` 和 `_raop._tcp`，并回答匹配的 mDNS 查询。查询套接字使用 `SO_REUSEADDR`（Linux/macOS 再加 `SO_REUSEPORT`），5353 已被 Bonjour 占用时仍尽量一起收包；整机绑定失败再按网卡绑定。两种都失败时不能改用别的端口收查询（查询的目的端口就是 5353），于是每 10 秒从选定网卡主动通告。启动后在 0、1、2、4 秒连发四次；能应答查询时之后每 60 秒刷新。记录 TTL 是 4500 秒，刷新远早于 80%（3600 秒）。网卡或地址变化会重新选择并再连发。默认 `--listen 0.0.0.0` 时，每张手机能到达的局域网 IPv4 都会通告（跳过 Hyper-V `vEthernet`、WSL、Docker、Clash TAP、VPN 和 `169.254.0.0/16`；只剩这些地址才用第一张非回环网卡，而且只通告这一张）。`--listen 192.168.x.y` 则监听和通告都只用该地址。
 - 在 AirPlay 端口（默认 7001）和 RAOP 端口（默认 5001）上接受 HTTP/1.1 与 RTSP/1.0 控制连接。读取用 `System.IO.Pipelines`。
 - 完成瞬时配对：`POST /pair-setup` 返回 Ed25519 公钥；`POST /pair-verify` 做 X25519、对两端临时公钥签名，再用 SHA-512 派生的 AES-128-CTR 掩住签名。
 - `GET /server-info` 返回 XML plist，`GET|POST /info` 返回二进制 plist。
@@ -288,7 +288,7 @@ git push origin v0.1.0
 
 | 上游 | 本仓库 |
 | --- | --- |
-| `dnssd` 注册 `_airplay._tcp` / `_raop._tcp` | 已实现：自带 IPv4 mDNS 通告和查询应答。没有探测冲突，也没有 IPv6。 |
+| `dnssd` 注册 `_airplay._tcp` / `_raop._tcp` | 已实现：自带 IPv4 mDNS。启动按 0/1/2/4 秒连发，之后在 TTL 的 80% 之前刷新；UDP 5353 尽量与 Bonjour 共享。没有名字冲突探测，也没有 IPv6。 |
 | `pairing.c` 瞬时 pair-setup / pair-verify | 已实现。Ed25519 标量乘法还不是常数时间。 |
 | `pinpair.c` 的 SRP PIN | 未实现。`/pair-setup-pin` 返回 501。 |
 | `fairplay_playfair.c` / `POST /fp-setup` | 已接入。进程内 [AirPlayFairPlay](https://github.com/huiyuanai709/AirPlayFairPlayPlugin)（GPL-3.0-only），源自 PlayFair / xenos1337。宿主默认启用。`--media-key-plugin` 只是可选的原生覆盖。 |

@@ -144,9 +144,9 @@ static async Task<int> RunReceiverAsync(HostArgs arguments, CancellationToken ca
         Console.WriteLine("AirPlay 控制: " + receiver.AirPlayEndPoint);
         Console.WriteLine("RAOP 控制: " + receiver.RaopEndPoint);
         Console.WriteLine(receiver.DiscoveryReceiving
-            ? "mDNS: 正在广播并应答 _airplay._tcp / _raop._tcp"
+            ? "mDNS: 正在广播并应答 _airplay._tcp / _raop._tcp（UDP 5353）"
             : arguments.Options.EnableDiscovery
-                ? "mDNS: 查询端口不可用，仅尝试发送通告"
+                ? "mDNS: UDP 5353 查询端口不可用，改为更频繁的主动通告"
                 : "mDNS: 已关闭");
         Console.WriteLine("宣告画面: " + arguments.Options.DisplayWidth + "x" + arguments.Options.DisplayHeight
             + "（AirPlay /info 广告分辨率。点击对齐的 UIKit 点见下一行）");

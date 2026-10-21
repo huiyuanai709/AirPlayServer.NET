@@ -187,6 +187,8 @@ public sealed class SessionNotifyServer : IAsyncDisposable
             SourceIp = snapshot.SourceIp ?? "",
             SessionId = snapshot.SessionId,
             DisconnectPending = snapshot.DisconnectPending,
+            Ingress = string.IsNullOrEmpty(snapshot.Ingress) ? MirrorIngress.AirPlay : snapshot.Ingress,
+            DeviceId = snapshot.DeviceId,
         };
     }
 

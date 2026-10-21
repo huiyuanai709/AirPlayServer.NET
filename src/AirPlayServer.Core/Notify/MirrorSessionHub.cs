@@ -44,6 +44,16 @@ public sealed class MirrorSessionHub : IMirrorSessionEvents, IDisposable
         }
     }
 
+    public void Detach(MirrorSessionTracker tracker)
+    {
+        ArgumentNullException.ThrowIfNull(tracker);
+        tracker.Changed -= OnChanged;
+        lock (_gate)
+        {
+            _trackers.Remove(tracker);
+        }
+    }
+
     public IReadOnlyList<MirrorSessionSnapshot> Snapshots()
     {
         MirrorSessionTracker[] trackers;

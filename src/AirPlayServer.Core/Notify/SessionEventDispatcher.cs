@@ -117,6 +117,7 @@ public sealed class SessionEventDispatcher : IDisposable
             SessionId = args.SessionId,
             Device = args.DeviceName ?? "",
             SourceIp = args.SourceIp,
+            Ingress = string.IsNullOrEmpty(args.Ingress) ? MirrorIngress.AirPlay : args.Ingress,
             Button = ButtonName(gesture.Button),
             WindowX = gesture.WindowX,
             WindowY = gesture.WindowY,
@@ -207,6 +208,8 @@ public sealed class SessionEventDispatcher : IDisposable
                     SourceIp = args.SourceIp ?? "",
                     SessionId = args.SessionId,
                     Reason = args.Reason,
+                    Ingress = args.Ingress,
+                    DeviceId = args.DeviceId,
                 };
                 await PostAsync(
                     url,
@@ -242,6 +245,8 @@ public sealed class SessionEventDispatcher : IDisposable
             SessionId = args.SessionId,
             Reason = args.Reason,
             Source = TapClockIntegration.Source,
+            Ingress = args.Ingress,
+            DeviceId = args.DeviceId,
         };
         await PostAsync(
             events.AbsoluteUri,
@@ -291,6 +296,7 @@ public sealed class SessionEventDispatcher : IDisposable
         var device = string.IsNullOrWhiteSpace(args.DeviceName) ? "" : " 设备: " + args.DeviceName + "。";
         var source = string.IsNullOrWhiteSpace(args.SourceIp) ? "" : " 来源: " + args.SourceIp + "。";
         var session = string.IsNullOrWhiteSpace(args.SessionId) ? "" : " 会话: " + args.SessionId + "。";
-        return device + source + session;
+        var ingress = " 入口: " + args.Ingress + "。";
+        return device + source + session + ingress;
     }
 }

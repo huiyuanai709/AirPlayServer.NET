@@ -334,8 +334,9 @@ public sealed class MirrorAndExportTests
     [Fact]
     public void Export_file_names_keep_ipv4_and_replace_ipv6_colons()
     {
-        Assert.Equal(MirrorExportNames.UnknownFileName, MirrorExportNames.JpegFileName(null));
-        Assert.Equal("mirror-unknown.jpg", MirrorExportNames.JpegFileName(null));
+        Assert.Equal(MirrorExportNames.UnknownFileName, MirrorExportNames.JpegFileName((IPAddress?)null));
+        Assert.Equal("mirror-unknown.jpg", MirrorExportNames.JpegFileName((IPAddress?)null));
+        Assert.Equal("mirror-usb-00008110-DESK0001.jpg", MirrorExportNames.JpegFileName("usb-00008110-DESK0001"));
         Assert.Equal("mirror-192.168.5.20.jpg", MirrorExportNames.JpegFileName(IPAddress.Parse("192.168.5.20")));
         Assert.Equal("mirror-2001-db8--1.jpg", MirrorExportNames.JpegFileName(IPAddress.Parse("2001:db8::1")));
         Assert.Equal("mirror-fe80--1-eth0.jpg", "mirror-" + MirrorExportNames.Sanitize("fe80::1%eth0") + ".jpg");

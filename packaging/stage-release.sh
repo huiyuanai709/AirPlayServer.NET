@@ -4,6 +4,7 @@
 # flavor defaults to lean. ui zips use the -ui name suffix inside the archive.
 # The zip contains the binary, RUN.txt, LICENSE, NOTICE.md, and VERSION.txt.
 # linux-x64 also gets airplayserver.service.
+# win-x64 also gets windows-usb-driver.ps1. That script does not contain a driver.
 # osx-arm64 and osx-x64 pack the same Mach-O name as linux, plus any
 # Avalonia Skia/HarfBuzz .dylib files sitting next to the binary.
 # Runtime *.dll, *.so, and *.dylib are kept. Debug symbols are not.
@@ -96,6 +97,9 @@ fi
 if [ "$rid" = "linux-x64" ] || [ "$rid" = "osx-arm64" ] || [ "$rid" = "osx-x64" ]; then
   chmod +x "$stage/$binary"
 fi
+if [ "$rid" = "win-x64" ]; then
+  cp "$root/packaging/windows-usb-driver.ps1" "$stage/"
+fi
 if [ "$rid" = "linux-x64" ]; then
   cp "$root/packaging/airplayserver.service" "$stage/"
   if [ "$flavor" = "ui" ]; then
@@ -125,11 +129,15 @@ fi
 
 expect_exec=0
 expect_service=0
+expect_usb_helper=0
 if [ "$rid" = "linux-x64" ] || [ "$rid" = "osx-arm64" ] || [ "$rid" = "osx-x64" ]; then
   expect_exec=1
 fi
 if [ "$rid" = "linux-x64" ]; then
   expect_service=1
+fi
+if [ "$rid" = "win-x64" ]; then
+  expect_usb_helper=1
 fi
 
 STAGE_DIR="$stage" \
@@ -138,6 +146,7 @@ STAGE_DIR="$stage" \
   BINARY_NAME="$binary" \
   EXPECT_EXEC="$expect_exec" \
   EXPECT_SERVICE="$expect_service" \
+  EXPECT_USB_HELPER="$expect_usb_helper" \
   "$py" - <<'PY'
 import os
 import sys
@@ -149,6 +158,7 @@ prefix = os.environ["ZIP_PREFIX"]
 binary = os.environ["BINARY_NAME"]
 expect_exec = os.environ["EXPECT_EXEC"] == "1"
 expect_service = os.environ["EXPECT_SERVICE"] == "1"
+expect_usb_helper = os.environ["EXPECT_USB_HELPER"] == "1"
 # High 16 bits are the Unix mode, including the regular-file type.
 # Set every entry explicitly. Windows CPython reports .exe as 0777, and
 # Git Bash chmod does not produce a Unix execute bit for the linux binary.
@@ -187,6 +197,11 @@ with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         required.append(service)
     elif service in names:
         sys.exit("service file does not belong in this rid")
+    helper = prefix + "/windows-usb-driver.ps1"
+    if expect_usb_helper:
+        required.append(helper)
+    elif helper in names:
+        sys.exit("windows usb helper does not belong in this rid")
 
     missing = [name for name in required if name not in names]
     if missing:

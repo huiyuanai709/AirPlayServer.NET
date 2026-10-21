@@ -20,6 +20,7 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 - 可选地把最新帧编码成 JPEG，按 TapClock ATBF type 3 推到 `host:42125`，或原子写入监视目录。默认关闭。
 - 镜像数据连上或断开时，可以 POST Webhook，并按 TapClock 的集成接口通知它重连。配置页默认开在 `127.0.0.1:7099`。本程序不点击控制中心。
 - 多台手机可以同时镜像。默认不限制路数。需要上限时用 `--max-mirrors N`（N 为正整数，没有硬上限；内存和 CPU 才是限制）。每一路有自己的数据端口、计时端口、解密、解码器、画面、`session_id` 和窗口。新手机不会断开已经连上的那一路。同一 IPv4 再次 `SETUP` 仍是原来那一路（锁屏后重连）。进程内 FairPlay 每路一次握手。`--media-key-plugin` 的原生库在各路之间共用。
+- 可选有线画面：`--usb` 用 libusb 收 Apple QuickTime-over-USB（Valeria）的 H.264。这是纯 C# 协议实现，不链接 Qt 控件、QuickTime.app 或 QTKit。默认关闭。有线和无线可以同时收，多台 USB 手机各占一路。USB 没有 FairPlay。伴音（LPCM）这一版只识别、不播放。
 
 ## 多设备镜像
 
@@ -32,6 +33,24 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 `GET /api/status` 的顶层字段仍是第一路的快照。多路时多一个 `sessions` 数组，每项是 `connected`、`since`、`name`、`source_ip`、`session_id`、`disconnect_pending`。`source_ip` 是这一路的对端 IP，不带端口；还没有对端时为空字符串。每一路各自 POST `POST {base}/api/integrations/airplay/events`，`session_id`、`device`、`source_ip` 都按这一路填写。断连防抖按路计算。
 
 Several phones can mirror at once. There is no default cap. `--max-mirrors N` (any positive count) is an optional limit; one more session then gets HTTP 503. Memory and CPU are the practical limit. Each IPv4 gets its own data port, decoder, frame slot, `session_id`, and Avalonia window. The same address reconnects that session instead of opening another. JPEG files are `mirror-<data-peer-ip>.jpg`. ATBF stays a type-3 flags-0 JPEG; the log records the data peer because the header has no source field.
+
+## 有线镜像（QuickTime over USB）
+
+`--usb` 打开有线入口，和无线 AirPlay 同时跑。不写这个参数时行为和以前一样，只有无线。`--usb-udid <序列号或 UDID>` 只收这一台，并隐含打开 `--usb`。24 位序列号会在第 8 位后面补上短横线，再和 40 位 UDID 比较。
+
+有线画面是 Apple 的 QuickTime-over-USB / Valeria 协议：厂商控制请求打开隐藏配置，设备重新枚举后认领类 `0xFF` 子类 `0x2A` 的接口，用第一条 bulk IN/OUT 做 PING、SYNC、ASYN。ASYN `FEED` 里的 CMSampleBuffer 是明文 AVCC H.264，转成 Annex-B 后走现有的 `IH264Decoder` 和 `FrameSlot`。没有 FairPlay，也不需要 `Qt` 控件、QuickTime.app 或 QTKit。库是运行时 `NativeLibrary` 加载的 libusb-1.0（和 FFmpeg 一样不链进 AOT 镜像）。
+
+每一台 USB 手机按序列号单独一路，有自己的解码器、画面、`session_id` 和窗口。`--max-mirrors` 把无线和有线算在一起。启动时那一路无线监听已经占 1 个名额，所以 `--max-mirrors 1` 时 USB 开不出来。要同时收，省略这个参数，或把 N 写得比「无线路数 + USB 台数」大。
+
+同一台手机默认不从两条路各收一次。两条路没有共同的 UDID：无线按控制连接的 IPv4，有线按 USB 序列号。只有两边的设备名都非空、并且忽略大小写相等时，后到的那一路才不开。USB 产品字符串经常只是 `iPhone`，和 AirPlay 里的手机名不同，所以这个判断经常拦不住同一台。其他手机始终可以一边插线、一边用 AirPlay。`--allow-dual` 关掉这个判断。
+
+导出目录里，USB 文件名是 `mirror-usb-<序列号>.jpg`。通知 JSON 增加 `ingress`：`airplay` 或 `usb`。TapClock 原来的 `source` 仍是 `AirPlayServer.NET`，不要改成 `usb`。USB 另有 `device_id`（序列号）；`source_ip` 为空。点击事件同样带 `ingress`。
+
+Windows 的做法和 iPhoneMirror 的驱动分工同一类，但安装器是这里自己写的，不附带内核驱动：父设备保持 `usbccgp`（Apple Mobile Device Support，或 Microsoft Store 的 Apple Devices）。不要用 Zadig 替换 Apple 复合父设备。WinUSB 不能 `SET_CONFIGURATION`，所以 QuickTime 切换要靠 libusb-win32 装在**这一台设备实例**上的 UpperFilter，而不是换掉父驱动。程序只认领重新枚举出来的 QuickTime 接口（类 `0xFF` 子类 `0x2A`）。认领失败时日志会写出 libusb 错误码和下一步，无线和其他手机继续。把 `libusb-1.0.dll` 放在程序旁边。win-x64 发布包里的 `windows-usb-driver.ps1` 可以检查状态、下载用户态 DLL，或调用你准备的官方 `install-filter.exe`。完整步骤见 [docs/usb-windows.md](docs/usb-windows.md)。Linux 用系统的 `libusb-1.0.so.0`（`apt install libusb-1.0-0`）。macOS 用 `libusb-1.0.0.dylib`（Homebrew 的 libusb）。没有设备或认领失败时，协议单元测试仍然可以跑；CI 不要求插着手机。
+
+ASYN `EAT!`（LPCM 伴音）会记一条日志，然后丢掉。画面继续。播放留到后面的版本。
+
+`--usb` receives the QuickTime-over-USB screen in pure C# through libusb. It is off unless requested, runs beside wireless AirPlay, and gives each USB phone its own decoder and session. `--max-mirrors` counts both, including the always-on AirPlay listener, so `1` leaves no room for USB. `--allow-dual` permits the same device name on both paths. TapClock `source` stays `AirPlayServer.NET`; `ingress` is `airplay` or `usb`. On Windows the Apple parent stays `usbccgp`; a libusb-win32 UpperFilter is added to that instance only, because WinUSB cannot `SET_CONFIGURATION`. Do not run Zadig on the Apple composite parent. `windows-usb-driver.ps1` and [docs/usb-windows.md](docs/usb-windows.md) are the install notes. The repository does not bundle `libusb0.sys`. USB audio is recognized and not played.
 
 ## 镜像连接通知
 
@@ -59,13 +78,14 @@ X-TapClock-Token: <共享密钥，可省略>
   "source_ip": "192.168.5.20",
   "session_id": "32位十六进制，可省略",
   "reason": "mirror-data",
-  "source": "AirPlayServer.NET"
+  "source": "AirPlayServer.NET",
+  "ingress": "airplay"
 }
 ```
 
-`event` 是 `connected` 或 `disconnected`。`at` 是带时区偏移的 ISO-8601。`device` 是发送端在会话 SETUP 里报的名字，不知道时为空字符串。`source_ip` 是镜像数据套接字的对端 IP（不带端口）；数据口还没连上时用控制连接的 IPv4。两者都没有时为空字符串。`reason` 可能是 `mirror-data`、`data-closed`、`video-teardown`、`session-teardown`。非 2xx（包括 202、409、400 以外的失败）只记日志，不让宿主退出。重试、冷却和「控制中心 → 屏幕镜像 → AirPlay → 上一台设备」的点击都由 TapClock 做。
+`event` 是 `connected` 或 `disconnected`。`at` 是带时区偏移的 ISO-8601。`device` 是发送端在会话 SETUP 里报的名字，不知道时为空字符串。`source_ip` 是镜像数据套接字的对端 IP（不带端口）；数据口还没连上时用控制连接的 IPv4。两者都没有时为空字符串。`ingress` 是 `airplay` 或 `usb`。`source` 始终是产品名 `AirPlayServer.NET`，用来让 TapClock 认出这条集成；不要用它区分有线还是无线。USB 会话另有 `device_id`（序列号），没有时省略。`reason` 可能是 `mirror-data`、`data-closed`、`video-teardown`、`session-teardown`。非 2xx（包括 202、409、400 以外的失败）只记日志，不让宿主退出。重试、冷却和「控制中心 → 屏幕镜像 → AirPlay → 上一台设备」的点击都由 TapClock 做。
 
-通用 Webhook 另有连接地址和断开地址。正文是 `event`、`at`、`device`、`source_ip`、`session_id`、`reason`。`device` 和 `source_ip` 与 TapClock 相同。可选一个自定义头带共享密钥。
+通用 Webhook 另有连接地址和断开地址。正文是 `event`、`at`、`device`、`source_ip`、`session_id`、`reason`、`ingress`，USB 另有 `device_id`。`device` 和 `source_ip` 与 TapClock 相同。可选一个自定义头带共享密钥。
 
 镜像窗口的按下、按住移动和抬起走另一份地址列表 `webhook_urls`（命令行 `--webhook`，可重复；配置页「点击地址」，每行一个）。启用 Webhook 之后才会 POST。连接和断开地址不会收到这些指针事件。事件名仍是 `mirror.click`（不另起一个 move 事件），`phase` 是 `down`、`move` 或 `up`（没有合成的 click，订阅方自己配对）。`down` 和 `up` 与以前相同，黑边也会发。`move` 只在某个鼠标键已被窗口捕获（按住）时跟着指针移动发送；悬停不发。`button` 是当前按住的那个键。点不在画面上（`on_content` 为 false，黑边或还没有帧）时不发 `move`。设备像素没变不重复发。按下之后第一次离开该像素会马上发一条，之后大约每 1/60 秒最多一条。字段与按下、抬起相同。`logical_x` / `logical_y` 只在命令行或配置给出了 `--model` 逻辑屏幕、并且点在画面上时出现；TapClock 应优先用这对逻辑点。`--screen` 只是向手机宣告的分辨率，不填逻辑坐标。字段：
 
@@ -75,6 +95,7 @@ X-TapClock-Token: <共享密钥，可省略>
 | `session_id` | 这一路镜像的会话。数据端口还没连上时可能没有 |
 | `device` | 设备名，没有时为空字符串 |
 | `source_ip` | 镜像数据对端；还没有数据连接时用 RTSP 对端。没有则为空并省略 |
+| `ingress` | `airplay` 或 `usb` |
 | `button` | `left`、`right`、`middle`、`x1`、`x2` |
 | `window_x`、`window_y` | 窗口客户区设备像素。原点在左上，Y 向下。DIP 乘上渲染缩放后向零截断 |
 | `on_content` | 点是否落在按比例摆好的画面上。黑边是 false |
@@ -152,17 +173,15 @@ mDNS announcer                         control listeners :7001 and :5001
         |                                          |  ANNOUNCE / SETUP / RECORD
         v                                          v
                  AirPlayReceiver
-                          |
-                          |  TCP mirror data + UDP timing
-                          |  session notify -> webhooks + TapClock events
-                          |  config page 127.0.0.1:7099  GET /api/status
-                          v
-                 FairPlayKeys (fp-setup + 72-byte ekey) -> AES-CTR
-                 IH264Decoder  ->  FrameSlot (latest BGRA)
+                    |                     |
+                    | wireless            | --usb  libusb-1.0 (optional)
+                    | FairPlay + AES-CTR  | QuickTime-over-USB FEED, no FairPlay
+                    v                     v
+                 IH264Decoder  ->  FrameSlot (latest BGRA, one per session)
                     |                         |
                     |                         +-- Avalonia window (one per session; Win32 / X11 / AppKit)
                     |                         +-- ATBF type 3 JPEG -> TapClock :42125
-                    |                         +-- temp file -> mirror-<data-peer-ip>.jpg
+                    |                         +-- mirror-<data-peer-ip>.jpg or mirror-usb-<serial>.jpg
                     +-- Windows: Media Foundation H.264 / HEVC -> BGRA
                     +-- FFmpeg libavcodec when MF HEVC is missing, and for Linux H.264 / HEVC
                     +-- no library: unavailable, and --h265 is not advertised
@@ -171,7 +190,7 @@ mDNS announcer                         control listeners :7001 and :5001
 | 项目 | 职责 |
 | --- | --- |
 | `deps/AirPlayFairPlay` | 进程内 FairPlay。`FairPlaySession` 来自 AirPlayFairPlayPlugin `8a6a9c46`。GPL-3.0-only。 |
-| `src/AirPlayServer.Core` | 协议库。`IsAotCompatible`。发现、配对、`FairPlayKeys`、镜像、JPEG/ATBF、镜像会话通知。 |
+| `src/AirPlayServer.Core` | 协议库。`IsAotCompatible`。发现、配对、`FairPlayKeys`、镜像、JPEG/ATBF、镜像会话通知、QuickTime-over-USB 编解码。 |
 | `src/AirPlayServer.Host` | 控制台宿主。`PublishAot`。`EnableAvalonia=true` 才引用 Avalonia。 |
 | `tests/AirPlayServer.Core.Tests` | 握手、镜像包、解密、SETUP plist、ATBF 与目录改名、机型表与 `/info` 广告尺寸、会话通知与防抖。 |
 | `tests/AirPlayServer.Host.Tests` | `--model` 解析 UIKit 点，`--screen` 单独决定广告分辨率。版本比较、发布资源名、SHA256 和自更新替换也在这里。 |

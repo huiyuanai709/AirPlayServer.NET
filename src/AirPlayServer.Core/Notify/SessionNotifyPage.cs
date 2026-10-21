@@ -36,7 +36,7 @@ internal static class SessionNotifyPage
                 <label class="block text-sm">断开地址<input id="disconnect_url" type="url" placeholder="http://127.0.0.1:9/airplay/disconnected" class="mt-1 w-full rounded border border-slate-300 px-3 py-2" /></label>
                 <label class="block text-sm">密钥（可选）<input id="webhook_secret" type="text" autocomplete="off" class="mt-1 w-full rounded border border-slate-300 px-3 py-2" /></label>
                 <label class="block text-sm">密钥 HTTP 头<input id="webhook_secret_header" type="text" class="mt-1 w-full rounded border border-slate-300 px-3 py-2" /></label>
-                <p class="text-xs text-slate-500">连接和断开 POST JSON：event、at、device、source_ip、session_id、reason。device 是手机名，source_ip 是对端 IP（不带端口）。不知道时为空字符串。有密钥时带上上面的头。</p>
+                <p class="text-xs text-slate-500">连接和断开 POST JSON：event、at、device、source_ip、session_id、reason、ingress。ingress 是 airplay 或 usb。USB 另有 device_id（序列号）。device 是手机名，source_ip 是对端 IP（不带端口）。不知道时为空字符串。有密钥时带上上面的头。</p>
                 <label class="block text-sm">点击地址（每行一个 http 或 https，最多 8 个）<textarea id="webhook_urls" rows="4" placeholder="http://127.0.0.1:9/mirror/click" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-xs"></textarea></label>
                 <p class="text-xs text-slate-500">连接和断开仍走上面两个地址。镜像窗口的按下、按住移动和抬起另 POST 到点击地址，event 仍为 mirror.click，phase 为 down、move 或 up，同样带 device 和 source_ip。悬停不发 move。move 只在按键被窗口按住且点在画面上时发送，设备像素没变会丢掉，大约每秒最多 60 次。window_x/y 是客户区设备像素，原点在左上，Y 向下。画面按比例 letterbox，黑边上 on_content 为 false，content_x/y 为空。画面内 content_x/y 是解码帧像素，整数截断。配置了逻辑屏幕尺寸（--model）时，另有 logical_x/y = 帧像素 * 逻辑宽高 / 帧宽高。--screen 不填逻辑坐标。点击不发给手机。有密钥时带上上面的头。</p>
               </fieldset>
@@ -54,7 +54,8 @@ internal static class SessionNotifyPage
           "source_ip": "192.168.5.20",
           "session_id": "...",
           "reason": "data-closed",
-          "source": "AirPlayServer.NET"
+          "source": "AirPlayServer.NET",
+          "ingress": "airplay"
         }</pre>
               </fieldset>
               <fieldset class="space-y-3">
@@ -84,7 +85,7 @@ internal static class SessionNotifyPage
               const list = document.getElementById("status-sessions");
               list.textContent = sessions.length === 0
                 ? "—"
-                : sessions.map((item) => (item.connected ? "已连接 " : "未连接 ") + (item.name || "—") + " " + (item.source_ip || "—") + " " + (item.session_id || "")).join("；");
+                : sessions.map((item) => (item.connected ? "已连接 " : "未连接 ") + (item.ingress || "airplay") + " " + (item.name || "—") + " " + (item.source_ip || item.device_id || "—") + " " + (item.session_id || "")).join("；");
             }
 
             async function refreshStatus() {

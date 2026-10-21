@@ -6,6 +6,7 @@ using AirPlayServer.Core.Media;
 using AirPlayServer.Core.Notify;
 using AirPlayServer.Core.Pairing;
 using AirPlayServer.Core.Protocol;
+using AirPlayServer.Core.Usb;
 using AirPlayServer.Core.Video;
 
 namespace AirPlayServer.Core;
@@ -16,6 +17,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
     private readonly ControlServer _control;
     private readonly MdnsAnnouncer? _announcer;
     private readonly MirrorRuntime _mirror;
+    private readonly UsbQtIngress? _usb;
     private readonly TapClockExporter? _tapClock;
     private readonly IAsyncDisposable? _windows;
     private readonly NativeMediaKeyModule? _plugin;
@@ -29,6 +31,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         ControlServer control,
         MdnsAnnouncer? announcer,
         MirrorRuntime mirror,
+        UsbQtIngress? usb,
         TapClockExporter? tapClock,
         IAsyncDisposable? windows,
         NativeMediaKeyModule? plugin,
@@ -46,6 +49,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         _control = control;
         _announcer = announcer;
         _mirror = mirror;
+        _usb = usb;
         _tapClock = tapClock;
         _windows = windows;
         _plugin = plugin;
@@ -119,6 +123,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         Socket? raop = null;
         ControlServer? control = null;
         MirrorRuntime? mirror = null;
+        UsbQtIngress? usb = null;
         TapClockExporter? tapClock = null;
         MirrorWindowGroup? windows = null;
         NativeMediaKeyModule? plugin = null;
@@ -176,6 +181,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
             var separateFairPlay = fairPlay is FairPlayKeys && ReferenceEquals(fairPlay, unwrapper);
             ReadOnlySpan<byte> labKey = options.LabContentKey is null ? [] : options.LabContentKey;
             ArgumentNullException.ThrowIfNull(decoder);
+            var devicePolicy = new MirrorDevicePolicy(options.AllowDualIngress);
             mirror = MirrorRuntime.Start(
                 options.ListenAddress,
                 raopPort,
@@ -189,7 +195,8 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 options.MaxMirrors,
                 () => CreateExtraMirror(log, advertisesHevc, separateFairPlay, unwrapper, fairPlay, buffers),
                 fairPlay,
-                options.DecodeTiming);
+                options.DecodeTiming,
+                devicePolicy);
             if (options.DecodeTiming != DecodeTimingMode.Off)
             {
                 log.Log(AirPlayLogLevel.Information, DecodeTiming.Describe(options.DecodeTiming));
@@ -199,9 +206,61 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 DemoFrame.Publish(frames, options.DisplayWidth, options.DisplayHeight);
             }
 
+            var logicalWidth = options.TapClockLogicalScreen?.Width ?? 0;
+            var logicalHeight = options.TapClockLogicalScreen?.Height ?? 0;
+            var windowGroup = new MirrorWindowGroup();
+            windows = windowGroup;
+            var clicks = new MirrorClickHub();
+            if (options.EnableUsb && LibUsbCatalog.TryCreate(log, out var usbCatalog) && usbCatalog is not null)
+            {
+                var runtime = mirror;
+                usb = UsbQtIngress.Start(
+                    runtime,
+                    runtime.SessionEvents,
+                    devicePolicy,
+                    usbCatalog,
+                    () => new UsbMirrorResources
+                    {
+                        Frames = new FrameSlot(buffers),
+                        Decoder = H264Decoders.Create(log, load: null, buffers),
+                    },
+                    options.DisplayWidth,
+                    options.DisplayHeight,
+                    options.UsbUdid,
+                    log,
+                    session =>
+                    {
+                        if (!options.ShowWindow)
+                        {
+                            return;
+                        }
+
+                        var title = string.IsNullOrWhiteSpace(session.DeviceName) ? "USB " + session.Id : session.DeviceName;
+                        windowGroup.Add(session, OpenSurface(session.Frames, title, gesture =>
+                        {
+                            var snapshot = session.Sessions.GetSnapshot();
+                            clicks.Publish(new MirrorClickEventArgs
+                            {
+                                SessionId = snapshot.SessionId,
+                                DeviceName = session.DeviceName,
+                                Ingress = MirrorIngress.Usb,
+                                Gesture = gesture,
+                            });
+                        }));
+                    },
+                    windowGroup.Close);
+                log.Log(
+                    AirPlayLogLevel.Information,
+                    string.IsNullOrWhiteSpace(options.UsbUdid)
+                        ? "有线镜像已开启，和无线 AirPlay 同时收。每台 USB 手机单独一路。 Wired mirroring is on and runs beside wireless AirPlay. Each USB phone is its own session."
+                        : "有线镜像已开启，只收 UDID " + options.UsbUdid + "。 Wired mirroring is on, limited to UDID " + options.UsbUdid + ".");
+            }
+
             if (options.TapClock is { Enabled: true })
             {
-                tapClock = TapClockExporter.Start(options.TapClock, mirror.ExportSources, log, CancellationToken.None);
+                var runtime = mirror;
+                var wired = usb;
+                tapClock = TapClockExporter.Start(options.TapClock, () => CombineSources(runtime, wired), log, CancellationToken.None);
             }
 
             if (options.ShowWindow && options.OpenMirrorSurface is null)
@@ -209,12 +268,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 log.Log(AirPlayLogLevel.Information, "没有接上镜像窗口，画面仍可导出。No mirror window was attached. Frames can still be exported.");
             }
 
-            var windowGroup = new MirrorWindowGroup();
-            windows = windowGroup;
-            var clicks = new MirrorClickHub();
-            var logicalWidth = options.TapClockLogicalScreen?.Width ?? 0;
-            var logicalHeight = options.TapClockLogicalScreen?.Height ?? 0;
-            IMirrorSurface? OpenSurface(MirrorPipe pipe, FrameSlot slot, string title)
+            IMirrorSurface? OpenSurface(FrameSlot slot, string title, Action<MirrorPointerGesture> report)
             {
                 if (!options.ShowWindow || options.OpenMirrorSurface is null)
                 {
@@ -231,17 +285,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                         TapClockScreenWidth = logicalWidth,
                         TapClockScreenHeight = logicalHeight,
                         CancellationToken = cancellationToken,
-                        ReportPointer = gesture =>
-                        {
-                            var snapshot = pipe.Sessions.GetSnapshot();
-                            clicks.Publish(new MirrorClickEventArgs
-                            {
-                                SessionId = snapshot.SessionId,
-                                DeviceName = pipe.DeviceName,
-                                SourceIp = pipe.SourceAddress?.ToString(),
-                                Gesture = gesture,
-                            });
-                        },
+                        ReportPointer = report,
                     });
                 }
                 catch (Exception ex)
@@ -253,7 +297,19 @@ public sealed class AirPlayReceiver : IAsyncDisposable
 
             if (options.ShowWindow)
             {
-                windowGroup.Add(mirror.Primary, OpenSurface(mirror.Primary, frames, instance));
+                var primary = mirror.Primary;
+                windowGroup.Add(primary, OpenSurface(frames, instance, gesture =>
+                {
+                    var snapshot = primary.Sessions.GetSnapshot();
+                    clicks.Publish(new MirrorClickEventArgs
+                    {
+                        SessionId = snapshot.SessionId,
+                        DeviceName = primary.DeviceName,
+                        SourceIp = primary.SourceAddress?.ToString(),
+                        Ingress = MirrorIngress.AirPlay,
+                        Gesture = gesture,
+                    });
+                }));
             }
 
             mirror.PipeAdded += pipe =>
@@ -264,7 +320,18 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 }
 
                 var title = string.IsNullOrWhiteSpace(pipe.DeviceName) ? "镜像 " + pipe.Activity.DataPort : pipe.DeviceName;
-                windowGroup.Add(pipe, OpenSurface(pipe, pipe.Frames, title));
+                windowGroup.Add(pipe, OpenSurface(pipe.Frames, title, gesture =>
+                {
+                    var snapshot = pipe.Sessions.GetSnapshot();
+                    clicks.Publish(new MirrorClickEventArgs
+                    {
+                        SessionId = snapshot.SessionId,
+                        DeviceName = pipe.DeviceName,
+                        SourceIp = pipe.SourceAddress?.ToString(),
+                        Ingress = MirrorIngress.AirPlay,
+                        Gesture = gesture,
+                    });
+                }));
             };
             mirror.DeviceNamed += windowGroup.Rename;
             control = ControlServer.Start(
@@ -295,6 +362,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 control,
                 announcer,
                 mirror,
+                usb,
                 tapClock,
                 windows,
                 plugin,
@@ -308,6 +376,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 advertisesHevc,
                 hevc?.Name ?? "unavailable");
             mirror = null;
+            usb = null;
             tapClock = null;
             windows = null;
             plugin = null;
@@ -322,6 +391,11 @@ public sealed class AirPlayReceiver : IAsyncDisposable
                 {
                     hevcDisposable.Dispose();
                 }
+            }
+
+            if (usb is not null)
+            {
+                await usb.DisposeAsync().ConfigureAwait(false);
             }
 
             if (windows is not null)
@@ -365,6 +439,11 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         }
 
         _control.SessionEstablished -= OnSessionEstablished;
+        if (_usb is not null)
+        {
+            await _usb.DisposeAsync().ConfigureAwait(false);
+        }
+
         if (_windows is not null)
         {
             await _windows.DisposeAsync().ConfigureAwait(false);
@@ -384,6 +463,26 @@ public sealed class AirPlayReceiver : IAsyncDisposable
         }
 
         _identity.Dispose();
+    }
+
+    private static TapClockExportSource[] CombineSources(MirrorRuntime mirror, UsbQtIngress? usb)
+    {
+        var wireless = mirror.ExportSources();
+        if (usb is null)
+        {
+            return wireless;
+        }
+
+        var wired = usb.ExportSources();
+        if (wired.Length == 0)
+        {
+            return wireless;
+        }
+
+        var combined = new TapClockExportSource[wireless.Length + wired.Length];
+        wireless.CopyTo(combined, 0);
+        wired.CopyTo(combined, wireless.Length);
+        return combined;
     }
 
     private void OnSessionEstablished(object? sender, AirPlaySessionEstablishedEventArgs args)
@@ -415,10 +514,10 @@ public sealed class AirPlayReceiver : IAsyncDisposable
     {
         private readonly object _gate = new();
         private readonly List<IMirrorSurface> _open = [];
-        private readonly Dictionary<MirrorPipe, IMirrorSurface> _byPipe = new();
+        private readonly Dictionary<object, IMirrorSurface> _byKey = new();
         private int _disposed;
 
-        public void Add(MirrorPipe pipe, IMirrorSurface? window)
+        public void Add(object key, IMirrorSurface? window)
         {
             if (window is null)
             {
@@ -434,8 +533,24 @@ public sealed class AirPlayReceiver : IAsyncDisposable
             lock (_gate)
             {
                 _open.Add(window);
-                _byPipe[pipe] = window;
+                _byKey[key] = window;
             }
+        }
+
+        public void Close(object key)
+        {
+            IMirrorSurface? window;
+            lock (_gate)
+            {
+                if (!_byKey.Remove(key, out window))
+                {
+                    return;
+                }
+
+                _open.Remove(window);
+            }
+
+            _ = window.DisposeAsync();
         }
 
         public void Rename(MirrorPipe pipe)
@@ -443,7 +558,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
             IMirrorSurface? window;
             lock (_gate)
             {
-                _byPipe.TryGetValue(pipe, out window);
+                _byKey.TryGetValue(pipe, out window);
             }
 
             window?.SetDeviceName(pipe.DeviceName);
@@ -461,7 +576,7 @@ public sealed class AirPlayReceiver : IAsyncDisposable
             {
                 copy = _open.ToArray();
                 _open.Clear();
-                _byPipe.Clear();
+                _byKey.Clear();
             }
 
             foreach (var window in copy)

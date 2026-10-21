@@ -209,6 +209,9 @@ public sealed class MirrorClickEventArgs : EventArgs
 
     public string? SourceIp { get; init; }
 
+    /// <summary><see cref="MirrorIngress.AirPlay"/> or <see cref="MirrorIngress.Usb"/>.</summary>
+    public string Ingress { get; init; } = MirrorIngress.AirPlay;
+
     public required MirrorPointerGesture Gesture { get; init; }
 }
 
@@ -247,6 +250,9 @@ public sealed class MirrorClickBody
 
     [JsonPropertyName("source_ip")]
     public string? SourceIp { get; set; }
+
+    [JsonPropertyName("ingress")]
+    public string Ingress { get; set; } = MirrorIngress.AirPlay;
 
     [JsonPropertyName("button")]
     public string Button { get; set; } = "";

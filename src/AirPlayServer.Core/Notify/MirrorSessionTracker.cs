@@ -38,6 +38,8 @@ public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
     private string? _pendingDeviceName;
     private string? _pendingSourceIp;
     private string _pendingReason = MirrorSessionReasons.DataClosed;
+    private string _ingress = MirrorIngress.AirPlay;
+    private string? _deviceId;
     private int _debounceMs = DefaultDisconnectDebounceMs;
 
     public MirrorSessionTracker()
@@ -69,6 +71,33 @@ public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
         lock (_gate)
         {
             return SnapshotLocked();
+        }
+    }
+
+    /// <summary>
+    /// Records whether this tracker is wireless AirPlay or QuickTime USB, and
+    /// the stable USB serial when there is one. Call this before
+    /// <see cref="BeginData"/>.
+    /// </summary>
+    public void NoteRoute(string ingress, string? deviceId)
+    {
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            if (ingress is MirrorIngress.AirPlay or MirrorIngress.Usb)
+            {
+                _ingress = ingress;
+            }
+
+            var id = SanitizeDevice(deviceId);
+            if (id is not null)
+            {
+                _deviceId = id;
+            }
         }
     }
 
@@ -345,6 +374,8 @@ public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
             DeviceName = device,
             SourceIp = source,
             Reason = reason,
+            Ingress = _ingress,
+            DeviceId = _deviceId,
         };
     }
 
@@ -357,6 +388,8 @@ public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
             DeviceName = _deviceName,
             SourceIp = _sourceIp,
             Reason = reason,
+            Ingress = _ingress,
+            DeviceId = _deviceId,
         };
 
     private MirrorSessionSnapshot SnapshotLocked()
@@ -368,6 +401,8 @@ public sealed class MirrorSessionTracker : IDisposable, IMirrorSessionEvents
             DeviceName = _deviceName,
             SourceIp = _sourceIp,
             DisconnectPending = _debounceCts is not null,
+            Ingress = _ingress,
+            DeviceId = _deviceId,
         };
 
     private void ApplyPeer(IPAddress? address, bool fromDataSocket, bool bindActiveGeneration)
@@ -552,6 +587,12 @@ public sealed class MirrorSessionSnapshot
 
     /// <summary>True after the data socket drops and before the debounce publishes disconnected.</summary>
     public bool DisconnectPending { get; init; }
+
+    /// <summary><see cref="MirrorIngress.AirPlay"/> or <see cref="MirrorIngress.Usb"/>.</summary>
+    public string Ingress { get; init; } = MirrorIngress.AirPlay;
+
+    /// <summary>USB serial when <see cref="Ingress"/> is usb. Null for AirPlay.</summary>
+    public string? DeviceId { get; init; }
 }
 
 public sealed class MirrorSessionEventArgs : EventArgs
@@ -568,4 +609,10 @@ public sealed class MirrorSessionEventArgs : EventArgs
     public string? SourceIp { get; init; }
 
     public required string Reason { get; init; }
+
+    /// <summary><see cref="MirrorIngress.AirPlay"/> or <see cref="MirrorIngress.Usb"/>.</summary>
+    public string Ingress { get; init; } = MirrorIngress.AirPlay;
+
+    /// <summary>USB serial when <see cref="Ingress"/> is usb. Null for AirPlay.</summary>
+    public string? DeviceId { get; init; }
 }

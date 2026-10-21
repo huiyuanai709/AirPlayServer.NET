@@ -133,7 +133,7 @@ internal sealed class TapClockExporter : IAsyncDisposable
                             }
 
                             var jpeg = BaselineJpegEncoder.EncodeBgra(pixels, width, height, stride, _options.JpegQuality);
-                            pending.Add(new PendingJpeg(source.Frames, generation, jpeg, source.Peer));
+                            pending.Add(new PendingJpeg(source.Frames, generation, jpeg, source.Peer, source.FileKey));
                         }
                     }
 
@@ -148,7 +148,7 @@ internal sealed class TapClockExporter : IAsyncDisposable
                     {
                         foreach (var item in pending)
                         {
-                            var attempt = await DeliverAsync(item.Jpeg, socket, item.Peer, cancellationToken).ConfigureAwait(false);
+                            var attempt = await DeliverAsync(item.Jpeg, socket, item.Peer, item.FileKey, cancellationToken).ConfigureAwait(false);
                             socket = attempt.Socket;
                             if (!attempt.Delivered)
                             {
@@ -188,13 +188,13 @@ internal sealed class TapClockExporter : IAsyncDisposable
         }
     }
 
-    private async Task<ExportAttempt> DeliverAsync(byte[] jpeg, Socket? socket, IPAddress? peer, CancellationToken cancellationToken)
+    private async Task<ExportAttempt> DeliverAsync(byte[] jpeg, Socket? socket, IPAddress? peer, string? fileKey, CancellationToken cancellationToken)
     {
         var wantTcp = !string.IsNullOrWhiteSpace(_options.Endpoint);
         var tcpOk = !wantTcp;
         if (wantTcp)
         {
-            socket = await SendJpegAsync(socket, jpeg, peer, cancellationToken).ConfigureAwait(false);
+            socket = await SendJpegAsync(socket, jpeg, peer, fileKey, cancellationToken).ConfigureAwait(false);
             tcpOk = socket is not null;
         }
 
@@ -202,7 +202,7 @@ internal sealed class TapClockExporter : IAsyncDisposable
         var fileOk = !wantFile;
         if (wantFile)
         {
-            var fileName = MirrorExportNames.JpegFileName(peer);
+            var fileName = string.IsNullOrEmpty(fileKey) ? MirrorExportNames.JpegFileName(peer) : MirrorExportNames.JpegFileName(fileKey);
             var fullPath = Path.GetFullPath(Path.Combine(_options.WatchDirectory!, fileName));
             try
             {
@@ -210,7 +210,7 @@ internal sealed class TapClockExporter : IAsyncDisposable
                 fileOk = true;
                 if (_loggedPaths.Add(fullPath))
                 {
-                    var who = peer is null ? "未知 / unknown" : peer.ToString();
+                    var who = !string.IsNullOrEmpty(fileKey) ? fileKey : peer is null ? "未知 / unknown" : peer.ToString();
                     _log.Log(AirPlayLogLevel.Information, "TapClock JPEG 已写入 " + fullPath + "。来源 " + who + "。 TapClock JPEG written to " + fullPath + ". Source " + who + ".");
                 }
             }
@@ -239,7 +239,7 @@ internal sealed class TapClockExporter : IAsyncDisposable
         _log.Log(AirPlayLogLevel.Warning, "TapClock watch file was not published: " + ex.Message);
     }
 
-    private async Task<Socket?> SendJpegAsync(Socket? socket, byte[] jpeg, IPAddress? peer, CancellationToken cancellationToken)
+    private async Task<Socket?> SendJpegAsync(Socket? socket, byte[] jpeg, IPAddress? peer, string? fileKey, CancellationToken cancellationToken)
     {
         if (!TapClockExportOptions.TryParseEndpoint(_options.Endpoint!, out var host, out var port))
         {
@@ -268,7 +268,7 @@ internal sealed class TapClockExporter : IAsyncDisposable
                 sent += count;
             }
 
-            var who = peer is null ? "unknown" : peer.ToString();
+            var who = !string.IsNullOrEmpty(fileKey) ? fileKey : peer is null ? "unknown" : peer.ToString();
             if (_loggedTcpPeers.Add(who))
             {
                 _log.Log(
@@ -436,5 +436,5 @@ internal sealed class TapClockExporter : IAsyncDisposable
 
     private readonly record struct ExportAttempt(bool Delivered, Socket? Socket);
 
-    private readonly record struct PendingJpeg(FrameSlot Frames, long Generation, byte[] Jpeg, IPAddress? Peer);
+    private readonly record struct PendingJpeg(FrameSlot Frames, long Generation, byte[] Jpeg, IPAddress? Peer, string? FileKey);
 }

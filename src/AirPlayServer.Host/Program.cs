@@ -167,6 +167,24 @@ static async Task<int> RunReceiverAsync(HostArgs arguments, CancellationToken ca
             : "最多 " + arguments.Options.MaxMirrors.ToString(CultureInfo.InvariantCulture) + " 路";
         Console.WriteLine("同时镜像: " + mirrorLimit
             + "。每路独立数据端口、会话和窗口。导出文件为 mirror-<来源IP>.jpg。");
+        if (arguments.Options.EnableUsb)
+        {
+            Console.WriteLine(string.IsNullOrWhiteSpace(arguments.Options.UsbUdid)
+                ? "有线镜像: 已开启（QuickTime-over-USB，libusb）。和无线同时收。需要 libusb-1.0。"
+                : "有线镜像: 只收 UDID " + arguments.Options.UsbUdid + "。和无线同时收。需要 libusb-1.0。");
+            if (OperatingSystem.IsWindows())
+            {
+                Console.WriteLine("Windows 驱动: 父设备保持 usbccgp，不要用 Zadig 替换它。libusb-1.0.dll 放在程序旁边。过滤驱动用 windows-usb-driver.ps1，说明见 RUN.txt。");
+            }
+            if (arguments.Options.AllowDualIngress)
+            {
+                Console.WriteLine("同一台手机可以同时走 USB 和 AirPlay（--allow-dual）。");
+            }
+        }
+        else
+        {
+            Console.WriteLine("有线镜像: 未启用。需要时加 --usb。");
+        }
 #if AVALONIA_UI
         var windowLine = "显示: 当前进程没有打开窗口。";
         if (arguments.Options.ShowWindow && !AvaloniaMirrorDisplay.HasOpenedSurface)

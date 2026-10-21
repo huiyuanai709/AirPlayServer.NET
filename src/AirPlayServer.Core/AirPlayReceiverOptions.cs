@@ -56,6 +56,29 @@ public sealed class AirPlayReceiverOptions
 
     public int MaxMirrors { get; set; } = DefaultMaxMirrors;
 
+    /// <summary>
+    /// Watch for iPhones on USB and receive the QuickTime-over-USB screen
+    /// (Valeria FEED / CMSampleBuffer). Off by default, so a headless host
+    /// stays wireless-only. This path is a C# protocol implementation. It does
+    /// not use the Qt widget toolkit, QuickTime.app, or QTKit.
+    /// </summary>
+    public bool EnableUsb { get; set; }
+
+    /// <summary>
+    /// Optional USB serial or UDID filter. Empty accepts every enumerated
+    /// iPhone. A 24-character serial matches the dashed UDID form.
+    /// </summary>
+    public string? UsbUdid { get; set; }
+
+    /// <summary>
+    /// Allow one phone to be mirrored on USB and AirPlay at the same time.
+    /// Off by default. The two paths only look like the same phone when both
+    /// device names are non-empty and equal, ignoring case. Other phones are
+    /// always allowed. USB product strings are often just "iPhone", so a name
+    /// match is uncommon unless the phone reports the same name on both paths.
+    /// </summary>
+    public bool AllowDualIngress { get; set; }
+
     public IAirPlayLog? Log { get; set; }
 
     /// <summary>

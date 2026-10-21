@@ -105,13 +105,14 @@ driver.
 
 libusb is LGPL-2.1-or-later. An operator may place `libusb-1.0.dll`,
 `libusb-1.0.so.0`, or `libusb-1.0.0.dylib` next to the host. This process
-does not absorb libusb into the Native AOT image. `windows-usb-driver.ps1`
-can download the official libusb 1.0.30 user-mode Windows DLL. It does not
-bundle `libusb0.sys`. An optional elevated step runs an operator-supplied
-libusb-win32 `install-filter.exe` as a per-device UpperFilter on an Apple
-`usbccgp` instance. That kernel driver stays the upstream libusb-win32
-package (LGPL) and is not vendored here. The host never rebinds the Apple
-parent to WinUSB.
+does not absorb libusb into the Native AOT image. `windows-usb-setup.cmd`
+runs `windows-usb-driver.ps1 -Setup`, which downloads the official libusb
+1.0.30 user-mode Windows DLL and the official libusb-win32 1.4.0.2 binary
+zip, checks the SHA256 pinned in that script, and runs upstream
+`install-filter.exe` as a per-device UpperFilter on one Apple `usbccgp`
+instance. The kernel driver stays in that upstream package (LGPL) and is
+not vendored here. The temporary zip is deleted after registration. The
+host never rebinds the Apple parent to WinUSB.
 
 ## FFmpeg
 

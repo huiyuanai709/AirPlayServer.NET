@@ -96,7 +96,7 @@ internal static class UsbDriverHint
     public static string LibraryMissing()
         => "libusb-1.0 was not found next to the host or on the system library path. "
            + "Wired mirroring stays off. Wireless AirPlay is unchanged. "
-           + "Windows: copy libusb-1.0.dll beside the host, or run " + ScriptName + " -FetchLibusb -HostDir <folder>. "
+           + "Windows: copy libusb-1.0.dll beside the host, or run " + ScriptName + " -Setup (or -FetchLibusb -HostDir <folder>). "
            + "Linux: libusb-1.0.so.0 (apt install libusb-1.0-0). macOS: libusb-1.0.0.dylib (brew install libusb). "
            + "没有找到 libusb-1.0。有线镜像不启用，无线 AirPlay 不受影响。Windows 把 libusb-1.0.dll 放在程序旁边，或运行 " + ScriptName + " -FetchLibusb。";
 
@@ -108,6 +108,7 @@ internal static class UsbDriverHint
         {
             -12 => "NOT_SUPPORTED. WinUSB cannot change the USB configuration, so it cannot open the QuickTime interface (class 0xFF subclass 0x2A). "
                    + "Keep the Apple parent on usbccgp and install a libusb-win32 UpperFilter on that device instance only. "
+                   + "Run " + ScriptName + " -Setup, or double-click windows-usb-setup.cmd. "
                    + "Do not run Zadig on the Apple composite parent. ",
             -3 => "ACCESS. The device is open in another driver, or this process cannot open it. "
                   + "Leave the Apple parent on usbccgp. Do not run Zadig on the Apple composite parent. "
@@ -193,7 +194,7 @@ internal static class UsbDriverHint
                 lines.Add(
                     "Apple USB parent " + parent.InstanceId + " is " + parent.Service + ", which is the right function driver. "
                     + "libusb still needs a libusb-win32 UpperFilter on this instance before it can switch to the QuickTime configuration. "
-                    + "Do not bind WinUSB to the parent. Run " + ScriptName + " -InstallFilter -FilterZip <official libusb-win32 zip>, then unplug and replug. "
+                    + "Do not bind WinUSB to the parent. Run " + ScriptName + " -Setup, or -InstallFilter -FilterZip <official libusb-win32 zip>, then unplug and replug. "
                     + "父设备驱动正确，但还没有 libusb0 UpperFilter。不要把父设备绑成 WinUSB。");
                 continue;
             }

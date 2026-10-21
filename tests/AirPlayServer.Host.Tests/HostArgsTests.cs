@@ -278,4 +278,34 @@ public class HostArgsTests
             Directory.Delete(directory.FullName, recursive: true);
         }
     }
+
+    [Fact]
+    public void Usb_flags_are_opt_in_and_do_not_name_the_qt_toolkit()
+    {
+        var idle = HostArgs.Parse([]);
+        Assert.False(idle.Options.EnableUsb);
+        Assert.False(idle.Options.AllowDualIngress);
+        Assert.Null(idle.Options.UsbUdid);
+        idle.Options.Validate();
+
+        var usb = HostArgs.Parse(["--usb"]);
+        Assert.True(usb.Options.EnableUsb);
+        Assert.True(string.IsNullOrEmpty(usb.Options.UsbUdid));
+
+        var filtered = HostArgs.Parse(["--usb-udid", "00008110-001A"]);
+        Assert.True(filtered.Options.EnableUsb);
+        Assert.Equal("00008110-001A", filtered.Options.UsbUdid);
+
+        var dual = HostArgs.Parse(["--usb", "--allow-dual"]);
+        Assert.True(dual.Options.AllowDualIngress);
+        dual.Options.Validate();
+
+        Assert.Contains("--usb", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("--usb-udid", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("--allow-dual", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("libusb", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("Zadig", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("不链接 Qt", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Qt Widgets", HostArgs.HelpText, StringComparison.Ordinal);
+    }
 }

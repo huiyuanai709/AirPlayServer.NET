@@ -82,6 +82,31 @@ Copyright (c) AvaloniaUI OÜ and contributors. <https://github.com/AvaloniaUI/Av
 Skia is Copyright (c) Google Inc. (BSD). HarfBuzz is Copyright (c) the HarfBuzz
 contributors.
 
+## QuickTime over USB
+
+The wired screen path is a C# reading of the publicly described QuickTime-over-USB
+(Valeria) framing: length-prefixed PING / SYNC / ASYN, dictionary atoms, and
+CMSampleBuffer `FEED` bytes. It does not link the Qt widget toolkit,
+QuickTime.app, or QTKit. libusb-1.0 is loaded at runtime with
+`NativeLibrary.TryLoad`, the same way FFmpeg is, and is not linked into the
+Native AOT image.
+
+Protocol behavior follows the MIT description and binary fixtures in
+<https://github.com/danielpaulus/quicktime_video_hack>
+(Copyright (c) Daniel Paulus). The fixtures under
+`tests/AirPlayServer.Core.Tests/Fixtures/qt-*.bin` are copies of that
+repository's test vectors (`qt-asyn-feed.bin`, `qt-asyn-hpd1.bin`,
+`qt-asyn-hpa1.bin`, `qt-cvrp-request.bin`, `qt-cwpa-request.bin`,
+`qt-afmt-reply.bin`). No Go source from that tree is vendored.
+Windows enablement notes also consulted the MIT repository
+<https://github.com/chotgpt/quicktime_video_hack_windows>. Driver installers
+and kernel drivers are not included. Do not replace the Apple parent USB
+driver.
+
+libusb is LGPL-2.1-or-later. An operator may place `libusb-1.0.dll`,
+`libusb-1.0.so.0`, or `libusb-1.0.0.dylib` next to the host. This process
+does not absorb libusb into the Native AOT image.
+
 ## FFmpeg
 
 FFmpeg is an optional runtime dependency. The host loads `libavcodec` and

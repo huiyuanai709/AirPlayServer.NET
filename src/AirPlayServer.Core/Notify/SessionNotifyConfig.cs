@@ -256,6 +256,13 @@ public sealed class TapClockEventBody
 
     [JsonPropertyName("source")]
     public string Source { get; set; } = TapClockIntegration.Source;
+
+    /// <summary><c>airplay</c> or <c>usb</c>. <see cref="Source"/> stays the product name TapClock already matches.</summary>
+    [JsonPropertyName("ingress")]
+    public string Ingress { get; set; } = MirrorIngress.AirPlay;
+
+    [JsonPropertyName("device_id")]
+    public string? DeviceId { get; set; }
 }
 
 public sealed class WebhookEventBody
@@ -277,6 +284,13 @@ public sealed class WebhookEventBody
 
     [JsonPropertyName("reason")]
     public string? Reason { get; set; }
+
+    /// <summary><c>airplay</c> or <c>usb</c>.</summary>
+    [JsonPropertyName("ingress")]
+    public string Ingress { get; set; } = MirrorIngress.AirPlay;
+
+    [JsonPropertyName("device_id")]
+    public string? DeviceId { get; set; }
 }
 
 public sealed class MirrorStatusBody
@@ -300,6 +314,13 @@ public sealed class MirrorStatusBody
 
     [JsonPropertyName("disconnect_pending")]
     public bool DisconnectPending { get; set; }
+
+    /// <summary><c>airplay</c> or <c>usb</c>.</summary>
+    [JsonPropertyName("ingress")]
+    public string Ingress { get; set; } = MirrorIngress.AirPlay;
+
+    [JsonPropertyName("device_id")]
+    public string? DeviceId { get; set; }
 
     /// <summary>
     /// Every mirror session. Omitted when the caller only has the primary tracker.

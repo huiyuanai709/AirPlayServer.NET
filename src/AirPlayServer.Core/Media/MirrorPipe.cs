@@ -35,6 +35,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
     private readonly byte[]? _labKey;
     private readonly IAirPlayLog _log;
     private readonly DecodeTimingLog _decodeTiming;
+    private readonly MirrorDevicePolicy? _devicePolicy;
+    private string? _policyKey;
     private readonly MirrorSessionTracker _sessions = new();
     private readonly MirrorDecryptor _decryptor = new();
     private readonly MirrorAudio _audio;
@@ -105,7 +107,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
         IHevcDecoder? hevcDecoder,
         IFairPlaySetup? fairPlay,
         MirrorSessionHub sessionsHub,
-        DecodeTimingMode decodeTiming)
+        DecodeTimingMode decodeTiming,
+        MirrorDevicePolicy? devicePolicy)
     {
         _data = data;
         _timing = timing;
@@ -118,6 +121,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
         _labKey = labKey;
         _log = log;
         _decodeTiming = new DecodeTimingLog(decodeTiming, log);
+        _devicePolicy = devicePolicy;
         FairPlay = fairPlay;
         Activity = new MirrorActivity
         {
@@ -237,7 +241,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
         IHevcDecoder? hevcDecoder,
         IFairPlaySetup? fairPlay,
         MirrorSessionHub sessionsHub,
-        DecodeTimingMode decodeTiming = DecodeTimingMode.Off)
+        DecodeTimingMode decodeTiming = DecodeTimingMode.Off,
+        MirrorDevicePolicy? devicePolicy = null)
     {
         ArgumentNullException.ThrowIfNull(sessionsHub);
         Socket? data = null;
@@ -259,7 +264,8 @@ internal sealed class MirrorPipe : IAsyncDisposable
                 hevcDecoder,
                 fairPlay,
                 sessionsHub,
-                decodeTiming);
+                decodeTiming,
+                devicePolicy);
         }
         catch
         {
@@ -276,6 +282,7 @@ internal sealed class MirrorPipe : IAsyncDisposable
             return;
         }
 
+        _devicePolicy?.ReleaseAirPlay(_policyKey);
         _sessions.Dispose();
         await _audio.DisposeAsync().ConfigureAwait(false);
         await _cancellation.CancelAsync().ConfigureAwait(false);
@@ -555,6 +562,21 @@ internal sealed class MirrorPipe : IAsyncDisposable
         if (Find(root, "eiv") is not PlistData eiv || eiv.Value.Length != 16)
         {
             return Http1Response.Text(400, "SETUP eiv must be 16 bytes.");
+        }
+
+        var announced = Find(root, "name") is PlistString senderName && !string.IsNullOrWhiteSpace(senderName.Value) ? senderName.Value : null;
+        if (_devicePolicy is not null)
+        {
+            var key = ClaimedAddress?.ToString() ?? "airplay";
+            if (!_devicePolicy.TryAdmitAirPlay(key, announced))
+            {
+                _log.Log(
+                    AirPlayLogLevel.Warning,
+                    "这台手机的名字已经在 USB 镜像里，AirPlay 不再开第二路。加上 --allow-dual 才会同时收。 This device name is already mirrored over USB. AirPlay will not open a second session. Pass --allow-dual to receive both.");
+                return Http1Response.Text(503, "This device is already mirrored over USB.");
+            }
+
+            _policyKey = key;
         }
 
         if (Find(root, "timingPort") is PlistInteger timing)

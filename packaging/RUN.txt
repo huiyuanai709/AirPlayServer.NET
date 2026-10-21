@@ -51,7 +51,27 @@ v0.1.14 的更新器只认不带 -ui 的文件名，所以从那一版执行 --u
 多台手机可以同时镜像。默认不限制路数。需要上限时用 --max-mirrors N（正整数，没有硬上限；超过 N 路返回 503）。
 每一路单独窗口、单独 session_id。新手机不会踢掉已经连上的那一路。
 --tapclock-dir 按镜像数据对端 IP 写文件，例如 mirror-192.168.5.20.jpg。
-还没有对端时写 mirror-unknown.jpg。ATBF 头仍然不含来源地址，日志会写 IP。
+还没有对端时写 mirror-unknown.jpg。USB 一路写 mirror-usb-<序列号>.jpg。
+ATBF 头仍然不含来源地址，日志会写 IP 或序列号。
+
+有线画面是可选的，默认关闭：
+  AirPlayServer.Host --usb
+  AirPlayServer.Host --usb-udid <序列号或 UDID>
+  AirPlayServer.Host --usb --allow-dual
+这是 QuickTime-over-USB 协议的 C# 实现，用 libusb，不打开 Qt 窗口，也不依赖 QuickTime.app。
+和无线 AirPlay 同时收。每台 USB 手机单独一路。--max-mirrors 把两种都算上，
+而且启动时的无线监听已经占 1 个名额，所以 --max-mirrors 1 时 USB 开不出来。
+同一台手机在两边设备名相同（忽略大小写）时，默认不再开第二路。--allow-dual 允许两路一起收。
+USB 产品名经常只是 iPhone，和 AirPlay 里的名字不同，所以默认很少拦得住同一台。
+伴音（LPCM）这一版只识别、不播放。
+
+需要 libusb-1.0，放在程序旁边或系统路径里：
+  Windows  libusb-1.0.dll
+  Linux    libusb-1.0.so.0   （apt install libusb-1.0-0）
+  macOS    libusb-1.0.0.dylib
+Windows 请保留 Apple Mobile Device Support。不要用 Zadig 替换 Apple 父设备的驱动。
+libusb 只认领重新枚举出来的 QuickTime 接口。认领失败时这一台不收，无线继续。
+找不到 libusb 时只记日志，无线 AirPlay 照常。
 
 --screen 是 /info 里的广告分辨率，宿主默认 480x1040。
 --model 是 TapClock 点击对齐的竖屏 UIKit 逻辑点（iphone-15-pro 为 393x852），不改广告。

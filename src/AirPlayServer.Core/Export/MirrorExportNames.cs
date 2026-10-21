@@ -17,7 +17,18 @@ public static class MirrorExportNames
             return UnknownFileName;
         }
 
-        return "mirror-" + Sanitize(peer.ToString()) + ".jpg";
+        return JpegFileName(peer.ToString());
+    }
+
+    /// <summary>File name for a non-IP source such as a USB serial. The label is sanitized.</summary>
+    public static string JpegFileName(string label)
+    {
+        if (string.IsNullOrWhiteSpace(label))
+        {
+            return UnknownFileName;
+        }
+
+        return "mirror-" + Sanitize(label) + ".jpg";
     }
 
     /// <summary>

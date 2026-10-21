@@ -32,7 +32,9 @@ internal sealed class MirrorRuntime : IAsyncDisposable
     private readonly int _maxMirrors;
     private readonly Func<MirrorEndpointResources>? _extra;
     private readonly DecodeTimingMode _decodeTiming;
+    private readonly MirrorDevicePolicy? _policy;
     private int _pendingLimit = 8 * 1024 * 1024;
+    private int _usbHeld;
     private int _disposed;
 
     private MirrorRuntime(
@@ -46,7 +48,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         bool acceptHevc,
         int maxMirrors,
         Func<MirrorEndpointResources>? extra,
-        DecodeTimingMode decodeTiming)
+        DecodeTimingMode decodeTiming,
+        MirrorDevicePolicy? policy)
     {
         _primary = primary;
         _hub = hub;
@@ -59,6 +62,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         _maxMirrors = maxMirrors;
         _extra = extra;
         _decodeTiming = decodeTiming;
+        _policy = policy;
         _pipes.Add(primary);
         primary.DeviceNamed += OnDeviceNamed;
     }
@@ -101,7 +105,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
         int maxMirrors = DefaultMaxMirrors,
         Func<MirrorEndpointResources>? extra = null,
         IFairPlaySetup? fairPlay = null,
-        DecodeTimingMode decodeTiming = DecodeTimingMode.Off)
+        DecodeTimingMode decodeTiming = DecodeTimingMode.Off,
+        MirrorDevicePolicy? devicePolicy = null)
     {
         ArgumentNullException.ThrowIfNull(frames);
         ArgumentNullException.ThrowIfNull(decoder);
@@ -128,7 +133,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 hevcDecoder,
                 fairPlay,
                 hub,
-                decodeTiming);
+                decodeTiming,
+                devicePolicy);
             return new MirrorRuntime(
                 primary,
                 hub,
@@ -140,7 +146,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 acceptHevc,
                 maxMirrors,
                 extra,
-                decodeTiming);
+                decodeTiming,
+                devicePolicy);
         }
         catch
         {
@@ -275,7 +282,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 return _primary;
             }
 
-            if (!create || _pipes.Count >= _maxMirrors)
+            if (!create || OverLimitLocked())
             {
                 refused = true;
                 LogLimit(ip);
@@ -300,7 +307,7 @@ internal sealed class MirrorRuntime : IAsyncDisposable
                 abandoned = created;
                 published = _primary;
             }
-            else if (_pipes.Count >= _maxMirrors)
+            else if (OverLimitLocked())
             {
                 abandoned = created;
                 refused = true;
@@ -403,7 +410,8 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             hevc,
             fairPlay,
             _hub,
-            _decodeTiming);
+            _decodeTiming,
+            _policy);
         pipe.PendingEncryptedByteLimit = Volatile.Read(ref _pendingLimit);
         pipe.DeviceNamed += OnDeviceNamed;
         return pipe;
@@ -420,6 +428,33 @@ internal sealed class MirrorRuntime : IAsyncDisposable
             _log.Log(AirPlayLogLevel.Warning, "镜像设备名没有送到窗口: " + ex.Message + " Device name was not applied to the window: " + ex.Message);
         }
     }
+
+    internal bool TryHoldUsb()
+    {
+        lock (_gate)
+        {
+            if (OverLimitLocked())
+            {
+                return false;
+            }
+
+            _usbHeld++;
+            return true;
+        }
+    }
+
+    internal void ReleaseUsb()
+    {
+        lock (_gate)
+        {
+            if (_usbHeld > 0)
+            {
+                _usbHeld--;
+            }
+        }
+    }
+
+    private bool OverLimitLocked() => _pipes.Count + _usbHeld >= _maxMirrors;
 
     private void LogLimit(IPAddress ip)
     {

@@ -40,7 +40,8 @@ internal sealed class HostArgs
           AirPlayServer.Host [--name 名称] [--listen 0.0.0.0] [--airplay-port 7001] [--raop-port 5001]
                              [--screen 480x1040] [--model iphone-15-pro] [--list-models] [--h265]
                              [--decode-timing [sample|every]] [--no-decode-timing]
-                             [--max-mirrors N] [--no-discovery] [--no-window] [--demo-frame]
+                             [--max-mirrors N] [--usb] [--usb-udid 序列号] [--allow-dual]
+                             [--no-discovery] [--no-window] [--demo-frame]
                              [--tapclock 主机:42125] [--tapclock-dir 目录] [--tapclock-fps 2]
                              [--tapclock-events] [--tapclock-base http://127.0.0.1:5088] [--notify-debounce-ms 3000]
                              [--notify-listen 127.0.0.1] [--notify-port 7099] [--notify-config 路径] [--no-notify]
@@ -109,6 +110,23 @@ internal sealed class HostArgs
                          每一路有自己的数据端口、解密、解码、画面和 session_id。
                          新手机不会踢掉已经连上的那一路。同一 IPv4 再次 SETUP 仍算同一路（锁屏重连）。
                          带 -ui 的包在 Windows、macOS 和 Linux 上每一路一个窗口，标题是设备名。精简包不打开窗口。
+                         这个数字同时算无线 AirPlay 和有线 USB。启动时那一路无线监听已经占 1 个名额，
+                         所以 --max-mirrors 1 时 USB 开不出来。要同时收，省略本参数，或把 N 写得够大。
+        --usb            同时收有线画面。这是 Apple QuickTime-over-USB（Valeria）协议的 C# 实现，
+                         用 libusb-1.0 的 P/Invoke，不链接 Qt 控件、QuickTime.app 或 QTKit。
+                         默认关闭，不写就和以前一样只收无线 AirPlay。
+                         把 libusb-1.0 放在程序旁边或系统库路径里（Windows: libusb-1.0.dll，
+                         Linux: libusb-1.0.so.0，macOS: libusb-1.0.0.dylib）。找不到库时只记日志，无线照常。
+                         Windows 上不要用 Zadig 改 Apple 父设备的驱动。Apple Mobile Device Support
+                         要留着。libusb 只能认领重新枚举出来的 QuickTime 接口（类 0xFF 子类 0x2A）。
+                         认领失败时这一台 USB 不收，其他手机和无线不受影响。
+                         每一台 USB 手机单独一路，按序列号区分。画面走现有的 H.264 解码和 FrameSlot。
+                         USB 没有 FairPlay。伴音（ASYN EAT!，LPCM）这一版只识别、不播放。
+        --usb-udid       只收这一台。可以写 40 位 UDID，或 24 位序列号（程序会在第 8 位后补上短横线）。
+                         写了它就等于同时打开 --usb。
+        --allow-dual     允许同一台手机同时走 USB 和 AirPlay。默认不允许：两边的设备名都非空且忽略大小写相等时，
+                         后到的那一路不开。USB 产品名经常只是 "iPhone"，和 AirPlay 里的手机名不同，
+                         所以默认很少拦得住同一台。其他手机始终可以一边有线、一边无线。
         --tapclock-dir   备用：把 JPEG 写进该目录。文件名带来源镜像数据对端的 IP，
                          例如 mirror-192.168.5.20.jpg。IPv6 的冒号会换成短横线。
                          还不知道对端时写 mirror-unknown.jpg。两台手机各写各的文件，互不覆盖。
@@ -253,6 +271,16 @@ internal sealed class HostArgs
                     break;
                 case "--max-mirrors":
                     options.MaxMirrors = int.Parse(Next(args, ref i, token), CultureInfo.InvariantCulture);
+                    break;
+                case "--usb":
+                    options.EnableUsb = true;
+                    break;
+                case "--usb-udid":
+                    options.EnableUsb = true;
+                    options.UsbUdid = Next(args, ref i, token);
+                    break;
+                case "--allow-dual":
+                    options.AllowDualIngress = true;
                     break;
                 case "--demo-frame":
                     options.PublishDemoFrame = true;

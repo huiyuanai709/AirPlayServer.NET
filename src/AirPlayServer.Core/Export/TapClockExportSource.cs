@@ -9,14 +9,18 @@ namespace AirPlayServer.Core.Export;
 /// </summary>
 internal readonly struct TapClockExportSource
 {
-    public TapClockExportSource(FrameSlot frames, IPAddress? peer)
+    public TapClockExportSource(FrameSlot frames, IPAddress? peer, string? fileKey = null)
     {
         ArgumentNullException.ThrowIfNull(frames);
         Frames = frames;
         Peer = peer;
+        FileKey = string.IsNullOrWhiteSpace(fileKey) ? null : fileKey;
     }
 
     public FrameSlot Frames { get; }
 
     public IPAddress? Peer { get; }
+
+    /// <summary>Stable file label when there is no IP, for example <c>usb-&lt;serial&gt;</c>.</summary>
+    public string? FileKey { get; }
 }

@@ -326,6 +326,85 @@ public sealed class UsbQuickTimeTests
     }
 
     [Fact]
+    public void Driver_hint_separates_a_missing_library_from_a_claim_failure()
+    {
+        var missing = UsbDriverHint.LibraryMissing();
+        Assert.Contains("libusb-1.0.dll", missing, StringComparison.Ordinal);
+        Assert.Contains("windows-usb-driver.ps1", missing, StringComparison.Ordinal);
+        Assert.Contains("-FetchLibusb", missing, StringComparison.Ordinal);
+        Assert.DoesNotContain("NOT_SUPPORTED", missing, StringComparison.Ordinal);
+
+        var unsupported = UsbDriverHint.ForLibusb(-12, "set QuickTime USB configuration 4");
+        Assert.Contains("libusb -12", unsupported, StringComparison.Ordinal);
+        Assert.Contains("NOT_SUPPORTED", unsupported, StringComparison.Ordinal);
+        Assert.Contains("usbccgp", unsupported, StringComparison.Ordinal);
+        Assert.Contains("UpperFilter", unsupported, StringComparison.Ordinal);
+        Assert.Contains("Do not run Zadig on the Apple composite parent", unsupported, StringComparison.Ordinal);
+        Assert.Contains("0x2A", unsupported, StringComparison.Ordinal);
+
+        var busy = UsbDriverHint.ForLibusb(-3, "claim QuickTime USB interface 2");
+        Assert.Contains("ACCESS", busy, StringComparison.Ordinal);
+        Assert.Contains("Do not run Zadig on the Apple composite parent", busy, StringComparison.Ordinal);
+        Assert.Contains("libusb -6", UsbDriverHint.ForLibusb(-6, "claim"), StringComparison.Ordinal);
+        Assert.Contains("Trust This Computer", UsbDriverHint.ForLibusb(-5, "open"), StringComparison.Ordinal);
+
+        var replaced = new UsbDriverSnapshot
+        {
+            IsWindows = true,
+            LibraryLoaded = true,
+            LibraryPath = "libusb-1.0.dll",
+            AppleMobileDeviceService = true,
+            Parents =
+            [
+                new UsbParentBinding { InstanceId = "USB\\VID_05AC&PID_12A8\\phone", Service = "WinUSB", Libusb0UpperFilter = false },
+            ],
+        };
+        Assert.True(UsbDriverHint.NeedsAttention(replaced));
+        var replacedText = UsbDriverHint.Readiness(replaced);
+        Assert.Contains("replaces usbccgp", replacedText, StringComparison.Ordinal);
+        Assert.Contains("Do not use Zadig on the Apple composite parent", replacedText, StringComparison.Ordinal);
+
+        var ready = new UsbDriverSnapshot
+        {
+            IsWindows = true,
+            LibraryLoaded = true,
+            AppleMobileDeviceService = true,
+            Parents =
+            [
+                new UsbParentBinding { InstanceId = "USB\\VID_05AC&PID_12A8\\phone", Service = "usbccgp", Libusb0UpperFilter = true },
+            ],
+        };
+        Assert.False(UsbDriverHint.NeedsAttention(ready));
+        Assert.Contains("libusb0 UpperFilter", UsbDriverHint.Readiness(ready), StringComparison.Ordinal);
+
+        var filterMissing = new UsbDriverSnapshot
+        {
+            IsWindows = true,
+            LibraryLoaded = true,
+            AppleMobileDeviceService = true,
+            Parents =
+            [
+                new UsbParentBinding { InstanceId = "USB\\VID_05AC&PID_12A8\\phone", Service = "usbccgp", Libusb0UpperFilter = false },
+            ],
+        };
+        Assert.True(UsbDriverHint.NeedsAttention(filterMissing));
+        Assert.Contains("Do not bind WinUSB to the parent", UsbDriverHint.Readiness(filterMissing), StringComparison.Ordinal);
+        Assert.Contains("-InstallFilter", UsbDriverHint.Readiness(filterMissing), StringComparison.Ordinal);
+
+        var linux = UsbDriverHint.Readiness(new UsbDriverSnapshot { LibraryLoaded = true, LibraryPath = "libusb-1.0.so.0" });
+        Assert.Contains("No extra USB driver", linux, StringComparison.Ordinal);
+        Assert.DoesNotContain("Zadig", linux, StringComparison.Ordinal);
+
+        var script = File.ReadAllText(FindRepoFile("packaging", "windows-usb-driver.ps1"));
+        Assert.Contains("usbccgp", script, StringComparison.Ordinal);
+        Assert.Contains("Do not run Zadig", script, StringComparison.Ordinal);
+        Assert.Contains("does not download libusb0.sys", script, StringComparison.Ordinal);
+        Assert.Contains("--device=", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("--all-classes", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("--device-classes", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Libusb_catalog_loads_without_a_phone()
     {
         var log = new ListLog();
@@ -338,6 +417,23 @@ public sealed class UsbQuickTimeTests
         var phones = catalog.List();
         Assert.NotNull(phones);
         Assert.Contains("libusb", log.Text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string FindRepoFile(string directory, string name)
+    {
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        while (current is not null)
+        {
+            var candidate = Path.Combine(current.FullName, directory, name);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+
+            current = current.Parent;
+        }
+
+        throw new FileNotFoundException(name);
     }
 
     private static byte[] Read(string name)

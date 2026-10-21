@@ -155,6 +155,21 @@ write_publish "$tmp/win" "AirPlayServer.Host.exe"
 chmod 777 "$tmp/win/AirPlayServer.Host.exe" "$tmp/win/SomeNative.dll" "$tmp/win/libsomething.so" || true
 "$stage" win-x64 v0.0.0-test "$tmp/win" "$tmp/win.zip"
 expect_zip "$tmp/win.zip" win-x64 "AirPlayServer.Host.exe" 0
+"$py" - "$tmp/win.zip" "$tmp/linux.zip" <<'PY'
+import sys
+import zipfile
+
+win, linux = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(win) as archive:
+    text = archive.read("AirPlayServer.Host-v0.0.0-test-win-x64/windows-usb-driver.ps1").decode()
+if "usbccgp" not in text or "Do not run Zadig" not in text or "does not download libusb0.sys" not in text:
+    sys.exit("windows helper is missing the driver rules")
+if "--all-classes" in text or "--device-classes" in text:
+    sys.exit("windows helper must not offer a class filter")
+with zipfile.ZipFile(linux) as archive:
+    if any(name.endswith("/windows-usb-driver.ps1") for name in archive.namelist()):
+        sys.exit("linux zip must not carry the windows helper")
+PY
 
 "$py" - "$tmp/linux.zip" "$tmp/win.zip" <<'PY'
 import sys

@@ -170,8 +170,12 @@ static async Task<int> RunReceiverAsync(HostArgs arguments, CancellationToken ca
         if (arguments.Options.EnableUsb)
         {
             Console.WriteLine(string.IsNullOrWhiteSpace(arguments.Options.UsbUdid)
-                ? "有线镜像: 已开启（QuickTime-over-USB，libusb）。和无线同时收。需要 libusb-1.0。Windows 不要用 Zadig 改 Apple 父设备。"
+                ? "有线镜像: 已开启（QuickTime-over-USB，libusb）。和无线同时收。需要 libusb-1.0。"
                 : "有线镜像: 只收 UDID " + arguments.Options.UsbUdid + "。和无线同时收。需要 libusb-1.0。");
+            if (OperatingSystem.IsWindows())
+            {
+                Console.WriteLine("Windows 驱动: 父设备保持 usbccgp，不要用 Zadig 替换它。libusb-1.0.dll 放在程序旁边。过滤驱动用 windows-usb-driver.ps1，说明见 RUN.txt。");
+            }
             if (arguments.Options.AllowDualIngress)
             {
                 Console.WriteLine("同一台手机可以同时走 USB 和 AirPlay（--allow-dual）。");

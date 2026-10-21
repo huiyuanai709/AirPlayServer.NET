@@ -29,6 +29,8 @@ To stage a zip locally after a publish, without creating a release:
 
 A normal start does not check GitHub Releases. `--update` or `--check-update` checks, and when `VERSION.txt` is older than the latest stable tag, replaces this zip's layout in place and restarts. If the install is already current, those flags exit without starting the receiver. The updater refuses debug-symbol names, so a release zip still must not contain `.pdb` or `.dbg`. `--no-update` is accepted and stays the default (不检查更新；用 --update 手动更新). `--auto-update` checks on that start; a failed check, rate limit, or network error is logged and the current binary still starts. See the README section on updates.
 
+The win-x64 zip also contains `windows-usb-driver.ps1`. It checks the Apple USB parent, can download the user-mode `libusb-1.0.dll`, and can run an operator-supplied libusb-win32 device filter. It does not bundle `libusb0.sys` and it does not rebind the Apple parent with Zadig. See `docs/usb-windows.md`.
+
 FFmpeg is not published in the zip and is not linked into the Native AOT binary. Operators who want Linux H.264, or HEVC without the Windows Media Foundation HEVC transform, copy `libavcodec` / `libavutil` / `libswresample` next to the binary (or install them on the system path). `--h265` advertises Features bit 42 only after a decoder opens. Placement and the LGPL/GPL note are in `RUN.txt` and the README.
 
 `resolve-release-version.sh` is what the workflow uses to turn a tag or a dispatch input into `vMAJOR.MINOR.PATCH`. A dispatch input of `0.1.0` becomes tag `v0.1.0`. See the README section on cutting a release.

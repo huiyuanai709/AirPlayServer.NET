@@ -46,11 +46,11 @@ Several phones can mirror at once. There is no default cap. `--max-mirrors N` (a
 
 导出目录里，USB 文件名是 `mirror-usb-<序列号>.jpg`。通知 JSON 增加 `ingress`：`airplay` 或 `usb`。TapClock 原来的 `source` 仍是 `AirPlayServer.NET`，不要改成 `usb`。USB 另有 `device_id`（序列号）；`source_ip` 为空。点击事件同样带 `ingress`。
 
-Windows：保留 Apple Mobile Device Support。不要用 Zadig 替换 Apple 父设备的驱动。libusb 只认领重新枚举出来的 QuickTime 接口。认领失败时这一台不收，日志会写明，无线和其他手机继续。把 `libusb-1.0.dll` 放在程序旁边。Linux 用系统的 `libusb-1.0.so.0`（`apt install libusb-1.0-0`）。macOS 用 `libusb-1.0.0.dylib`（Homebrew 的 libusb）。没有设备或认领失败时，协议单元测试仍然可以跑；CI 不要求插着手机。
+Windows 的做法和 iPhoneMirror 的驱动分工同一类，但安装器是这里自己写的，不附带内核驱动：父设备保持 `usbccgp`（Apple Mobile Device Support，或 Microsoft Store 的 Apple Devices）。不要用 Zadig 替换 Apple 复合父设备。WinUSB 不能 `SET_CONFIGURATION`，所以 QuickTime 切换要靠 libusb-win32 装在**这一台设备实例**上的 UpperFilter，而不是换掉父驱动。程序只认领重新枚举出来的 QuickTime 接口（类 `0xFF` 子类 `0x2A`）。认领失败时日志会写出 libusb 错误码和下一步，无线和其他手机继续。把 `libusb-1.0.dll` 放在程序旁边。win-x64 发布包里的 `windows-usb-driver.ps1` 可以检查状态、下载用户态 DLL，或调用你准备的官方 `install-filter.exe`。完整步骤见 [docs/usb-windows.md](docs/usb-windows.md)。Linux 用系统的 `libusb-1.0.so.0`（`apt install libusb-1.0-0`）。macOS 用 `libusb-1.0.0.dylib`（Homebrew 的 libusb）。没有设备或认领失败时，协议单元测试仍然可以跑；CI 不要求插着手机。
 
 ASYN `EAT!`（LPCM 伴音）会记一条日志，然后丢掉。画面继续。播放留到后面的版本。
 
-`--usb` receives the QuickTime-over-USB screen in pure C# through libusb. It is off unless requested, runs beside wireless AirPlay, and gives each USB phone its own decoder and session. `--max-mirrors` counts both, including the always-on AirPlay listener, so `1` leaves no room for USB. `--allow-dual` permits the same device name on both paths. TapClock `source` stays `AirPlayServer.NET`; `ingress` is `airplay` or `usb`. Do not replace the Apple parent driver with Zadig. USB audio is recognized and not played.
+`--usb` receives the QuickTime-over-USB screen in pure C# through libusb. It is off unless requested, runs beside wireless AirPlay, and gives each USB phone its own decoder and session. `--max-mirrors` counts both, including the always-on AirPlay listener, so `1` leaves no room for USB. `--allow-dual` permits the same device name on both paths. TapClock `source` stays `AirPlayServer.NET`; `ingress` is `airplay` or `usb`. On Windows the Apple parent stays `usbccgp`; a libusb-win32 UpperFilter is added to that instance only, because WinUSB cannot `SET_CONFIGURATION`. Do not run Zadig on the Apple composite parent. `windows-usb-driver.ps1` and [docs/usb-windows.md](docs/usb-windows.md) are the install notes. The repository does not bundle `libusb0.sys`. USB audio is recognized and not played.
 
 ## 镜像连接通知
 

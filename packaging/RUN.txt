@@ -69,9 +69,19 @@ USB 产品名经常只是 iPhone，和 AirPlay 里的名字不同，所以默认
   Windows  libusb-1.0.dll
   Linux    libusb-1.0.so.0   （apt install libusb-1.0-0）
   macOS    libusb-1.0.0.dylib
-Windows 请保留 Apple Mobile Device Support。不要用 Zadig 替换 Apple 父设备的驱动。
-libusb 只认领重新枚举出来的 QuickTime 接口。认领失败时这一台不收，无线继续。
-找不到 libusb 时只记日志，无线 AirPlay 照常。
+找不到 libusb 时只记日志，无线 AirPlay 照常。缺库和认领失败是两条不同的日志。
+
+Windows 驱动（win-x64 包里有 windows-usb-driver.ps1）：
+  父设备保持 usbccgp。安装 Apple Devices（Microsoft Store）或 Apple Mobile Device Support。
+  不要用 Zadig 把 Apple 复合父设备换成 WinUSB 或 libusbK。WinUSB 不能切换 USB 配置。
+  只给这一台手机的父设备实例装 libusb-win32 UpperFilter。本包不附带 libusb0.sys。
+  检查：  powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -Check
+  用户态 DLL：powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -FetchLibusb -HostDir .
+  过滤驱动（管理员，zip 是你自己下载的官方 libusb-win32）：
+    powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -InstallFilter -FilterZip C:\path\libusb-win32-bin.zip
+  装完重新插拔，解锁并信任这台电脑，再加 --usb。
+  libusb -12 表示配置切换不被当前驱动允许。-3 / -6 表示设备忙。-4 / -5 表示手机不在线上。
+  源码说明：docs/usb-windows.md。
 
 --screen 是 /info 里的广告分辨率，宿主默认 480x1040。
 --model 是 TapClock 点击对齐的竖屏 UIKit 逻辑点（iphone-15-pro 为 393x852），不改广告。

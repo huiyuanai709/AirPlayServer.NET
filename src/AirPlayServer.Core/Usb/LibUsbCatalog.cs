@@ -24,15 +24,17 @@ internal static class LibUsbCatalog
 
         if (!LibUsbNative.TryLoad(out var api, out var library) || api is null)
         {
-            log.Log(
-                AirPlayLogLevel.Warning,
-                "没有找到 libusb-1.0。有线镜像不启用，无线 AirPlay 不受影响。把 libusb-1.0 放在程序旁边或系统路径里。"
-                + " libusb-1.0 was not found. Wired mirroring stays off. Wireless AirPlay is unchanged. Place libusb-1.0 next to the host or on the system library path.");
+            log.Log(AirPlayLogLevel.Warning, UsbDriverHint.LibraryMissing());
+            log.Log(AirPlayLogLevel.Warning, UsbDriverHint.Readiness(UsbDriverProbe.Capture(libraryLoaded: false, libraryPath: null)));
             return false;
         }
 
         catalog = new Catalog(api, log);
         log.Log(AirPlayLogLevel.Information, "已加载 " + library + "，用来接收有线画面。 Loaded " + library + " for wired screen receive.");
+        var readiness = UsbDriverProbe.Capture(libraryLoaded: true, library);
+        log.Log(
+            UsbDriverHint.NeedsAttention(readiness) ? AirPlayLogLevel.Warning : AirPlayLogLevel.Information,
+            UsbDriverHint.Readiness(readiness));
         return true;
     }
 
@@ -167,11 +169,14 @@ internal static class LibUsbCatalog
                 if (quickTime < 0)
                 {
                     var rc = _api.Control(handle, 0x40, 0x52, 0, 2, 1000);
+                    var level = rc < 0 ? AirPlayLogLevel.Warning : AirPlayLogLevel.Information;
+                    var detail = rc < 0 ? " " + UsbDriverHint.ForLibusb(rc, "QuickTime configuration request") : "";
                     _log.Log(
-                        AirPlayLogLevel.Information,
+                        level,
                         "已向 " + phone.Id + " 发送 QuickTime USB 配置请求（控制传输 0x40/0x52，返回 " + rc
                         + "）。手机可能会重新枚举。 Sent the QuickTime USB configuration request to " + phone.Id
-                        + " (control transfer 0x40/0x52, result " + rc + "). The phone may re-enumerate.");
+                        + " (control transfer 0x40/0x52, result " + rc + "). The phone may re-enumerate."
+                        + detail);
                     _api.Close(handle);
                     _api.Exit(ctx);
                     if (!Sleep(cancellationToken))
@@ -614,20 +619,26 @@ internal sealed class LibUsbNative
         inbound = 0;
         outbound = 0;
         error = "";
-        SetConfiguration(handle, quickTimeValue);
+        if (_detach != 0)
+        {
+            unsafe
+            {
+                ((delegate* unmanaged[Cdecl]<nint, int, int>)_detach)(handle, 1);
+            }
+        }
+
+        var configured = SetConfiguration(handle, quickTimeValue);
+        if (configured != 0)
+        {
+            error = UsbDriverHint.ForLibusb(configured, "set QuickTime USB configuration " + quickTimeValue);
+            return false;
+        }
+
         for (var index = 0; index < configurations; index++)
         {
             if (!TryConfig(device, index, out var value, out _, out var quickTime, out iface, out inbound, out outbound) || !quickTime || value != quickTimeValue)
             {
                 continue;
-            }
-
-            if (_detach != 0)
-            {
-                unsafe
-                {
-                    ((delegate* unmanaged[Cdecl]<nint, int, int>)_detach)(handle, 1);
-                }
             }
 
             int rc;
@@ -638,10 +649,7 @@ internal sealed class LibUsbNative
 
             if (rc != 0)
             {
-                error = "认领 QuickTime USB 接口 " + iface + " 失败（libusb " + rc
-                    + "）。Windows 上 Apple Mobile Device 驱动占用着设备时，libusb 打不开这一接口。不要用 Zadig 改父设备。无线 AirPlay 仍可用。"
-                    + " Claiming QuickTime USB interface " + iface + " failed (libusb " + rc
-                    + "). On Windows the Apple Mobile Device driver owns the device, so libusb cannot claim this interface. Do not bind the parent device with Zadig. Wireless AirPlay still works.";
+                error = UsbDriverHint.ForLibusb(rc, "claim QuickTime USB interface " + iface);
                 return false;
             }
 

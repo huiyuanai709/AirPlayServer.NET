@@ -305,6 +305,8 @@ public class HostArgsTests
         Assert.Contains("--allow-dual", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("libusb", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("Zadig", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("windows-usb-driver.ps1", HostArgs.HelpText, StringComparison.Ordinal);
+        Assert.Contains("usbccgp", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.Contains("不链接 Qt", HostArgs.HelpText, StringComparison.Ordinal);
         Assert.DoesNotContain("Qt Widgets", HostArgs.HelpText, StringComparison.Ordinal);
     }

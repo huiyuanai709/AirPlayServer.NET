@@ -120,6 +120,11 @@ internal sealed class HostArgs
                          Windows 上不要用 Zadig 改 Apple 父设备的驱动。Apple Mobile Device Support
                          要留着。libusb 只能认领重新枚举出来的 QuickTime 接口（类 0xFF 子类 0x2A）。
                          认领失败时这一台 USB 不收，其他手机和无线不受影响。
+                         日志会区分「没有 libusb-1.0.dll」和「认领失败（libusb -12/-3/-6/-4）」。
+                         Windows 父设备保持 usbccgp。不要用 Zadig 替换它。WinUSB 不能切换 USB 配置，
+                         所以要给这一台设备装 libusb-win32 UpperFilter。win-x64 包里的
+                         windows-usb-driver.ps1 负责检查、放置用户态 DLL，或调用你准备的 install-filter.exe。
+                         说明见 docs/usb-windows.md。本程序不附带 libusb0.sys，也不下载 Apple 安装包。
                          每一台 USB 手机单独一路，按序列号区分。画面走现有的 H.264 解码和 FrameSlot。
                          USB 没有 FairPlay。伴音（ASYN EAT!，LPCM）这一版只识别、不播放。
         --usb-udid       只收这一台。可以写 40 位 UDID，或 24 位序列号（程序会在第 8 位后补上短横线）。

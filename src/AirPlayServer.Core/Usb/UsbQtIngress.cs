@@ -233,12 +233,16 @@ internal sealed class UsbQtIngress : IAsyncDisposable
         UsbPcmPlayer? player = null;
         long generation = 0;
         var opened = false;
+        var reads = 0;
+        var videoFrames = 0;
+        var warnedSilent = false;
+        var loggedRead = false;
+        var openedAt = 0L;
         try
         {
             channel = _catalog.TryOpen(phone, _cancellation.Token);
             if (channel is null || _cancellation.IsCancellationRequested)
             {
-                Cool(phone.Id);
                 return;
             }
 
@@ -263,17 +267,21 @@ internal sealed class UsbQtIngress : IAsyncDisposable
             var framer = new QtReassembler();
             var buffer = new byte[256 * 1024];
             var lastNeed = Environment.TickCount64;
+            openedAt = lastNeed;
             player = new UsbPcmPlayer(_log);
+            _log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.Waiting(session.Id));
             while (!_cancellation.IsCancellationRequested)
             {
                 var count = channel.Read(buffer, 1000);
                 if (count < 0)
                 {
+                    _log.Log(AirPlayLogLevel.Warning, UsbQtOpenPolicy.ReadFailed(session.Id, count, reads));
                     break;
                 }
 
                 if (count == 0)
                 {
+                    WarnIfSilent();
                     var need = qt.NeedPacket;
                     if (!need.IsEmpty && Environment.TickCount64 - lastNeed > 5000)
                     {
@@ -282,6 +290,13 @@ internal sealed class UsbQtIngress : IAsyncDisposable
                     }
 
                     continue;
+                }
+
+                reads++;
+                if (!loggedRead)
+                {
+                    loggedRead = true;
+                    _log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.FirstRead(session.Id, count, UsbQtOpenPolicy.HexPreview(buffer.AsSpan(0, count))));
                 }
 
                 var localSession = session;
@@ -302,7 +317,10 @@ internal sealed class UsbQtIngress : IAsyncDisposable
                             generation = localSession.Sessions.BeginData();
                         }
 
-                        localSession.Feed.Submit(video);
+                        if (localSession.Feed.Submit(video))
+                        {
+                            videoFrames++;
+                        }
                     }
 
                     if (step.Pcm is { } pcm)
@@ -315,6 +333,8 @@ internal sealed class UsbQtIngress : IAsyncDisposable
                             AirPlayLogLevel.Information,
                             "USB 伴音包不是可播放的 LPCM，这一包丢掉，画面继续。 This USB audio packet is not playable LPCM and was dropped. Video continues.");
                     }
+
+                    WarnIfSilent();
                 });
             }
 
@@ -380,7 +400,23 @@ internal sealed class UsbQtIngress : IAsyncDisposable
 
             _policy.ReleaseUsb(phone.Id);
             _mirror.ReleaseUsb();
+            if (Volatile.Read(ref _stopping) == 0)
+            {
+                Cool(phone.Id, reads > 0 ? 1500 : 4000);
+            }
+
             _liveRemove(phone.Id);
+        }
+
+        void WarnIfSilent()
+        {
+            if (warnedSilent || !UsbQtOpenPolicy.ShouldWarnSilent(videoFrames, openedAt, Environment.TickCount64))
+            {
+                return;
+            }
+
+            warnedSilent = true;
+            _log.Log(AirPlayLogLevel.Warning, UsbQtOpenPolicy.Silent(session!.Id, reads));
         }
     }
 
@@ -416,11 +452,11 @@ internal sealed class UsbQtIngress : IAsyncDisposable
         }
     }
 
-    private void Cool(string id)
+    private void Cool(string id, int milliseconds)
     {
         lock (_gate)
         {
-            _cooldown[id] = Environment.TickCount64 + 5000;
+            _cooldown[id] = Environment.TickCount64 + milliseconds;
         }
     }
 

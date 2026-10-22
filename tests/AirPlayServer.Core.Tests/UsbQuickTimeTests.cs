@@ -666,6 +666,139 @@ public sealed class UsbQuickTimeTests
         Assert.Contains("not a fixed configuration number", chosen, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void One_libusb0_node_keeps_a_single_id_across_a_missing_serial()
+    {
+        var nodes = new UsbNodeIdentity();
+        var node = @"\\.\libusb0-0001--0x05ac-0x12a8";
+        var serial = "00008130-000869403AE8001C";
+
+        var unnamed = nodes.IdFor(node, "");
+        Assert.Equal(UsbNodeIdentity.Fallback(node), unnamed);
+        Assert.Equal(unnamed, nodes.IdFor(node, serial));
+        Assert.Equal(unnamed, nodes.IdFor(node, ""));
+        Assert.DoesNotContain("usb-05ac-12a8", unnamed, StringComparison.Ordinal);
+
+        nodes.Lock(node);
+        nodes.NoteSweep([], now: 0);
+        nodes.NoteSweep([], now: 60_000);
+        Assert.True(nodes.IsLocked(node));
+        Assert.Equal(unnamed, nodes.IdFor(node, serial));
+        nodes.Unlock(node);
+
+        nodes.NoteSweep([], now: 0);
+        nodes.NoteSweep([], now: UsbQtOpenPolicy.AbsentResetMs);
+        Assert.Equal(serial, nodes.IdFor(node, serial));
+        Assert.Equal(serial, nodes.IdFor(node, ""));
+
+        var other = @"\\.\libusb0-0002--0x05ac-0x12a8";
+        Assert.Equal(UsbNodeIdentity.Fallback(other), nodes.IdFor(other, ""));
+        Assert.Equal(serial, nodes.IdFor(node, ""));
+    }
+
+    [Fact]
+    public void QuickTime_enable_is_not_repeated_and_a_black_window_is_named()
+    {
+        Assert.False(UsbQtOpenPolicy.ShouldSendEnable(configsComplete: false, quickTime: -1));
+        Assert.False(UsbQtOpenPolicy.ShouldSendEnable(configsComplete: true, quickTime: 5));
+        Assert.True(UsbQtOpenPolicy.ShouldSendEnable(configsComplete: true, quickTime: -1));
+        Assert.False(UsbQtOpenPolicy.ShouldWarnSilent(videoFrames: 1, openedAt: 0, now: UsbQtOpenPolicy.SilentWarnMs));
+        Assert.True(UsbQtOpenPolicy.ShouldWarnSilent(videoFrames: 0, openedAt: 0, now: UsbQtOpenPolicy.SilentWarnMs));
+        Assert.False(UsbQtOpenPolicy.ShouldWarnSilent(videoFrames: 0, openedAt: 0, now: UsbQtOpenPolicy.SilentWarnMs - 1));
+
+        var nodes = new UsbNodeIdentity();
+        var node = @"\\.\libusb0-0001--0x05ac-0x12a8";
+        Assert.Equal("00008130-000869403AE8001C", nodes.IdFor(node, "00008130-000869403AE8001C"));
+        Assert.False(nodes.TryMarkEnable(node, configsComplete: false, quickTime: -1, now: 0));
+        Assert.True(nodes.TryMarkEnable(node, configsComplete: true, quickTime: -1, now: 0));
+        Assert.False(nodes.TryMarkEnable(node, configsComplete: true, quickTime: -1, now: UsbQtOpenPolicy.EnableCooldownMs - 1));
+
+        nodes.NoteSweep([], now: 100);
+        nodes.NoteSweep([], now: 100 + UsbQtOpenPolicy.AbsentResetMs);
+        Assert.True(nodes.TryMarkEnable(node, configsComplete: true, quickTime: -1, now: 200));
+
+        var incomplete = UsbQtOpenPolicy.Incomplete(node);
+        Assert.Contains("0x40/0x52", incomplete, StringComparison.Ordinal);
+        Assert.DoesNotContain("Trust This Computer", incomplete, StringComparison.Ordinal);
+        var seen = UsbDriverHint.FilterSeenNotClaimed(node);
+        Assert.Contains("No 0x40/0x52", seen, StringComparison.Ordinal);
+        Assert.DoesNotContain("Trust This Computer", seen, StringComparison.Ordinal);
+
+        var silent = UsbQtOpenPolicy.Silent("00008130-000869403AE8001C", 0);
+        Assert.Contains("window stays black", silent, StringComparison.Ordinal);
+        Assert.Contains("not a failed open", silent, StringComparison.Ordinal);
+        var failed = UsbQtOpenPolicy.ReadFailed("00008130-000869403AE8001C", -5, 2);
+        Assert.Contains("failed (-5)", failed, StringComparison.Ordinal);
+        Assert.Contains("successful open", failed, StringComparison.Ordinal);
+        Assert.Equal("1000", UsbQtOpenPolicy.HexPreview([0x10, 0x00]));
+    }
+
+    [Fact]
+    public async Task Opened_usb_mirror_logs_the_first_read_and_a_later_read_error()
+    {
+        var log = new ListLog();
+        var policy = new MirrorDevicePolicy(allowSameDevice: true);
+        await using var mirror = MirrorRuntime.Start(
+            IPAddress.Loopback,
+            40111,
+            new FrameSlot(),
+            new RecordingDecoder(),
+            null,
+            ReadOnlySpan<byte>.Empty,
+            log,
+            devicePolicy: policy);
+        var phone = new UsbPhone { Id = "00008130-000869403AE8001C", Product = "iPhone", Node = @"\\.\libusb0-0001--0x05ac-0x12a8" };
+        var channel = new BurstChannel(phone.Id, [0x10, 0x00, 0x00, 0x00], -5);
+        var catalog = new ScriptCatalog([phone], _ => channel);
+        await using var usb = UsbQtIngress.Start(
+            mirror,
+            mirror.SessionEvents,
+            policy,
+            catalog,
+            () => new UsbMirrorResources { Frames = new FrameSlot(), Decoder = new RecordingDecoder() },
+            1179,
+            2556,
+            null,
+            log);
+
+        Assert.True(await WaitUntilAsync(() => log.Text.Contains("failed (-5)", StringComparison.Ordinal)));
+        var text = log.Text;
+        Assert.Contains("USB mirror opened", text, StringComparison.Ordinal);
+        Assert.Contains("waiting for the phone's first QuickTime packet", text, StringComparison.Ordinal);
+        Assert.Contains("received 4 bytes (10000000)", text, StringComparison.Ordinal);
+        Assert.Contains("failed (-5)", text, StringComparison.Ordinal);
+        Assert.Contains("successful open", text, StringComparison.Ordinal);
+    }
+
+    private sealed class BurstChannel(string id, byte[] payload, int after) : IUsbBulkChannel
+    {
+        private int _sent;
+
+        public string Id { get; } = id;
+
+        public string? Product => "iPhone";
+
+        public int Read(Span<byte> buffer, int timeoutMs)
+        {
+            if (_sent == 0)
+            {
+                payload.CopyTo(buffer);
+                _sent = payload.Length;
+                return payload.Length;
+            }
+
+            return after;
+        }
+
+        public void Write(ReadOnlySpan<byte> data)
+        {
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+
     private static byte[] VendorConfig(byte value, byte iface, byte klass, byte sub, byte proto, byte outbound, byte inbound)
     {
         var endpoints = (byte)((outbound == 0 ? 0 : 1) + (inbound == 0 ? 0 : 1));

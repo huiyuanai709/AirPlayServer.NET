@@ -651,7 +651,8 @@ public sealed class UsbQuickTimeTests
         Assert.Equal(0x86, screen.Inbound);
         Assert.Equal(0x05, screen.Outbound);
 
-        UsbDescriptorMap.Classify([config5, config4, muxOnly], out var mux, out var qt, out var iface, out var inbound, out var outbound);
+        UsbDescriptorMap.Classify([config5, config4, muxOnly], out var mux, out var qt, out var iface, out var alternate, out var inbound, out var outbound);
+        Assert.Equal(0, alternate);
         Assert.Equal(1, mux);
         Assert.Equal(5, qt);
         Assert.Equal(2, iface);
@@ -734,34 +735,71 @@ public sealed class UsbQuickTimeTests
     }
 
     [Fact]
-    public void Already_active_quicktime_config_still_selects_pipes_and_retries_bulk_eio()
+    public void QuickTime_phone_speaks_first_and_the_screen_pair_is_the_larger_packet()
     {
+        var ping = QtPackets.Ping();
+        Assert.Equal(
+            new byte[] { 0x10, 0x00, 0x00, 0x00, 0x67, 0x6E, 0x69, 0x70, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00 },
+            ping);
+
+        Assert.False(UsbQtOpenPolicy.ShouldKickHandshake(payloadReads: 0, alreadyKicked: false, quietMs: UsbQtOpenPolicy.HandshakeQuietMs - 1));
+        Assert.True(UsbQtOpenPolicy.ShouldKickHandshake(payloadReads: 0, alreadyKicked: false, quietMs: UsbQtOpenPolicy.HandshakeQuietMs));
+        Assert.False(UsbQtOpenPolicy.ShouldKickHandshake(payloadReads: 1, alreadyKicked: false, quietMs: 5_000));
+        Assert.False(UsbQtOpenPolicy.ShouldKickHandshake(payloadReads: 0, alreadyKicked: true, quietMs: 5_000));
+        Assert.True(UsbQtOpenPolicy.ShouldSendHandshakeControl(enabledThisSession: true));
+        Assert.False(UsbQtOpenPolicy.ShouldSendHandshakeControl(enabledThisSession: false));
+        Assert.Equal(0x40, UsbQtOpenPolicy.HandshakeRequest);
+        Assert.Equal(0x6400, UsbQtOpenPolicy.HandshakeValue);
+        Assert.Equal(0x6400, UsbQtOpenPolicy.HandshakeIndex);
+        Assert.True(UsbQtOpenPolicy.ClaimNeedsPipeTable(-22));
+        Assert.False(UsbQtOpenPolicy.ClaimNeedsPipeTable(0));
+        Assert.False(UsbQtOpenPolicy.ClaimNeedsPipeTable(-5));
+
         var node = @"\\.\libusb0-0001--0x05ac-0x12a8";
-        var active = UsbQtOpenPolicy.AlreadyActive(5, node, 0);
-        Assert.Contains("usb_set_configuration returned 0", active, StringComparison.Ordinal);
-        Assert.Contains("No 0x40/0x52", active, StringComparison.Ordinal);
-        Assert.DoesNotContain("Trust This Computer", active, StringComparison.Ordinal);
-
-        var alt = UsbQtOpenPolicy.AltSelected(2, 0);
-        Assert.Contains("SELECT_INTERFACE", alt, StringComparison.Ordinal);
-        var missing = UsbQtOpenPolicy.AltSelected(2, UsbQtOpenPolicy.MissingAltExport);
-        Assert.Contains("usb_set_altinterface", missing, StringComparison.Ordinal);
-
-        var ping = UsbQtOpenPolicy.HostPing(0x05, 16);
-        Assert.Contains("OUT 0x05", ping, StringComparison.Ordinal);
-        Assert.Contains("not 0x40/0x52", ping, StringComparison.Ordinal);
-        Assert.True(UsbQtOpenPolicy.PingWriteOk(16));
-        Assert.False(UsbQtOpenPolicy.PingWriteOk(-5));
+        var observed = UsbQtOpenPolicy.ConfigurationObserved(-5, 5, node);
+        Assert.Contains("GET_CONFIGURATION", observed, StringComparison.Ordinal);
+        Assert.Contains("returned -5", observed, StringComparison.Ordinal);
+        var claimed = UsbQtOpenPolicy.ClaimedWithoutSetConfiguration(2, 5, 5);
+        Assert.Contains("without usb_set_configuration", claimed, StringComparison.Ordinal);
+        Assert.Contains("waits for the phone's PING", claimed, StringComparison.Ordinal);
+        var initialized = UsbQtOpenPolicy.InitializedConfiguration(5, 0);
+        Assert.Contains("usb_set_configuration(5) returned 0", initialized, StringComparison.Ordinal);
+        var kick = UsbQtOpenPolicy.HandshakeKick(0);
+        Assert.Contains("0x40/0x40", kick, StringComparison.Ordinal);
+        Assert.Contains("0x6400", kick, StringComparison.Ordinal);
+        Assert.Contains("not 0x40/0x52", kick, StringComparison.Ordinal);
+        var hostPing = UsbQtOpenPolicy.HostPing(0x05, -116);
+        Assert.Contains("after an empty bulk IN", hostPing, StringComparison.Ordinal);
+        Assert.Contains("phone speaks first", hostPing, StringComparison.Ordinal);
+        Assert.Contains("not 0x40/0x52", hostPing, StringComparison.Ordinal);
+        var unchanged = UsbQtOpenPolicy.AltUnchanged(2);
+        Assert.Contains("not asked to SELECT_INTERFACE", unchanged, StringComparison.Ordinal);
 
         Assert.Equal(-5, UsbQtOpenPolicy.Libusb0Eio);
         Assert.True(UsbQtOpenPolicy.ShouldRetryBulkIo(-5, 0));
-        Assert.True(UsbQtOpenPolicy.ShouldRetryBulkIo(-5, UsbQtOpenPolicy.BulkIoRetries - 1));
         Assert.False(UsbQtOpenPolicy.ShouldRetryBulkIo(-5, UsbQtOpenPolicy.BulkIoRetries));
         Assert.False(UsbQtOpenPolicy.ShouldRetryBulkIo(-116, 0));
-        var retry = UsbQtOpenPolicy.BulkRetry(0x86, -5, 1);
-        Assert.Contains("IN 0x86", retry, StringComparison.Ordinal);
-        Assert.Contains("No 0x40/0x52", retry, StringComparison.Ordinal);
         Assert.False(UsbQtOpenPolicy.ShouldSendEnable(configsComplete: true, quickTime: 5));
+
+        var endpoints = 4;
+        var total = 9 + 9 + (endpoints * 7);
+        var raw = new List<byte>
+        {
+            9, 2, (byte)total, (byte)(total >> 8), 1, 5, 0, 0x80, 250,
+            9, 4, 2, 0, (byte)endpoints, 0xFF, 0x2A, 0xFF, 0,
+        };
+        void Endpoint(byte address, ushort packet) =>
+            raw.AddRange([7, 5, address, 0x02, (byte)packet, (byte)(packet >> 8), 0]);
+        Endpoint(0x02, 64);
+        Endpoint(0x81, 64);
+        Endpoint(0x05, 512);
+        Endpoint(0x86, 512);
+        Assert.True(UsbDescriptorMap.TryReadConfig(raw.ToArray(), out var screen));
+        Assert.Equal(5, screen.Value);
+        Assert.Equal(2, screen.Interface);
+        Assert.Equal(0, screen.Alternate);
+        Assert.Equal(0x86, screen.Inbound);
+        Assert.Equal(0x05, screen.Outbound);
     }
 
     [Fact]

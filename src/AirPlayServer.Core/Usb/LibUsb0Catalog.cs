@@ -206,7 +206,7 @@ internal static class LibUsb0Catalog
                         _openFiles.Add(grabbed.Filename);
                         _openPhones[grabbed.Filename] = phone;
                         _inflight.Remove(grabbed.Filename);
-                        channel = new Channel(_api, grabbed, () => Release(grabbed.Filename));
+                        channel = new Channel(_api, grabbed, () => Release(grabbed.Filename), _log);
                     }
                 }
 
@@ -243,20 +243,24 @@ internal static class LibUsb0Catalog
             _log.Log(
                 AirPlayLogLevel.Information,
                 UsbDescriptorMap.Chosen(grabbed.QuickTime, grabbed.Interface, grabbed.Inbound, grabbed.Outbound));
+            // GET_CONFIGURATION is the phone's value. libusb0 only builds endpoint
+            // pipes inside usb_set_configuration or usb_set_altinterface, and the
+            // DLL returns at once when its own cache already matches. Calling it
+            // here does not re-enumerate that case. Skipping it left IN 0x86
+            // timing out and then returning EIO while configuration 5 sat active.
             var active = _api.GetConfiguration(grabbed.Handle);
+            var configured = _api.SetConfiguration(grabbed.Handle, grabbed.QuickTime);
             if (active == grabbed.QuickTime)
             {
-                _log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.AlreadyActive(active, grabbed.Filename));
+                _log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.AlreadyActive(active, grabbed.Filename, configured));
+            }
+            else if (configured != 0)
+            {
+                error = UsbDriverHint.ForLibusb0(configured, "set QuickTime USB configuration " + grabbed.QuickTime);
+                return false;
             }
             else
             {
-                var configured = _api.SetConfiguration(grabbed.Handle, grabbed.QuickTime);
-                if (configured != 0)
-                {
-                    error = UsbDriverHint.ForLibusb0(configured, "set QuickTime USB configuration " + grabbed.QuickTime);
-                    return false;
-                }
-
                 var after = _api.GetConfiguration(grabbed.Handle);
                 if (after > 0 && after != grabbed.QuickTime)
                 {
@@ -265,7 +269,16 @@ internal static class LibUsb0Catalog
                 }
             }
 
-            return _api.TryClaimQuickTime(grabbed.Handle, grabbed.Interface, grabbed.Inbound, grabbed.Outbound, _log, out error);
+            if (!_api.TryClaimQuickTime(grabbed.Handle, grabbed.Interface, grabbed.Inbound, grabbed.Outbound, _log, out error))
+            {
+                return false;
+            }
+
+            var ping = _api.WriteQuickTimePing(grabbed.Handle, grabbed.Outbound);
+            _log.Log(
+                UsbQtOpenPolicy.PingWriteOk(ping) ? AirPlayLogLevel.Information : AirPlayLogLevel.Warning,
+                UsbQtOpenPolicy.HostPing(grabbed.Outbound, ping));
+            return true;
         }
 
         private bool RefreshIfIdle(string action)
@@ -571,9 +584,13 @@ internal static class LibUsb0Catalog
         private readonly byte _inbound;
         private readonly byte _outbound;
         private readonly Action _released;
+        private readonly IAirPlayLog _log;
         private int _disposed;
+        private int _payloadReads;
+        private int _eioAttempts;
+        private int _rescuePings;
 
-        public Channel(LibUsb0Native api, Grabbed grabbed, Action released)
+        public Channel(LibUsb0Native api, Grabbed grabbed, Action released, IAirPlayLog log)
         {
             _api = api;
             _handle = grabbed.Handle;
@@ -583,6 +600,7 @@ internal static class LibUsb0Catalog
             _inbound = grabbed.Inbound;
             _outbound = grabbed.Outbound;
             _released = released;
+            _log = log;
         }
 
         public string Id { get; }
@@ -595,7 +613,41 @@ internal static class LibUsb0Catalog
             lock (_api.Gate)
             {
                 ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-                return _api.BulkRead(_handle, _inbound, buffer, timeoutMs);
+                while (true)
+                {
+                    var rc = _api.BulkRead(_handle, _inbound, buffer, timeoutMs);
+                    if (rc >= 0)
+                    {
+                        if (rc > 0)
+                        {
+                            _payloadReads++;
+                        }
+
+                        _eioAttempts = 0;
+                        return rc;
+                    }
+
+                    if (!UsbQtOpenPolicy.ShouldRetryBulkIo(rc, _eioAttempts))
+                    {
+                        return rc;
+                    }
+
+                    // A timed-out libusb0 read cancels the URB. The next read on
+                    // that pipe is EIO until the halt is cleared. Closing here
+                    // dropped the session and the next open sent 0x40/0x52.
+                    _eioAttempts++;
+                    _api.ClearHalt(_handle, _inbound);
+                    if (_payloadReads == 0 && _rescuePings == 0)
+                    {
+                        _rescuePings++;
+                        var wrote = _api.WriteQuickTimePing(_handle, _outbound);
+                        _log.Log(
+                            UsbQtOpenPolicy.PingWriteOk(wrote) ? AirPlayLogLevel.Information : AirPlayLogLevel.Warning,
+                            UsbQtOpenPolicy.HostPing(_outbound, wrote));
+                    }
+
+                    _log.Log(AirPlayLogLevel.Warning, UsbQtOpenPolicy.BulkRetry(_inbound, rc, _eioAttempts));
+                }
             }
         }
 
@@ -965,9 +1017,19 @@ internal sealed class LibUsb0Native
         }
 
         var alt = SetAltInterface(handle, 0);
-        if (alt != 0)
+        if (alt == 0)
         {
-            log.Log(AirPlayLogLevel.Warning, UsbDriverHint.ForLibusb0(alt, "set QuickTime USB alt setting 0 on interface " + iface));
+            log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.AltSelected(iface, alt));
+        }
+        else
+        {
+            var detail = UsbQtOpenPolicy.AltSelected(iface, alt);
+            if (alt != UsbQtOpenPolicy.MissingAltExport)
+            {
+                detail += " " + UsbDriverHint.ForLibusb0(alt, "set QuickTime USB alt setting 0 on interface " + iface);
+            }
+
+            log.Log(AirPlayLogLevel.Warning, detail);
         }
 
         ClearHalt(handle, inbound);
@@ -975,11 +1037,30 @@ internal sealed class LibUsb0Native
         return true;
     }
 
+    /// <summary>
+    /// One host PING on the QuickTime OUT pipe. The device normally speaks
+    /// first, but a configuration that was already active has usually sent
+    /// that PING before this process claimed the interface. The libusb0
+    /// sequence that received the reply writes this packet after clear-halt.
+    /// </summary>
+    public int WriteQuickTimePing(nint handle, byte endpoint)
+    {
+        var ping = QtPackets.Ping();
+        var wrote = BulkWrite(handle, endpoint, ping, 1000);
+        if (wrote == ping.Length)
+        {
+            return wrote;
+        }
+
+        ClearHalt(handle, endpoint);
+        return BulkWrite(handle, endpoint, ping, 1000);
+    }
+
     public int SetAltInterface(nint handle, int alternate)
     {
         if (_setAlt == 0)
         {
-            return 0;
+            return UsbQtOpenPolicy.MissingAltExport;
         }
 
         unsafe

@@ -734,6 +734,37 @@ public sealed class UsbQuickTimeTests
     }
 
     [Fact]
+    public void Already_active_quicktime_config_still_selects_pipes_and_retries_bulk_eio()
+    {
+        var node = @"\\.\libusb0-0001--0x05ac-0x12a8";
+        var active = UsbQtOpenPolicy.AlreadyActive(5, node, 0);
+        Assert.Contains("usb_set_configuration returned 0", active, StringComparison.Ordinal);
+        Assert.Contains("No 0x40/0x52", active, StringComparison.Ordinal);
+        Assert.DoesNotContain("Trust This Computer", active, StringComparison.Ordinal);
+
+        var alt = UsbQtOpenPolicy.AltSelected(2, 0);
+        Assert.Contains("SELECT_INTERFACE", alt, StringComparison.Ordinal);
+        var missing = UsbQtOpenPolicy.AltSelected(2, UsbQtOpenPolicy.MissingAltExport);
+        Assert.Contains("usb_set_altinterface", missing, StringComparison.Ordinal);
+
+        var ping = UsbQtOpenPolicy.HostPing(0x05, 16);
+        Assert.Contains("OUT 0x05", ping, StringComparison.Ordinal);
+        Assert.Contains("not 0x40/0x52", ping, StringComparison.Ordinal);
+        Assert.True(UsbQtOpenPolicy.PingWriteOk(16));
+        Assert.False(UsbQtOpenPolicy.PingWriteOk(-5));
+
+        Assert.Equal(-5, UsbQtOpenPolicy.Libusb0Eio);
+        Assert.True(UsbQtOpenPolicy.ShouldRetryBulkIo(-5, 0));
+        Assert.True(UsbQtOpenPolicy.ShouldRetryBulkIo(-5, UsbQtOpenPolicy.BulkIoRetries - 1));
+        Assert.False(UsbQtOpenPolicy.ShouldRetryBulkIo(-5, UsbQtOpenPolicy.BulkIoRetries));
+        Assert.False(UsbQtOpenPolicy.ShouldRetryBulkIo(-116, 0));
+        var retry = UsbQtOpenPolicy.BulkRetry(0x86, -5, 1);
+        Assert.Contains("IN 0x86", retry, StringComparison.Ordinal);
+        Assert.Contains("No 0x40/0x52", retry, StringComparison.Ordinal);
+        Assert.False(UsbQtOpenPolicy.ShouldSendEnable(configsComplete: true, quickTime: 5));
+    }
+
+    [Fact]
     public async Task Opened_usb_mirror_logs_the_first_read_and_a_later_read_error()
     {
         var log = new ListLog();

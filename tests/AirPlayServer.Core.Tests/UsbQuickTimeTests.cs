@@ -331,9 +331,36 @@ public sealed class UsbQuickTimeTests
     {
         var missing = UsbDriverHint.LibraryMissing();
         Assert.Contains("libusb-1.0.dll", missing, StringComparison.Ordinal);
+        Assert.Contains("libusb0.dll", missing, StringComparison.Ordinal);
         Assert.Contains("windows-usb-driver.ps1", missing, StringComparison.Ordinal);
         Assert.Contains("-FetchLibusb", missing, StringComparison.Ordinal);
         Assert.DoesNotContain("NOT_SUPPORTED", missing, StringComparison.Ordinal);
+
+        var winIo = UsbDriverHint.ForLibusb(-1, "libusb_open 05ac:12a8");
+        Assert.Contains("libusb -1", winIo, StringComparison.Ordinal);
+        Assert.Contains("IO", winIo, StringComparison.Ordinal);
+        Assert.Contains("0x40/0x52", winIo, StringComparison.Ordinal);
+        Assert.Contains("LIBUSB_ERROR_IO", winIo, StringComparison.Ordinal);
+        Assert.Contains("Do not uninstall Apple Devices", winIo, StringComparison.Ordinal);
+        Assert.Contains("不要卸载 Apple Devices", winIo, StringComparison.Ordinal);
+
+        var access = UsbDriverHint.ForLibusb0(-13, "claim QuickTime USB interface 1");
+        Assert.Contains("libusb0 -13", access, StringComparison.Ordinal);
+        Assert.Contains("EACCES", access, StringComparison.Ordinal);
+        var memory = UsbDriverHint.ForLibusb0(-12, "set QuickTime USB configuration 4");
+        Assert.Contains("libusb0 -12", memory, StringComparison.Ordinal);
+        Assert.Contains("ENOMEM", memory, StringComparison.Ordinal);
+        Assert.Contains("not libusb-1.0", memory, StringComparison.Ordinal);
+
+        var denied = UsbDriverHint.Libusb0OpenFailed(
+            @"\\.\libusb0-0001--0x05ac-0x12a8",
+            "failed to open \\\\.\\libusb0-0001--0x05ac-0x12a8: win error: Access is denied.\r\n");
+        Assert.Contains("libusb0 usb_open returned a null handle", denied, StringComparison.Ordinal);
+        Assert.Contains("-2", denied, StringComparison.Ordinal);
+        Assert.Contains("ENOENT", denied, StringComparison.Ordinal);
+        Assert.Contains("Access is denied", denied, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n", denied, StringComparison.Ordinal);
+        Assert.Contains("WinUSB", denied, StringComparison.Ordinal);
 
         var unsupported = UsbDriverHint.ForLibusb(-12, "set QuickTime USB configuration 4");
         Assert.Contains("libusb -12", unsupported, StringComparison.Ordinal);
@@ -409,6 +436,7 @@ public sealed class UsbQuickTimeTests
         var readyText = UsbDriverHint.Readiness(ready);
         Assert.Contains("libusb0 UpperFilter", readyText, StringComparison.Ordinal);
         Assert.Contains("libusb0.sys is installed", readyText, StringComparison.Ordinal);
+        Assert.Contains("libusb0.dll", readyText, StringComparison.Ordinal);
         Assert.DoesNotContain("Code 39", readyText, StringComparison.Ordinal);
 
         var filterWithoutFile = new UsbDriverSnapshot
@@ -470,6 +498,8 @@ public sealed class UsbQuickTimeTests
         Assert.Contains("usbccgp", script, StringComparison.Ordinal);
         Assert.Contains("Do not run Zadig", script, StringComparison.Ordinal);
         Assert.Contains("does not vendor libusb0.sys", script, StringComparison.Ordinal);
+        Assert.Contains("does not copy libusb0.sys", script, StringComparison.Ordinal);
+        Assert.Contains("libusb0.dll", script, StringComparison.Ordinal);
         Assert.Contains("--device-id=", script, StringComparison.Ordinal);
         Assert.Contains("-Setup", script, StringComparison.Ordinal);
         Assert.Contains("7fb1dfec805b97983763d7d0ae244320da12add1003d4249c96cc4d586398c79", script, StringComparison.Ordinal);
@@ -589,6 +619,73 @@ public sealed class UsbQuickTimeTests
 
         Assert.True(blocked.Dropped >= 3);
         release.Set();
+    }
+
+    [Fact]
+    public void Libusb0_filter_name_and_quicktime_configuration_are_recognized()
+    {
+        Assert.Equal(16, LibUsb0Layout.DeviceFilename);
+        Assert.Equal(528, LibUsb0Layout.BusDevices);
+        Assert.Equal(512, LibUsb0Layout.FilenameBytes);
+        Assert.True(LibUsb0Layout.TryParseFilterName(@"\\.\libusb0-0001--0x05ac-0x12a8", out var vendor, out var product));
+        Assert.Equal(0x05AC, vendor);
+        Assert.Equal(0x12A8, product);
+        Assert.True(LibUsb0Layout.TryParseFilterName(@"\\.\libusb0-0001--0x05AC-0x12A8", out vendor, out product));
+        Assert.Equal(0x05AC, vendor);
+        Assert.False(LibUsb0Layout.TryParseFilterName("virtual-hub", out _, out _));
+        Assert.False(LibUsb0Layout.TryParseFilterName(@"\\.\libusb0-0001", out _, out _));
+
+        var muxOnly = VendorConfig(value: 1, iface: 0, klass: 0xFF, sub: 0xFE, proto: 0x02, outbound: 0, inbound: 0);
+        var config4 = VendorConfig(value: 4, iface: 2, klass: 0xFF, sub: 0xFD, proto: 0x01, outbound: 0, inbound: 0);
+        var config5 = VendorConfig(value: 5, iface: 2, klass: 0xFF, sub: 0x2A, proto: 0xFF, outbound: 0x05, inbound: 0x86);
+
+        Assert.True(UsbDescriptorMap.TryReadConfig(config4, out var hidden));
+        Assert.Equal(4, hidden.Value);
+        Assert.False(hidden.QuickTime);
+        Assert.False(hidden.Mux);
+
+        Assert.True(UsbDescriptorMap.TryReadConfig(config5, out var screen));
+        Assert.Equal(5, screen.Value);
+        Assert.True(screen.QuickTime);
+        Assert.Equal(2, screen.Interface);
+        Assert.Equal(0x86, screen.Inbound);
+        Assert.Equal(0x05, screen.Outbound);
+
+        UsbDescriptorMap.Classify([config5, config4, muxOnly], out var mux, out var qt, out var iface, out var inbound, out var outbound);
+        Assert.Equal(1, mux);
+        Assert.Equal(5, qt);
+        Assert.Equal(2, iface);
+        Assert.Equal(0x86, inbound);
+        Assert.Equal(0x05, outbound);
+        Assert.NotEqual(4, qt);
+
+        var chosen = UsbDescriptorMap.Chosen(qt, iface, inbound, outbound);
+        Assert.Contains("configuration value 5", chosen, StringComparison.Ordinal);
+        Assert.Contains("0x86", chosen, StringComparison.Ordinal);
+        Assert.Contains("0x05", chosen, StringComparison.Ordinal);
+        Assert.Contains("not a fixed configuration number", chosen, StringComparison.Ordinal);
+    }
+
+    private static byte[] VendorConfig(byte value, byte iface, byte klass, byte sub, byte proto, byte outbound, byte inbound)
+    {
+        var endpoints = (byte)((outbound == 0 ? 0 : 1) + (inbound == 0 ? 0 : 1));
+        var total = 9 + 9 + (endpoints * 7);
+        var data = new List<byte>
+        {
+            9, 2, (byte)total, (byte)(total >> 8), 1, value, 0, 0x80, 250,
+            9, 4, iface, 0, endpoints, klass, sub, proto, 0,
+        };
+        if (outbound != 0)
+        {
+            data.AddRange([7, 5, outbound, 0x02, 0x00, 0x02, 0]);
+        }
+
+        if (inbound != 0)
+        {
+            data.AddRange([7, 5, inbound, 0x02, 0x00, 0x02, 0]);
+        }
+
+        return data.ToArray();
     }
 
     [Fact]

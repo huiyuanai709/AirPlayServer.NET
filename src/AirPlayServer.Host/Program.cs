@@ -166,12 +166,12 @@ static async Task<int> RunReceiverAsync(HostArgs arguments, CancellationToken ca
         if (arguments.Options.EnableUsb)
         {
             Console.WriteLine(string.IsNullOrWhiteSpace(arguments.Options.UsbUdid)
-                ? "有线镜像: 已开启（QuickTime-over-USB，libusb）。和无线同时收。需要 libusb-1.0。"
-                : "有线镜像: 只收 UDID " + arguments.Options.UsbUdid + "。和无线同时收。需要 libusb-1.0。");
+                ? "有线镜像: 已开启（QuickTime-over-USB）。和无线同时收。" + (OperatingSystem.IsWindows() ? " 需要 libusb0.dll。" : " 需要 libusb-1.0。")
+                : "有线镜像: 只收 UDID " + arguments.Options.UsbUdid + "。和无线同时收。" + (OperatingSystem.IsWindows() ? " 需要 libusb0.dll。" : " 需要 libusb-1.0。"));
             Console.WriteLine("USB 伴音: ASYN EAT! 的明文 LPCM 写到系统默认播放设备。Windows 用 WASAPI，Linux 用 PulseAudio 或 ALSA。打不开设备时只丢声音，画面继续。无线 AAC-ELD 仍走原来的音量。");
             if (OperatingSystem.IsWindows())
             {
-                Console.WriteLine("Windows 驱动: 父设备保持 usbccgp，不要用 Zadig 替换它。一键（管理员）双击 windows-usb-setup.cmd，或运行 windows-usb-driver.ps1 -Setup。它下载官方 libusb-1.0.dll 和官方 libusb-win32，只给 Apple 父设备装 UpperFilter，再把官方 zip 的 libusb0.sys 复制到 System32\\drivers。文件不在就是代码 39，手机只能充电。说明见 RUN.txt。");
+                Console.WriteLine("Windows 驱动: 父设备保持 usbccgp，Apple Devices 可以留着，不要用 Zadig 替换父设备。--usb 用 libusb0.dll 打开 \\\\.\\libusb0-…，不用 WinUSB。一键（管理员）双击 windows-usb-setup.cmd，或运行 windows-usb-driver.ps1 -Setup。它下载官方 libusb-1.0.dll 和官方 libusb-win32，把 libusb0.dll 放到程序旁边，只给 Apple 父设备装 UpperFilter，再把官方 zip 的 libusb0.sys 复制到 System32\\drivers。文件不在就是代码 39，手机只能充电。说明见 RUN.txt。");
             }
             if (arguments.Options.AllowDualIngress)
             {

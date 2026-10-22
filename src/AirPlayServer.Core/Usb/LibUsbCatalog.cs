@@ -22,6 +22,11 @@ internal static class LibUsbCatalog
             return false;
         }
 
+        if (OperatingSystem.IsWindows())
+        {
+            return LibUsb0Catalog.TryCreate(log, out catalog);
+        }
+
         if (!LibUsbNative.TryLoad(out var api, out var library) || api is null)
         {
             log.Log(AirPlayLogLevel.Warning, UsbDriverHint.LibraryMissing());
@@ -54,9 +59,12 @@ internal static class LibUsbCatalog
         public IReadOnlyList<UsbPhone> List()
         {
             var found = new List<UsbPhone>();
-            if (!_api.TryOpenContext(out var ctx))
+            if (!_api.TryOpenContext(out var ctx, out var initError))
             {
-                LogLimited(AirPlayLogLevel.Warning, "context", UsbMirrorCandidate.ContextFailed());
+                LogLimited(
+                    AirPlayLogLevel.Warning,
+                    "context:" + initError,
+                    UsbMirrorCandidate.ContextFailed() + " " + UsbDriverHint.ForLibusb(initError, "libusb_init"));
                 return found;
             }
 
@@ -205,20 +213,24 @@ internal static class LibUsbCatalog
             channel = null;
             for (var attempt = 0; attempt < 12 && !cancellationToken.IsCancellationRequested; attempt++)
             {
-                if (!_api.TryOpenContext(out var ctx))
+                if (!_api.TryOpenContext(out var ctx, out var initError))
                 {
+                    LogLimited(
+                        AirPlayLogLevel.Warning,
+                        "context:" + initError,
+                        UsbMirrorCandidate.ContextFailed() + " " + UsbDriverHint.ForLibusb(initError, "libusb_init"));
                     return false;
                 }
 
                 if (!_api.TryOpenSerial(ctx, phone.Id, out var device, out var handle, out var descriptor, out var openError))
                 {
                     _api.Exit(ctx);
+                    var message = openError == 0
+                        ? UsbDriverHint.DeviceNotListed(phone.Id)
+                        : UsbMirrorCandidate.ReopenFailed(phone.Id, openError);
+                    LogLimited(AirPlayLogLevel.Warning, "reopen:" + phone.Id + ":" + openError, message);
                     if (attempt == 0)
                     {
-                        LogLimited(
-                            AirPlayLogLevel.Warning,
-                            "reopen:" + phone.Id + ":" + openError,
-                            UsbMirrorCandidate.ReopenFailed(phone.Id, openError));
                         return false;
                     }
 
@@ -260,6 +272,7 @@ internal static class LibUsbCatalog
                     return null == channel && false;
                 }
 
+                _log.Log(AirPlayLogLevel.Information, UsbDescriptorMap.Chosen(quickTime, iface, inbound, outbound));
                 channel = new Channel(_api, ctx, handle, phone, iface, inbound, outbound, mux);
                 return true;
             }
@@ -517,14 +530,21 @@ internal sealed class LibUsbNative
         return false;
     }
 
-    public bool TryOpenContext(out nint context)
+    public bool TryOpenContext(out nint context, out int result)
     {
         unsafe
         {
             nint local = 0;
-            var rc = ((delegate* unmanaged[Cdecl]<nint*, int>)_init)(&local);
+            result = ((delegate* unmanaged[Cdecl]<nint*, int>)_init)(&local);
             context = local;
-            return rc == 0 && context != 0;
+            if (result == 0 && context == 0)
+            {
+                // libusb_init returned success and a null context. There is no
+                // separate code for that, so the log uses -1 (IO).
+                result = -1;
+            }
+
+            return result == 0 && context != 0;
         }
     }
 

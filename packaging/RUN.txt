@@ -67,11 +67,11 @@ USB 伴音是 ASYN EAT! 里的明文 LPCM（通常 48 kHz 立体声），写到�
 Windows 用 WASAPI，Linux 用 PulseAudio 或 ALSA。打不开设备时只丢声音，画面继续。
 无线 AAC-ELD 和手机音量增益保持原样。USB 没有 SET_PARAMETER，按样本原样播放。
 
-需要 libusb-1.0，放在程序旁边或系统路径里：
-  Windows  libusb-1.0.dll
+需要 libusb，放在程序旁边或系统路径里：
+  Windows  libusb0.dll（打开 \\.\libusb0-…。libusb-1.0.dll 打不开带过滤驱动的 Apple 父设备）
   Linux    libusb-1.0.so.0   （apt install libusb-1.0-0）
   macOS    libusb-1.0.0.dylib
-找不到 libusb 时只记日志，无线 AirPlay 照常。缺库和认领失败是两条不同的日志。
+找不到 libusb 时只记日志，无线 AirPlay 照常。缺库和打开失败是两条不同的日志。打开失败会带上错误码。
 
 Windows 驱动（win-x64 包里有 windows-usb-setup.cmd 和 windows-usb-driver.ps1）：
   父设备保持 usbccgp。安装 Apple Devices（Microsoft Store）或 Apple Mobile Device Support。
@@ -79,10 +79,12 @@ Windows 驱动（win-x64 包里有 windows-usb-setup.cmd 和 windows-usb-driver.
   不要用 Zadig 把 Apple 复合父设备换成 WinUSB 或 libusbK。WinUSB 不能切换 USB 配置。
   一键：插上手机，双击 windows-usb-setup.cmd，在管理员提示里允许。
   脚本下载官方 libusb 1.0.30 的 libusb-1.0.dll，以及官方 libusb-win32 1.4.0.2，
-  校验 SHA256 后，只给这一台 Apple 父设备装 UpperFilter（--device-id=该实例）。
+  校验 SHA256 后，把 amd64 libusb0.dll 放到程序旁边，
+  再只给这一台 Apple 父设备装 UpperFilter（--device-id=该实例）。
   install-filter 只注册 libusb0 服务和 UpperFilter，不复制驱动文件。
   脚本会接着把官方 zip 的 bin\amd64\libusb0.sys 复制到
   %SystemRoot%\System32\drivers\libusb0.sys，并把同目录的 libusb0.dll 复制到 System32。
+  不把 libusb0.sys 复制到程序旁边。
   复制后用 Test-Path 确认 .sys 存在，否则失败，不算安装成功。
   只有注册、没有这个文件时，设备管理器是代码 39（CM_PROB_DRIVER_FAILED_LOAD），
   手机只能充电，也不会弹出信任对话框。
@@ -96,7 +98,8 @@ Windows 驱动（win-x64 包里有 windows-usb-setup.cmd 和 windows-usb-driver.
     powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -InstallFilter -FilterZip C:\path\libusb-win32-bin-1.4.0.2.zip
   官方地址写在 windows-usb-driver.ps1 开头，也写在 docs/usb-windows.md。
   装完重新插拔，解锁并信任这台电脑，再加 --usb。
-  libusb -12 表示配置切换不被当前驱动允许。-3 / -6 表示设备忙。-4 / -5 表示手机不在线上。
+  Windows 打开失败看 libusb0 的 errno，或 usb_open 空句柄时的 usb_strerror（CreateFile 失败是 -2 ENOENT）。
+  Linux / macOS 的 libusb-1.0：-12 表示配置切换不被当前驱动允许。-3 / -6 表示设备忙。-4 / -5 表示手机不在线上。
   libusb -1（LIBUSB_ERROR_IO）表示 libusb-1.0 已经列出这台 Apple 设备，但 libusb_open 失败。
   手机还在，列表也不是空的。不要卸载 Apple Devices。无线 AirPlay 不受影响。
   商店版 Apple Devices（AppleInc.AppleDevices）不注册传统的 Apple Mobile Device Service，

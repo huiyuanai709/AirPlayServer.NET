@@ -76,6 +76,10 @@ internal readonly struct UsbConfigView
 /// <summary>
 /// Walks a raw USB configuration descriptor. QuickTime is class <c>0xFF</c>
 /// subclass <c>0x2A</c>. Mux is class <c>0xFF</c> subclass <c>0xFE</c>.
+/// The configuration passed to <c>SET_CONFIGURATION</c> is that descriptor's
+/// <c>bConfigurationValue</c>. It is not a fixed number: on iPhone 15 Pro Max
+/// (<c>05ac:12a8</c>) value 4 is interface <c>FF/FD/01</c>, and the screen is
+/// value 5, interface 2, <c>FF/2A/FF</c>, bulk IN <c>0x86</c> OUT <c>0x05</c>.
 /// </summary>
 internal static class UsbDescriptorMap
 {
@@ -190,4 +194,12 @@ internal static class UsbDescriptorMap
             outbound = view.Outbound;
         }
     }
+
+    public static string Chosen(int configuration, int iface, byte inbound, byte outbound)
+        => "QuickTime USB 接口在配置值 " + configuration + " 接口 " + iface
+           + "（类 0xFF 子类 0x2A），批量 IN 0x" + inbound.ToString("x2") + " OUT 0x" + outbound.ToString("x2")
+           + "。这个配置号来自含该接口的描述符，不是固定数字。 QuickTime USB interface is configuration value "
+           + configuration + " interface " + iface + " (class 0xFF subclass 0x2A), bulk IN 0x"
+           + inbound.ToString("x2") + " OUT 0x" + outbound.ToString("x2")
+           + ". That value comes from the descriptor that contains this interface, not a fixed configuration number.";
 }

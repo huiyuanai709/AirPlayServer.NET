@@ -635,47 +635,57 @@ public sealed class UsbQuickTimeTests
         Assert.False(LibUsb0Layout.TryParseFilterName("virtual-hub", out _, out _));
         Assert.False(LibUsb0Layout.TryParseFilterName(@"\\.\libusb0-0001", out _, out _));
 
-        var quickTime = new byte[41];
-        quickTime[0] = 9;
-        quickTime[1] = 2;
-        quickTime[2] = 41;
-        quickTime[5] = 4;
-        quickTime[9] = 9;
-        quickTime[10] = 4;
-        quickTime[14] = 0xFF;
-        quickTime[15] = 0xFE;
-        quickTime[18] = 9;
-        quickTime[19] = 4;
-        quickTime[20] = 2;
-        quickTime[22] = 2;
-        quickTime[23] = 0xFF;
-        quickTime[24] = 0x2A;
-        quickTime[27] = 7;
-        quickTime[28] = 5;
-        quickTime[29] = 0x02;
-        quickTime[30] = 0x02;
-        quickTime[34] = 7;
-        quickTime[35] = 5;
-        quickTime[36] = 0x81;
-        quickTime[37] = 0x02;
-        Assert.True(UsbDescriptorMap.TryReadConfig(quickTime, out var view));
-        Assert.Equal(4, view.Value);
-        Assert.True(view.Mux);
-        Assert.True(view.QuickTime);
-        Assert.Equal(2, view.Interface);
-        Assert.Equal(0x02, view.Outbound);
-        Assert.Equal(0x81, view.Inbound);
+        var muxOnly = VendorConfig(value: 1, iface: 0, klass: 0xFF, sub: 0xFE, proto: 0x02, outbound: 0, inbound: 0);
+        var config4 = VendorConfig(value: 4, iface: 2, klass: 0xFF, sub: 0xFD, proto: 0x01, outbound: 0, inbound: 0);
+        var config5 = VendorConfig(value: 5, iface: 2, klass: 0xFF, sub: 0x2A, proto: 0xFF, outbound: 0x05, inbound: 0x86);
 
-        byte[] ptp = [9, 2, 18, 0, 1, 1, 0, 0x80, 250, 9, 4, 0, 0, 0, 0x06, 0x01, 0x01, 0];
-        UsbDescriptorMap.Classify([ptp, quickTime], out var mux, out var qt, out var iface, out var inbound, out var outbound);
-        Assert.Equal(4, mux);
-        Assert.Equal(4, qt);
+        Assert.True(UsbDescriptorMap.TryReadConfig(config4, out var hidden));
+        Assert.Equal(4, hidden.Value);
+        Assert.False(hidden.QuickTime);
+        Assert.False(hidden.Mux);
+
+        Assert.True(UsbDescriptorMap.TryReadConfig(config5, out var screen));
+        Assert.Equal(5, screen.Value);
+        Assert.True(screen.QuickTime);
+        Assert.Equal(2, screen.Interface);
+        Assert.Equal(0x86, screen.Inbound);
+        Assert.Equal(0x05, screen.Outbound);
+
+        UsbDescriptorMap.Classify([config5, config4, muxOnly], out var mux, out var qt, out var iface, out var inbound, out var outbound);
+        Assert.Equal(1, mux);
+        Assert.Equal(5, qt);
         Assert.Equal(2, iface);
-        Assert.Equal(0x81, inbound);
-        Assert.Equal(0x02, outbound);
-        UsbDescriptorMap.Classify([ptp], out mux, out qt, out _, out _, out _);
-        Assert.Equal(-1, mux);
-        Assert.Equal(-1, qt);
+        Assert.Equal(0x86, inbound);
+        Assert.Equal(0x05, outbound);
+        Assert.NotEqual(4, qt);
+
+        var chosen = UsbDescriptorMap.Chosen(qt, iface, inbound, outbound);
+        Assert.Contains("configuration value 5", chosen, StringComparison.Ordinal);
+        Assert.Contains("0x86", chosen, StringComparison.Ordinal);
+        Assert.Contains("0x05", chosen, StringComparison.Ordinal);
+        Assert.Contains("not a fixed configuration number", chosen, StringComparison.Ordinal);
+    }
+
+    private static byte[] VendorConfig(byte value, byte iface, byte klass, byte sub, byte proto, byte outbound, byte inbound)
+    {
+        var endpoints = (byte)((outbound == 0 ? 0 : 1) + (inbound == 0 ? 0 : 1));
+        var total = 9 + 9 + (endpoints * 7);
+        var data = new List<byte>
+        {
+            9, 2, (byte)total, (byte)(total >> 8), 1, value, 0, 0x80, 250,
+            9, 4, iface, 0, endpoints, klass, sub, proto, 0,
+        };
+        if (outbound != 0)
+        {
+            data.AddRange([7, 5, outbound, 0x02, 0x00, 0x02, 0]);
+        }
+
+        if (inbound != 0)
+        {
+            data.AddRange([7, 5, inbound, 0x02, 0x00, 0x02, 0]);
+        }
+
+        return data.ToArray();
     }
 
     [Fact]

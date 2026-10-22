@@ -272,6 +272,7 @@ internal static class LibUsbCatalog
                     return null == channel && false;
                 }
 
+                _log.Log(AirPlayLogLevel.Information, UsbDescriptorMap.Chosen(quickTime, iface, inbound, outbound));
                 channel = new Channel(_api, ctx, handle, phone, iface, inbound, outbound, mux);
                 return true;
             }

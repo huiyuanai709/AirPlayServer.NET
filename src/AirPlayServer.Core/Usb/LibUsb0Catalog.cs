@@ -131,7 +131,7 @@ internal static class LibUsb0Catalog
                         wait = true;
                         channel = null;
                     }
-                    else if (!_api.TryClaimQuickTime(grabbed.Handle, grabbed.QuickTime, grabbed.Interface, grabbed.Inbound, grabbed.Outbound, out var error))
+                    else if (!ClaimQuickTime(grabbed, out var error))
                     {
                         _log.Log(AirPlayLogLevel.Warning, error);
                         _api.Close(grabbed.Handle);
@@ -171,6 +171,14 @@ internal static class LibUsb0Catalog
 
             _log.Log(AirPlayLogLevel.Warning, "等待 " + phone.Id + " 出现 QuickTime USB 接口超时。 Timed out waiting for the QuickTime USB interface on " + phone.Id + ".");
             return null;
+        }
+
+        private bool ClaimQuickTime(Grabbed grabbed, out string error)
+        {
+            _log.Log(
+                AirPlayLogLevel.Information,
+                UsbDescriptorMap.Chosen(grabbed.QuickTime, grabbed.Interface, grabbed.Inbound, grabbed.Outbound));
+            return _api.TryClaimQuickTime(grabbed.Handle, grabbed.QuickTime, grabbed.Interface, grabbed.Inbound, grabbed.Outbound, out error);
         }
 
         private bool RefreshIfIdle(string action)

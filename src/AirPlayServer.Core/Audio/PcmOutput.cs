@@ -35,10 +35,30 @@ internal sealed class DiscardPcmOutput : IPcmOutput
 internal static class SystemPcmOutput
 {
     public static IPcmOutput Create(IAirPlayLog log)
+        => Create(log, 44100, 2, usb: false);
+
+    /// <summary>
+    /// Opens the default playback device at <paramref name="sampleRate"/> and
+    /// <paramref name="channels"/>. Wireless AirPlay calls the parameterless
+    /// overload and stays at 44.1 kHz stereo. USB LPCM passes the rate from
+    /// the QuickTime audio format, usually 48 kHz.
+    /// </summary>
+    public static IPcmOutput Create(IAirPlayLog log, int sampleRate, int channels, bool usb)
     {
+        ArgumentNullException.ThrowIfNull(log);
+        if (sampleRate is < 8000 or > 192000)
+        {
+            sampleRate = usb ? 48000 : 44100;
+        }
+
+        if (channels is < 1 or > 2)
+        {
+            channels = 2;
+        }
+
         if (OperatingSystem.IsWindows())
         {
-            var wasapi = WasapiPcmOutput.TryCreate(log);
+            var wasapi = WasapiPcmOutput.TryCreate(log, sampleRate, channels, usb);
             if (wasapi is not null)
             {
                 return wasapi;
@@ -46,25 +66,38 @@ internal static class SystemPcmOutput
         }
         else
         {
-            var pulse = PulsePcmOutput.TryCreate(log);
+            var pulse = PulsePcmOutput.TryCreate(log, sampleRate, channels, usb);
             if (pulse is not null)
             {
                 return pulse;
             }
 
-            var alsa = AlsaPcmOutput.TryCreate(log);
+            var alsa = AlsaPcmOutput.TryCreate(log, sampleRate, channels, usb);
             if (alsa is not null)
             {
                 return alsa;
             }
         }
 
-        log.Log(
-            AirPlayLogLevel.Warning,
-            OperatingSystem.IsWindows()
-                ? "镜像伴音已解码，但打不开系统默认播放设备（WASAPI）。PCM 被丢掉，画面不受影响。Mirror audio was decoded, but the default WASAPI device did not open. PCM is dropped. Video is unchanged."
-                : "镜像伴音已解码，但这台机器没有可用的播放设备（需要 libpulse-simple 或 libasound）。PCM 被丢掉，画面不受影响。Mirror audio was decoded, but no playback device is available (libpulse-simple or libasound). PCM is dropped. Video is unchanged.");
+        log.Log(AirPlayLogLevel.Warning, FailureText(usb));
         return new DiscardPcmOutput();
+    }
+
+    private static string FailureText(bool usb)
+    {
+        if (usb && OperatingSystem.IsWindows())
+        {
+            return "USB 伴音（LPCM）已解开，但打不开系统默认播放设备（WASAPI）。PCM 被丢掉，画面不受影响。USB LPCM was decoded, but the default WASAPI device did not open. PCM is dropped. Video is unchanged.";
+        }
+
+        if (usb)
+        {
+            return "USB 伴音（LPCM）已解开，但这台机器没有可用的播放设备（需要 libpulse-simple 或 libasound）。PCM 被丢掉，画面不受影响。USB LPCM was decoded, but no playback device is available (libpulse-simple or libasound). PCM is dropped. Video is unchanged.";
+        }
+
+        return OperatingSystem.IsWindows()
+            ? "镜像伴音已解码，但打不开系统默认播放设备（WASAPI）。PCM 被丢掉，画面不受影响。Mirror audio was decoded, but the default WASAPI device did not open. PCM is dropped. Video is unchanged."
+            : "镜像伴音已解码，但这台机器没有可用的播放设备（需要 libpulse-simple 或 libasound）。PCM 被丢掉，画面不受影响。Mirror audio was decoded, but no playback device is available (libpulse-simple or libasound). PCM is dropped. Video is unchanged.";
     }
 }
 
@@ -126,7 +159,7 @@ internal sealed class WasapiPcmOutput : IPcmOutput
 
     public string Name => "wasapi";
 
-    public static WasapiPcmOutput? TryCreate(IAirPlayLog log)
+    public static WasapiPcmOutput? TryCreate(IAirPlayLog log, int sampleRate, int channels, bool usb)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -167,7 +200,7 @@ internal sealed class WasapiPcmOutput : IPcmOutput
             }
 
             Span<byte> format = stackalloc byte[18];
-            WritePcm(format, 44100, 2);
+            WritePcm(format, sampleRate, channels);
             var initialized = Initialize(client, format, 1_000_000);
             if (initialized < 0)
             {
@@ -191,8 +224,12 @@ internal sealed class WasapiPcmOutput : IPcmOutput
                 return null;
             }
 
-            log.Log(AirPlayLogLevel.Information, "镜像伴音使用系统默认播放设备（WASAPI）。Mirror audio uses the default WASAPI render device.");
-            var output = new WasapiPcmOutput(client, render, frames, ownsCom, 2, 44100);
+            log.Log(
+                AirPlayLogLevel.Information,
+                usb
+                    ? "USB 伴音使用系统默认播放设备（WASAPI，" + sampleRate + " Hz " + channels + " ch LPCM）。USB LPCM uses the default WASAPI render device."
+                    : "镜像伴音使用系统默认播放设备（WASAPI）。Mirror audio uses the default WASAPI render device.");
+            var output = new WasapiPcmOutput(client, render, frames, ownsCom, channels, sampleRate);
             client = 0;
             render = 0;
             ownsCom = false;
@@ -461,7 +498,7 @@ internal sealed class PulsePcmOutput : IPcmOutput
 
     public string Name => "pulse";
 
-    public static unsafe PulsePcmOutput? TryCreate(IAirPlayLog log)
+    public static unsafe PulsePcmOutput? TryCreate(IAirPlayLog log, int sampleRate, int channels, bool usb)
     {
         if (!NativeLibrary.TryLoad("libpulse-simple.so.0", out _) && !NativeLibrary.TryLoad("libpulse-simple.so", out _))
         {
@@ -470,7 +507,7 @@ internal sealed class PulsePcmOutput : IPcmOutput
 
         try
         {
-            var spec = new PaSampleSpec { Format = 3, Rate = 44100, Channels = 2 };
+            var spec = new PaSampleSpec { Format = 3, Rate = (uint)sampleRate, Channels = (byte)channels };
             var name = "AirPlayServer.NET"u8;
             var stream = "mirror"u8;
             fixed (byte* namePointer = name)
@@ -482,7 +519,11 @@ internal sealed class PulsePcmOutput : IPcmOutput
                     return null;
                 }
 
-                log.Log(AirPlayLogLevel.Information, "镜像伴音使用 PulseAudio 默认设备。Mirror audio uses the default PulseAudio device.");
+                log.Log(
+                    AirPlayLogLevel.Information,
+                    usb
+                        ? "USB 伴音使用 PulseAudio 默认设备（" + sampleRate + " Hz " + channels + " ch LPCM）。USB LPCM uses the default PulseAudio device."
+                        : "镜像伴音使用 PulseAudio 默认设备。Mirror audio uses the default PulseAudio device.");
                 return new PulsePcmOutput(simple);
             }
         }
@@ -564,7 +605,7 @@ internal sealed class AlsaPcmOutput : IPcmOutput
 
     public string Name => "alsa";
 
-    public static AlsaPcmOutput? TryCreate(IAirPlayLog log)
+    public static AlsaPcmOutput? TryCreate(IAirPlayLog log, int sampleRate, int channels, bool usb)
     {
         if (!NativeLibrary.TryLoad("libasound.so.2", out _))
         {
@@ -578,13 +619,17 @@ internal sealed class AlsaPcmOutput : IPcmOutput
                 return null;
             }
 
-            if (AlsaNative.snd_pcm_set_params(pcm, 2, 3, 2, 44100, 1, 100_000) < 0)
+            if (AlsaNative.snd_pcm_set_params(pcm, 2, 3, (uint)channels, (uint)sampleRate, 1, 100_000) < 0)
             {
                 AlsaNative.snd_pcm_close(pcm);
                 return null;
             }
 
-            log.Log(AirPlayLogLevel.Information, "镜像伴音使用 ALSA 默认设备。Mirror audio uses the default ALSA device.");
+            log.Log(
+                AirPlayLogLevel.Information,
+                usb
+                    ? "USB 伴音使用 ALSA 默认设备（" + sampleRate + " Hz " + channels + " ch LPCM）。USB LPCM uses the default ALSA device."
+                    : "镜像伴音使用 ALSA 默认设备。Mirror audio uses the default ALSA device.");
             return new AlsaPcmOutput(pcm);
         }
         catch (DllNotFoundException)

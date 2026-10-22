@@ -162,12 +162,18 @@ import zipfile
 win, linux = sys.argv[1], sys.argv[2]
 with zipfile.ZipFile(win) as archive:
     text = archive.read("AirPlayServer.Host-v0.0.0-test-win-x64/windows-usb-driver.ps1").decode()
-if "usbccgp" not in text or "Do not run Zadig" not in text or "does not download libusb0.sys" not in text:
+    setup = archive.read("AirPlayServer.Host-v0.0.0-test-win-x64/windows-usb-setup.cmd").decode()
+if "usbccgp" not in text or "Do not run Zadig" not in text or "does not vendor libusb0.sys" not in text:
     sys.exit("windows helper is missing the driver rules")
+if "-Setup" not in text or "release_1.4.0.2" not in text or "--device-id=" not in text:
+    sys.exit("windows helper is missing the one-step filter install")
 if "--all-classes" in text or "--device-classes" in text:
     sys.exit("windows helper must not offer a class filter")
+if "-Setup" not in setup:
+    sys.exit("windows-usb-setup.cmd must launch -Setup")
 with zipfile.ZipFile(linux) as archive:
-    if any(name.endswith("/windows-usb-driver.ps1") for name in archive.namelist()):
+    names = archive.namelist()
+    if any(name.endswith("/windows-usb-driver.ps1") or name.endswith("/windows-usb-setup.cmd") for name in names):
         sys.exit("linux zip must not carry the windows helper")
 PY
 

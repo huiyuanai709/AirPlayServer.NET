@@ -20,7 +20,7 @@ Apple、AirPlay、Bonjour 是 Apple Inc. 的商标。广播里的 `AppleTV14,1` 
 - 可选地把最新帧编码成 JPEG，按 TapClock ATBF type 3 推到 `host:42125`，或原子写入监视目录。默认关闭。
 - 镜像数据连上或断开时，可以 POST Webhook，并按 TapClock 的集成接口通知它重连。配置页默认开在 `127.0.0.1:7099`。本程序不点击控制中心。
 - 多台手机可以同时镜像。默认不限制路数。需要上限时用 `--max-mirrors N`（N 为正整数，没有硬上限；内存和 CPU 才是限制）。每一路有自己的数据端口、计时端口、解密、解码器、画面、`session_id` 和窗口。新手机不会断开已经连上的那一路。同一 IPv4 再次 `SETUP` 仍是原来那一路（锁屏后重连）。进程内 FairPlay 每路一次握手。`--media-key-plugin` 的原生库在各路之间共用。
-- 可选有线画面：`--usb` 用 libusb 收 Apple QuickTime-over-USB（Valeria）的 H.264。这是纯 C# 协议实现，不链接 Qt 控件、QuickTime.app 或 QTKit。默认关闭。有线和无线可以同时收，多台 USB 手机各占一路。USB 没有 FairPlay。伴音（LPCM）这一版只识别、不播放。
+- 可选有线画面：`--usb` 用 libusb 收 Apple QuickTime-over-USB（Valeria）的 H.264。这是纯 C# 协议实现，不链接 Qt 控件、QuickTime.app 或 QTKit。默认关闭。有线和无线可以同时收，多台 USB 手机各占一路。USB 没有 FairPlay。伴音是 ASYN `EAT!` 里的明文 LPCM，写到系统默认播放设备。
 
 ## 多设备镜像
 
@@ -46,11 +46,11 @@ Several phones can mirror at once. There is no default cap. `--max-mirrors N` (a
 
 导出目录里，USB 文件名是 `mirror-usb-<序列号>.jpg`。通知 JSON 增加 `ingress`：`airplay` 或 `usb`。TapClock 原来的 `source` 仍是 `AirPlayServer.NET`，不要改成 `usb`。USB 另有 `device_id`（序列号）；`source_ip` 为空。点击事件同样带 `ingress`。
 
-Windows 的做法和 iPhoneMirror 的驱动分工同一类，但安装器是这里自己写的，不附带内核驱动：父设备保持 `usbccgp`（Apple Mobile Device Support，或 Microsoft Store 的 Apple Devices）。不要用 Zadig 替换 Apple 复合父设备。WinUSB 不能 `SET_CONFIGURATION`，所以 QuickTime 切换要靠 libusb-win32 装在**这一台设备实例**上的 UpperFilter，而不是换掉父驱动。程序只认领重新枚举出来的 QuickTime 接口（类 `0xFF` 子类 `0x2A`）。认领失败时日志会写出 libusb 错误码和下一步，无线和其他手机继续。把 `libusb-1.0.dll` 放在程序旁边。win-x64 发布包里的 `windows-usb-driver.ps1` 可以检查状态、下载用户态 DLL，或调用你准备的官方 `install-filter.exe`。完整步骤见 [docs/usb-windows.md](docs/usb-windows.md)。Linux 用系统的 `libusb-1.0.so.0`（`apt install libusb-1.0-0`）。macOS 用 `libusb-1.0.0.dylib`（Homebrew 的 libusb）。没有设备或认领失败时，协议单元测试仍然可以跑；CI 不要求插着手机。
+Windows 的做法和 iPhoneMirror 的驱动分工同一类，但安装器是这里自己写的，不附带内核驱动：父设备保持 `usbccgp`（Apple Mobile Device Support，或 Microsoft Store 的 Apple Devices）。不要用 Zadig 替换 Apple 复合父设备。WinUSB 不能 `SET_CONFIGURATION`，所以 QuickTime 切换要靠 libusb-win32 装在**这一台设备实例**上的 UpperFilter，而不是换掉父驱动。程序只认领重新枚举出来的 QuickTime 接口（类 `0xFF` 子类 `0x2A`）。认领失败时日志会写出 libusb 错误码和下一步，无线和其他手机继续。win-x64 发布包里双击 `windows-usb-setup.cmd`（或 `windows-usb-driver.ps1 -Setup`）会请求管理员权限，下载官方 `libusb-1.0.dll` 和官方 libusb-win32 1.4.0.2，校验 SHA256，然后用 `install --device-id=<父设备实例>` 只给这一台 Apple 父设备装过滤驱动。完整步骤和官方 URL 见 [docs/usb-windows.md](docs/usb-windows.md)。Linux 用系统的 `libusb-1.0.so.0`（`apt install libusb-1.0-0`）。macOS 用 `libusb-1.0.0.dylib`（Homebrew 的 libusb）。没有设备或认领失败时，协议单元测试仍然可以跑；CI 不要求插着手机。
 
-ASYN `EAT!`（LPCM 伴音）会记一条日志，然后丢掉。画面继续。播放留到后面的版本。
+ASYN `EAT!` 是明文 LPCM。SYNC `AFMT` 给出 AudioStreamBasicDescription，常见是 48 kHz、立体声、16-bit 有符号小端。样本写进和无线伴音相同的默认播放设备（Windows WASAPI，Linux 先 PulseAudio 再 ALSA）。播放设备打不开时丢掉 PCM，画面继续。无线 AAC-ELD 仍按 `SET_PARAMETER` 的音量播放。USB 没有这条音量参数，样本按原样播放。
 
-`--usb` receives the QuickTime-over-USB screen in pure C# through libusb. It is off unless requested, runs beside wireless AirPlay, and gives each USB phone its own decoder and session. `--max-mirrors` counts both, including the always-on AirPlay listener, so `1` leaves no room for USB. `--allow-dual` permits the same device name on both paths. TapClock `source` stays `AirPlayServer.NET`; `ingress` is `airplay` or `usb`. On Windows the Apple parent stays `usbccgp`; a libusb-win32 UpperFilter is added to that instance only, because WinUSB cannot `SET_CONFIGURATION`. Do not run Zadig on the Apple composite parent. `windows-usb-driver.ps1` and [docs/usb-windows.md](docs/usb-windows.md) are the install notes. The repository does not bundle `libusb0.sys`. USB audio is recognized and not played.
+`--usb` receives the QuickTime-over-USB screen in pure C# through libusb. It is off unless requested, runs beside wireless AirPlay, and gives each USB phone its own decoder and session. `--max-mirrors` counts both, including the always-on AirPlay listener, so `1` leaves no room for USB. `--allow-dual` permits the same device name on both paths. TapClock `source` stays `AirPlayServer.NET`; `ingress` is `airplay` or `usb`. On Windows the Apple parent stays `usbccgp`; a libusb-win32 UpperFilter is added to that instance only, because WinUSB cannot `SET_CONFIGURATION`. Do not run Zadig on the Apple composite parent. `windows-usb-setup.cmd` is the elevated one-step helper: it downloads the official user-mode DLL and the official libusb-win32 filter, then installs that filter on the Apple parent. [docs/usb-windows.md](docs/usb-windows.md) has the URLs and SHA256 pins. The repository does not vendor `libusb0.sys`. USB `EAT!` LPCM plays on the default device. Wireless AAC-ELD is unchanged.
 
 ## 镜像连接通知
 
@@ -159,7 +159,7 @@ Connected means a parsed 128-byte mirror data header, not RTSP SETUP by itself. 
 
 type 96 的 SETUP 返回本会话自己的 `dataPort`、`controlPort` 和 `timingPort`。多路镜像各用各的套接字、解码器、音量和播放，互不共用。密钥是 SHA-512(16 字节内容密钥 || 32 字节 pair-verify 秘密) 的前 16 字节，AES-128-CBC，IV 是会话 `eiv`，每个 RTP 包重置。载荷是 AAC-ELD（AudioSpecificConfig `F8 E8 50 00`，44.1 kHz 立体声）。解码用已经按需加载的 libavcodec，不链进 AOT 二进制。
 
-播放写系统默认设备。Windows 用 WASAPI 共享模式，让系统做采样率转换。Linux 先试 PulseAudio（`libpulse-simple.so.0`），再试 ALSA（`libasound.so.2`）的 `default`。都打不开时日志写明降级，PCM 丢掉，视频镜像继续。macOS 这一版没有 CoreAudio，同样走 Pulse/ALSA，没有就丢掉。解码器和播放设备都等到第一包 PCM 才打开。
+播放写系统默认设备。Windows 用 WASAPI 共享模式，让系统做采样率转换。Linux 先试 PulseAudio（`libpulse-simple.so.0`），再试 ALSA（`libasound.so.2`）的 `default`。都打不开时日志写明降级，PCM 丢掉，视频镜像继续。macOS 这一版没有 CoreAudio，同样走 Pulse/ALSA，没有就丢掉。解码器和播放设备都等到第一包 PCM 才打开。无线这一路固定按 44.1 kHz 立体声打开，音量仍是下面的 `SET_PARAMETER`。USB 的 `EAT!` 用 `AFMT` 里的采样率另开一路播放，不经过 AAC 解码，也不套用这条音量。
 
 `SET_PARAMETER` 的 `text/parameters`（`volume: -11.25`）或二进制 plist 的 `volume` 把分贝钳在 [-144, 0]，并按上游播放器的增益用到 PCM 上：-30 dB 及以下静音，0 dB 原样，中间线性。`GET_PARAMETER volume` 返回当前保存的分贝，默认 `volume: 0.0`。`PAUSE` 丢掉已排队的伴音并静音，直到 `FLUSH` 或 `RECORD`。`FLUSH` 的 `RTP-Info: seq=N` 只清音频缓冲。这三条都不动视频，也不改锁屏恢复时保留的解码器和内容密钥。只拆 type 96 时停音频套接字、留视频和密钥。type 110（哪怕同一条里还有 type 96）仍只拆视频，密钥和 SPS/PPS 保留；若 plist 里有 type 96，音频套接字一并停下。
 

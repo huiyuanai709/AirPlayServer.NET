@@ -3,8 +3,8 @@ namespace AirPlayServer.Core.Usb;
 /// <summary>
 /// One phone's QuickTime USB handshake. The device speaks first with PING.
 /// SYNC messages are answered with RPLY. ASYN FEED is demuxed to Annex-B and
-/// is not FairPlay-encrypted. ASYN EAT! (LPCM) is recognized and left for a
-/// later playback step.
+/// is not FairPlay-encrypted. ASYN EAT! is clear LPCM. A playable buffer is
+/// returned on <see cref="QtStep.Pcm"/> for the USB playback queue.
 /// </summary>
 internal sealed class QtSession
 {
@@ -15,7 +15,8 @@ internal sealed class QtSession
     private ulong _deviceAudioClock;
     private byte[]? _sequence;
     private byte[]? _picture;
-    private int _audioNoted;
+    private QtAudioFormat _audioFormat = QtAudioFormat.Default;
+    private int _audioRejected;
 
     public QtSession(double width, double height, Func<ulong>? nanoseconds = null)
     {
@@ -33,7 +34,7 @@ internal sealed class QtSession
 
     public int AudioPackets { get; private set; }
 
-    public bool AudioPlaybackPending => AudioPackets > 0;
+    public QtAudioFormat AudioFormat => _audioFormat;
 
     /// <summary>
     /// Accepts one packet body with the 4-byte length already removed.
@@ -90,7 +91,7 @@ internal sealed class QtSession
             case QtMagic.Cvrp:
                 return AcceptCvrp(body);
             case QtMagic.Afmt:
-                return ClocklessReply(body, QtMagic.Afmt, static correlation => QtPackets.ErrorReply(correlation));
+                return AcceptAfmt(body);
             case QtMagic.Clok:
                 return AcceptClock(body, QtMagic.Clok, 0x10000);
             case QtMagic.Time:
@@ -138,6 +139,21 @@ internal sealed class QtSession
 
         var local = deviceClock + 0x1000AF;
         return new QtStep([_need, QtPackets.ClockReply(correlation, local)], null);
+    }
+
+    private QtStep AcceptAfmt(ReadOnlySpan<byte> body)
+    {
+        if (!QtPackets.TrySync(body, QtMagic.Afmt, out _, out var correlation, out var rest))
+        {
+            return QtStep.Empty;
+        }
+
+        if (QtAudioFormat.TryParse(rest, out var format))
+        {
+            _audioFormat = format;
+        }
+
+        return new QtStep([QtPackets.ErrorReply(correlation)], null);
     }
 
     private QtStep AcceptClock(ReadOnlySpan<byte> body, uint subtype, ulong delta)
@@ -192,28 +208,40 @@ internal sealed class QtSession
         if (subtype == QtMagic.Eat)
         {
             AudioPackets++;
-            _audioNoted = 1;
-            return QtStep.Empty;
+            if (QtPcm.TryRead(rest, _audioFormat, out var pcm))
+            {
+                return new QtStep([], null, pcm);
+            }
+
+            var firstReject = Interlocked.Exchange(ref _audioRejected, 1) == 0;
+            return firstReject ? new QtStep([], null, unplayableAudio: true) : QtStep.Empty;
         }
 
         return QtStep.Empty;
     }
-
-    public bool ConsumeAudioNotice()
-        => Interlocked.Exchange(ref _audioNoted, 0) == 1;
 }
 
 internal readonly struct QtStep
 {
     public static readonly QtStep Empty = new([], null);
 
-    public QtStep(byte[][] writes, QtVideoUnit? video)
+    public QtStep(byte[][] writes, QtVideoUnit? video, QtPcmChunk? pcm = null, bool unplayableAudio = false)
     {
         Writes = writes;
         Video = video;
+        Pcm = pcm;
+        UnplayableAudio = unplayableAudio;
     }
 
     public byte[][] Writes { get; }
 
     public QtVideoUnit? Video { get; }
+
+    public QtPcmChunk? Pcm { get; }
+
+    /// <summary>
+    /// True once, for the first EAT! packet that is not playable LPCM.
+    /// Later rejects stay quiet. Video is unaffected either way.
+    /// </summary>
+    public bool UnplayableAudio { get; }
 }

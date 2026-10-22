@@ -63,7 +63,9 @@ ATBF 头仍然不含来源地址，日志会写 IP 或序列号。
 而且启动时的无线监听已经占 1 个名额，所以 --max-mirrors 1 时 USB 开不出来。
 同一台手机在两边设备名相同（忽略大小写）时，默认不再开第二路。--allow-dual 允许两路一起收。
 USB 产品名经常只是 iPhone，和 AirPlay 里的名字不同，所以默认很少拦得住同一台。
-伴音（LPCM）这一版只识别、不播放。
+USB 伴音是 ASYN EAT! 里的明文 LPCM（通常 48 kHz 立体声），写到系统默认播放设备。
+Windows 用 WASAPI，Linux 用 PulseAudio 或 ALSA。打不开设备时只丢声音，画面继续。
+无线 AAC-ELD 和手机音量增益保持原样。USB 没有 SET_PARAMETER，按样本原样播放。
 
 需要 libusb-1.0，放在程序旁边或系统路径里：
   Windows  libusb-1.0.dll
@@ -71,14 +73,20 @@ USB 产品名经常只是 iPhone，和 AirPlay 里的名字不同，所以默认
   macOS    libusb-1.0.0.dylib
 找不到 libusb 时只记日志，无线 AirPlay 照常。缺库和认领失败是两条不同的日志。
 
-Windows 驱动（win-x64 包里有 windows-usb-driver.ps1）：
+Windows 驱动（win-x64 包里有 windows-usb-setup.cmd 和 windows-usb-driver.ps1）：
   父设备保持 usbccgp。安装 Apple Devices（Microsoft Store）或 Apple Mobile Device Support。
+  商店页面：https://apps.microsoft.com/detail/9np83lwlpz9k
   不要用 Zadig 把 Apple 复合父设备换成 WinUSB 或 libusbK。WinUSB 不能切换 USB 配置。
-  只给这一台手机的父设备实例装 libusb-win32 UpperFilter。本包不附带 libusb0.sys。
-  检查：  powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -Check
-  用户态 DLL：powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -FetchLibusb -HostDir .
-  过滤驱动（管理员，zip 是你自己下载的官方 libusb-win32）：
-    powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -InstallFilter -FilterZip C:\path\libusb-win32-bin.zip
+  一键：插上手机，双击 windows-usb-setup.cmd，在管理员提示里允许。
+  脚本下载官方 libusb 1.0.30 的 libusb-1.0.dll，以及官方 libusb-win32 1.4.0.2，
+  校验 SHA256 后，只给这一台 Apple 父设备装 UpperFilter（--device-id=该实例）。
+  本包不附带 libusb0.sys，也不下载 Apple 的安装包。临时 zip 用完即删。
+  也可以：powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -Setup
+  只检查：powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -Check
+  只放用户态 DLL：powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -FetchLibusb -HostDir .
+  已有官方 zip 时（管理员）：
+    powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -InstallFilter -FilterZip C:\path\libusb-win32-bin-1.4.0.2.zip
+  官方地址写在 windows-usb-driver.ps1 开头，也写在 docs/usb-windows.md。
   装完重新插拔，解锁并信任这台电脑，再加 --usb。
   libusb -12 表示配置切换不被当前驱动允许。-3 / -6 表示设备忙。-4 / -5 表示手机不在线上。
   源码说明：docs/usb-windows.md。

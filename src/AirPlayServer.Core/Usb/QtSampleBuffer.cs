@@ -32,6 +32,44 @@ internal readonly struct QtVideoUnit
 /// </summary>
 internal static class QtSampleBuffer
 {
+    /// <summary>
+    /// Copies the <c>sdat</c> payload out of a CMSampleBuffer atom. Video and
+    /// audio ASYN packets both carry one. The caller decides what the bytes mean.
+    /// </summary>
+    public static bool TryCopySampleData(ReadOnlySpan<byte> sampleAtom, out byte[] sample)
+    {
+        sample = [];
+        if (!TryAtom(sampleAtom, QtMagic.SampleBuffer, out var body))
+        {
+            return false;
+        }
+
+        byte[]? found = null;
+        while (body.Length >= 8)
+        {
+            var length = BinaryPrimitives.ReadInt32LittleEndian(body);
+            if (length < 8 || length > body.Length)
+            {
+                return false;
+            }
+
+            if (BinaryPrimitives.ReadUInt32LittleEndian(body[4..]) == QtMagic.SampleData)
+            {
+                found = body.Slice(8, length - 8).ToArray();
+            }
+
+            body = body[length..];
+        }
+
+        if (found is null || found.Length == 0)
+        {
+            return false;
+        }
+
+        sample = found;
+        return true;
+    }
+
     public static bool TryReadVideo(ReadOnlySpan<byte> sampleAtom, out QtVideoUnit unit)
     {
         unit = default;

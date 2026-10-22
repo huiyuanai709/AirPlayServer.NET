@@ -4,7 +4,8 @@
 # flavor defaults to lean. ui zips use the -ui name suffix inside the archive.
 # The zip contains the binary, RUN.txt, LICENSE, NOTICE.md, and VERSION.txt.
 # linux-x64 also gets airplayserver.service.
-# win-x64 also gets windows-usb-driver.ps1. That script does not contain a driver.
+# win-x64 also gets windows-usb-driver.ps1 and windows-usb-setup.cmd.
+# Those files do not contain a driver. -Setup downloads official bits.
 # osx-arm64 and osx-x64 pack the same Mach-O name as linux, plus any
 # Avalonia Skia/HarfBuzz .dylib files sitting next to the binary.
 # Runtime *.dll, *.so, and *.dylib are kept. Debug symbols are not.
@@ -98,7 +99,7 @@ if [ "$rid" = "linux-x64" ] || [ "$rid" = "osx-arm64" ] || [ "$rid" = "osx-x64" 
   chmod +x "$stage/$binary"
 fi
 if [ "$rid" = "win-x64" ]; then
-  cp "$root/packaging/windows-usb-driver.ps1" "$stage/"
+  cp "$root/packaging/windows-usb-driver.ps1" "$root/packaging/windows-usb-setup.cmd" "$stage/"
 fi
 if [ "$rid" = "linux-x64" ]; then
   cp "$root/packaging/airplayserver.service" "$stage/"
@@ -198,9 +199,11 @@ with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as archive:
     elif service in names:
         sys.exit("service file does not belong in this rid")
     helper = prefix + "/windows-usb-driver.ps1"
+    setup = prefix + "/windows-usb-setup.cmd"
     if expect_usb_helper:
         required.append(helper)
-    elif helper in names:
+        required.append(setup)
+    elif helper in names or setup in names:
         sys.exit("windows usb helper does not belong in this rid")
 
     missing = [name for name in required if name not in names]

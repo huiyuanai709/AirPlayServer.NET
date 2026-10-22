@@ -230,6 +230,7 @@ internal sealed class UsbQtIngress : IAsyncDisposable
     {
         IUsbBulkChannel? channel = null;
         UsbMirrorSession? session = null;
+        UsbPcmPlayer? player = null;
         long generation = 0;
         var opened = false;
         try
@@ -262,6 +263,7 @@ internal sealed class UsbQtIngress : IAsyncDisposable
             var framer = new QtReassembler();
             var buffer = new byte[256 * 1024];
             var lastNeed = Environment.TickCount64;
+            player = new UsbPcmPlayer(_log);
             while (!_cancellation.IsCancellationRequested)
             {
                 var count = channel.Read(buffer, 1000);
@@ -303,11 +305,15 @@ internal sealed class UsbQtIngress : IAsyncDisposable
                         localSession.Feed.Submit(video);
                     }
 
-                    if (qt.ConsumeAudioNotice())
+                    if (step.Pcm is { } pcm)
+                    {
+                        player?.Submit(pcm);
+                    }
+                    else if (step.UnplayableAudio)
                     {
                         _log.Log(
                             AirPlayLogLevel.Information,
-                            "USB 伴音（ASYN EAT!，LPCM）已收到，这一版先不播放。画面继续。 USB audio (ASYN EAT!, LPCM) arrived and is not played yet. Video continues.");
+                            "USB 伴音包不是可播放的 LPCM，这一包丢掉，画面继续。 This USB audio packet is not playable LPCM and was dropped. Video continues.");
                     }
                 });
             }
@@ -332,6 +338,7 @@ internal sealed class UsbQtIngress : IAsyncDisposable
         }
         finally
         {
+            player?.Dispose();
             channel?.Dispose();
             if (session is not null)
             {

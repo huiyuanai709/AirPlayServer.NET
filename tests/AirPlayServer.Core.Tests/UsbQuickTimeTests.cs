@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using AirPlayServer.Core.Audio;
 using AirPlayServer.Core.Media;
 using AirPlayServer.Core.Notify;
 using AirPlayServer.Core.Pairing;
@@ -398,10 +399,116 @@ public sealed class UsbQuickTimeTests
         var script = File.ReadAllText(FindRepoFile("packaging", "windows-usb-driver.ps1"));
         Assert.Contains("usbccgp", script, StringComparison.Ordinal);
         Assert.Contains("Do not run Zadig", script, StringComparison.Ordinal);
-        Assert.Contains("does not download libusb0.sys", script, StringComparison.Ordinal);
-        Assert.Contains("--device=", script, StringComparison.Ordinal);
+        Assert.Contains("does not vendor libusb0.sys", script, StringComparison.Ordinal);
+        Assert.Contains("--device-id=", script, StringComparison.Ordinal);
+        Assert.Contains("-Setup", script, StringComparison.Ordinal);
+        Assert.Contains("7fb1dfec805b97983763d7d0ae244320da12add1003d4249c96cc4d586398c79", script, StringComparison.Ordinal);
+        Assert.Contains("00004c92cdb99be36e17fb2377165eb97e63b48ba895bfc04a642ea9c3e26d94", script, StringComparison.Ordinal);
+        Assert.Contains("https://github.com/mcuee/libusb-win32/releases/download/release_1.4.0.2/libusb-win32-bin-1.4.0.2.zip", script, StringComparison.Ordinal);
         Assert.DoesNotContain("--all-classes", script, StringComparison.Ordinal);
         Assert.DoesNotContain("--device-classes", script, StringComparison.Ordinal);
+        var setup = File.ReadAllText(FindRepoFile("packaging", "windows-usb-setup.cmd"));
+        Assert.Contains("-Setup", setup, StringComparison.Ordinal);
+        Assert.Contains("usbccgp", setup, StringComparison.Ordinal);
+        Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(FindRepoFile("packaging", "windows-usb-driver.ps1"))!, "*.sys"));
+    }
+
+    [Fact]
+    public void Eat_lpcm_is_decoded_and_a_later_feed_still_demuxes()
+    {
+        var session = new QtSession(1920, 1200, () => 42);
+        Assert.Equal(48000, session.AudioFormat.SampleRateHertz);
+        Assert.Equal(2, session.AudioFormat.Channels);
+
+        var afmt = SyncBody(QtMagic.Afmt, 99, Asbd(44100, channels: 1, flags: 0x4C, bits: 16, bytesPerFrame: 2));
+        var reply = session.Accept(afmt);
+        Assert.Equal(QtPackets.ErrorReply(99), Assert.Single(reply.Writes));
+        Assert.Equal(44100, session.AudioFormat.SampleRateHertz);
+        Assert.Equal(1, session.AudioFormat.Channels);
+        Assert.Null(reply.Pcm);
+
+        short[] pcm = [1, -2, 300];
+        var eat = session.Accept(AsynBody(QtMagic.Eat, SampleBuffer(S16(pcm))));
+        var chunk = Assert.IsType<QtPcmChunk>(eat.Pcm);
+        Assert.Equal(pcm, chunk.Samples);
+        Assert.Equal(1, chunk.Channels);
+        Assert.Equal(44100, chunk.SampleRate);
+        Assert.Null(eat.Video);
+        Assert.Equal(1, session.AudioPackets);
+
+        var feed = session.Accept(Body("qt-asyn-feed.bin"));
+        Assert.True(feed.Video is { KeyFrame: true });
+        Assert.Null(feed.Pcm);
+    }
+
+    [Fact]
+    public void Eat_formats_cover_endian_planes_float_and_a_rejected_codec()
+    {
+        var stereo = QtAudioFormat.Default;
+        Assert.True(QtPcm.TryDecode(S16([1, 2, 3, 4]), stereo, out var native));
+        Assert.Equal(new short[] { 1, 2, 3, 4 }, native);
+
+        var big = stereo with { FormatFlags = 0x0E };
+        var swapped = new byte[] { 0x00, 0x01, 0xFF, 0xFE };
+        Assert.True(QtPcm.TryDecode(swapped, big, out var wide));
+        Assert.Equal(new short[] { 0x0001, -2 }, wide);
+
+        var planar = stereo with { FormatFlags = 0x2C, BytesPerFrame = 2, BytesPerPacket = 2 };
+        var planes = S16([10, 11, 20, 21]);
+        Assert.True(QtPcm.TryDecode(planes, planar, out var interleaved));
+        Assert.Equal(new short[] { 10, 20, 11, 21 }, interleaved);
+
+        var floats = new QtAudioFormat
+        {
+            SampleRate = 48000,
+            FormatId = QtAudioFormat.Lpcm,
+            FormatFlags = 0x09,
+            BytesPerPacket = 8,
+            FramesPerPacket = 1,
+            BytesPerFrame = 8,
+            Channels = 2,
+            BitsPerChannel = 32,
+        };
+        var floatBytes = new byte[8];
+        BitConverter.TryWriteBytes(floatBytes.AsSpan(0), 0f);
+        BitConverter.TryWriteBytes(floatBytes.AsSpan(4), 1f);
+        Assert.True(QtPcm.TryDecode(floatBytes, floats, out var scaled));
+        Assert.Equal(new short[] { 0, short.MaxValue }, scaled);
+
+        var aac = stereo with { FormatId = 0x20636161 };
+        Assert.False(aac.IsPlayable);
+        var rejected = new QtSession(100, 100, () => 1);
+        var ignored = rejected.Accept(SyncBody(QtMagic.Afmt, 7, Asbd(48000, 2, 0x0C, 16, 4, formatId: 0x20636161)));
+        Assert.Equal(QtPackets.ErrorReply(7), Assert.Single(ignored.Writes));
+        var noise = rejected.Accept(AsynBody(QtMagic.Eat, SampleBuffer(S16([9, 8]))));
+        Assert.Null(noise.Pcm);
+        Assert.True(noise.UnplayableAudio);
+        var again = rejected.Accept(AsynBody(QtMagic.Eat, SampleBuffer(S16([9, 8]))));
+        Assert.False(again.UnplayableAudio);
+    }
+
+    [Fact]
+    public void Usb_pcm_player_writes_the_queue_and_drops_when_playback_blocks()
+    {
+        var played = new List<short>();
+        var done = new ManualResetEventSlim(false);
+        using var player = new UsbPcmPlayer(new ListLog(), (_, _) => new MemoryPcmOutput(played, 4, done));
+        player.Submit(new QtPcmChunk([5, 6, 7, 8], 2, 48000));
+        Assert.True(done.Wait(TimeSpan.FromSeconds(2)));
+        Assert.Equal(new short[] { 5, 6, 7, 8 }, played);
+
+        var entered = new ManualResetEventSlim(false);
+        var release = new ManualResetEventSlim(false);
+        using var blocked = new UsbPcmPlayer(new ListLog(), (_, _) => new GatePcmOutput(entered, release));
+        blocked.Submit(new QtPcmChunk([1, 2], 2, 48000));
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+        for (var i = 0; i < UsbPcmPlayer.QueueCapacity + 3; i++)
+        {
+            blocked.Submit(new QtPcmChunk([(short)i, 0], 2, 48000));
+        }
+
+        Assert.True(blocked.Dropped >= 3);
+        release.Set();
     }
 
     [Fact]
@@ -638,6 +745,148 @@ public sealed class UsbQuickTimeTests
 
             frame = new DecodedFrame(2, 2, new byte[16], 8);
             return true;
+        }
+    }
+
+    private static byte[] SyncBody(uint subtype, ulong correlation, byte[] payload)
+    {
+        var body = new byte[24 + payload.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(body, QtMagic.Sync);
+        BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(12), subtype);
+        BinaryPrimitives.WriteUInt64LittleEndian(body.AsSpan(16), correlation);
+        payload.CopyTo(body.AsSpan(24));
+        return body;
+    }
+
+    private static byte[] AsynBody(uint subtype, byte[] payload)
+    {
+        var body = new byte[16 + payload.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(body, QtMagic.Asyn);
+        BinaryPrimitives.WriteUInt64LittleEndian(body.AsSpan(4), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(12), subtype);
+        payload.CopyTo(body.AsSpan(16));
+        return body;
+    }
+
+    private static byte[] SampleBuffer(byte[] pcm)
+    {
+        var timing = Atom(0x6F707473, new byte[24]);
+        var data = Atom(QtMagic.SampleData, pcm);
+        return Atom(QtMagic.SampleBuffer, Join(timing, data));
+    }
+
+    private static byte[] Asbd(int rate, int channels, uint flags, int bits, int bytesPerFrame, uint formatId = QtAudioFormat.Lpcm)
+    {
+        var data = new byte[40];
+        BitConverter.TryWriteBytes(data.AsSpan(0), (double)rate);
+        BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(8), formatId);
+        BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(12), flags);
+        BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(16), bytesPerFrame);
+        BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(20), 1);
+        BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(24), bytesPerFrame);
+        BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(28), channels);
+        BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(32), bits);
+        return data;
+    }
+
+    private static byte[] S16(short[] samples)
+    {
+        var data = new byte[samples.Length * 2];
+        for (var i = 0; i < samples.Length; i++)
+        {
+            BinaryPrimitives.WriteInt16LittleEndian(data.AsSpan(i * 2), samples[i]);
+        }
+
+        return data;
+    }
+
+    private static byte[] Atom(uint magic, byte[] payload)
+    {
+        var atom = new byte[8 + payload.Length];
+        BinaryPrimitives.WriteInt32LittleEndian(atom, atom.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(atom.AsSpan(4), magic);
+        payload.CopyTo(atom.AsSpan(8));
+        return atom;
+    }
+
+    private static byte[] Join(byte[] left, byte[] right)
+    {
+        var data = new byte[left.Length + right.Length];
+        left.CopyTo(data, 0);
+        right.CopyTo(data.AsSpan(left.Length));
+        return data;
+    }
+
+    private sealed class MemoryPcmOutput : IPcmOutput
+    {
+        private readonly List<short> _samples;
+        private readonly int _expect;
+        private readonly ManualResetEventSlim _done;
+
+        public MemoryPcmOutput(List<short> samples, int expect, ManualResetEventSlim done)
+        {
+            _samples = samples;
+            _expect = expect;
+            _done = done;
+        }
+
+        public bool IsOpen => true;
+
+        public string Name => "memory";
+
+        public void Write(ReadOnlySpan<short> interleaved, int channels, int sampleRate)
+        {
+            lock (_samples)
+            {
+                foreach (var sample in interleaved)
+                {
+                    _samples.Add(sample);
+                }
+
+                if (_samples.Count >= _expect)
+                {
+                    _done.Set();
+                }
+            }
+        }
+
+        public void Flush()
+        {
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class GatePcmOutput : IPcmOutput
+    {
+        private readonly ManualResetEventSlim _entered;
+        private readonly ManualResetEventSlim _release;
+
+        public GatePcmOutput(ManualResetEventSlim entered, ManualResetEventSlim release)
+        {
+            _entered = entered;
+            _release = release;
+        }
+
+        public bool IsOpen => true;
+
+        public string Name => "gate";
+
+        public void Write(ReadOnlySpan<short> interleaved, int channels, int sampleRate)
+        {
+            _entered.Set();
+            _release.Wait(TimeSpan.FromSeconds(2));
+        }
+
+        public void Flush()
+        {
+        }
+
+        public void Dispose()
+        {
+            _release.Set();
         }
     }
 

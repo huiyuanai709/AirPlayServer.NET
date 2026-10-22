@@ -124,8 +124,22 @@ internal static class UsbQtOpenPolicy
 
     public const int SilentWarnMs = 8_000;
 
+    /// <summary>libusb0 <c>EIO</c>. A timed-out bulk read is <c>-116</c>, not this.</summary>
+    public const int Libusb0Eio = -5;
+
+    public const int BulkIoRetries = 3;
+
+    /// <summary>Returned when <c>libusb0.dll</c> has no <c>usb_set_altinterface</c> export. Not an errno.</summary>
+    public const int MissingAltExport = -1000;
+
     public static bool ShouldSendEnable(bool configsComplete, int quickTime)
         => configsComplete && quickTime < 0;
+
+    public static bool ShouldRetryBulkIo(int code, int attempt)
+        => code == Libusb0Eio && attempt < BulkIoRetries;
+
+    public static bool PingWriteOk(int wrote)
+        => wrote == 16;
 
     public static bool ShouldWarnSilent(int videoFrames, long openedAt, long now)
         => videoFrames == 0 && now - openedAt >= SilentWarnMs;
@@ -140,10 +154,32 @@ internal static class UsbQtOpenPolicy
            + ". Waiting for the class 0xFF subclass 0x2A interface instead of sending 0x40/0x52 again. "
            + "已经发过 QuickTime 配置请求，等待接口出现，不再重复发送。";
 
-    public static string AlreadyActive(int configuration, string node)
+    public static string AlreadyActive(int configuration, string node, int setResult)
         => "QuickTime USB configuration " + configuration + " is already active on " + node
-           + ". Leaving it there so the phone is not re-enumerated. "
-           + "配置已经是 QuickTime，不再切换，避免手机重新枚举。";
+           + ". libusb0 usb_set_configuration returned " + setResult
+           + ". A matching filter cache does not re-enumerate the phone; a different cache is what builds the bulk pipes. No 0x40/0x52 was sent. "
+           + "配置已经是 QuickTime。已调用 usb_set_configuration 让过滤驱动建立批量管道；缓存相同不会重新枚举，也没有发送 0x40/0x52。";
+
+    public static string AltSelected(int iface, int code)
+        => code == MissingAltExport
+            ? "libusb0.dll has no usb_set_altinterface export, so interface " + iface
+              + " was claimed without SELECT_INTERFACE. Bulk pipes were not refreshed that way. "
+              + "没有 usb_set_altinterface，认领接口时没有刷新批量管道。"
+            : "QuickTime USB interface " + iface + " alt setting 0 returned " + code
+              + ". 0 means libusb0 ran SELECT_INTERFACE and refreshed the endpoint pipes. "
+              + "备用设置 0 的返回值。0 表示已经刷新端点管道。";
+
+    public static string HostPing(byte endpoint, int result)
+        => "Sent one QuickTime PING on OUT 0x" + endpoint.ToString("X2")
+           + " before the next bulk read (libusb0 write result " + result
+           + "). The phone may already have sent its PING while this configuration sat active. This is not 0x40/0x52. "
+           + "已向 OUT 发送一包 PING 再读。这不是 0x40/0x52。";
+
+    public static string BulkRetry(byte endpoint, int code, int attempt)
+        => "USB bulk IN 0x" + endpoint.ToString("X2") + " returned " + code
+           + " (attempt " + attempt + " of " + BulkIoRetries
+           + "). Cleared the halt and will read again. No 0x40/0x52 was sent. "
+           + "批量读取失败，已清除 halt 并重试，没有发送 0x40/0x52。";
 
     public static string ConfigStuck(int actual, int wanted, string node)
         => "libusb0 left " + node + " on configuration " + actual + " after SET_CONFIGURATION " + wanted

@@ -49,11 +49,7 @@ if (arguments.SelfCheck)
 }
 
 using var shutdown = new CancellationTokenSource();
-Console.CancelKeyPress += (_, eventArgs) =>
-{
-    eventArgs.Cancel = true;
-    shutdown.Cancel();
-};
+HostSignals.Install(shutdown);
 
 HostUpdate.CleanupStaleFiles();
 

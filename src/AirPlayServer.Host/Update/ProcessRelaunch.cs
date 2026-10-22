@@ -18,6 +18,7 @@ internal sealed class ProcessRelauncher : IRelauncher
     {
         if (OperatingSystem.IsLinux())
         {
+            // Native AOT does not call setenv. Exec passes the marker through execve.
             Environment.SetEnvironmentVariable(HostUpdate.JustUpdatedVariable, "1");
             try
             {

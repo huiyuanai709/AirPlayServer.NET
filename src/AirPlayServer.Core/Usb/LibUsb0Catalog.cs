@@ -197,18 +197,33 @@ internal static class LibUsb0Catalog
                         wait = true;
                         channel = null;
                     }
-                    else if (!ClaimQuickTime(grabbed, enabledThisSession, cancellationToken, out var error))
-                    {
-                        _log.Log(AirPlayLogLevel.Warning, error);
-                        _api.Close(grabbed.Handle);
-                        return null;
-                    }
                     else
                     {
-                        _openFiles.Add(grabbed.Filename);
-                        _openPhones[grabbed.Filename] = phone;
-                        _inflight.Remove(grabbed.Filename);
-                        channel = new Channel(_api, grabbed, () => Release(grabbed.Filename), enabledThisSession, _log);
+                        var claim = ClaimQuickTime(grabbed, cancellationToken, out var error, out var freshConfiguration);
+                        if (claim == QtClaim.Ready)
+                        {
+                            _openFiles.Add(grabbed.Filename);
+                            _openPhones[grabbed.Filename] = phone;
+                            _inflight.Remove(grabbed.Filename);
+                            channel = new Channel(
+                                _api,
+                                grabbed,
+                                () => Release(grabbed.Filename),
+                                enabledThisSession || freshConfiguration,
+                                _log);
+                        }
+                        else
+                        {
+                            _log.Log(AirPlayLogLevel.Warning, error);
+                            _api.Close(grabbed.Handle);
+                            if (claim == QtClaim.Failed)
+                            {
+                                return null;
+                            }
+
+                            wait = true;
+                            channel = null;
+                        }
                     }
                 }
 
@@ -240,47 +255,41 @@ internal static class LibUsb0Catalog
             return null;
         }
 
-        private bool ClaimQuickTime(Grabbed grabbed, bool enabledThisSession, CancellationToken cancellationToken, out string error)
+        private enum QtClaim
         {
+            Ready,
+            Wait,
+            Failed,
+        }
+
+        private QtClaim ClaimQuickTime(Grabbed grabbed, CancellationToken cancellationToken, out string error, out bool freshConfiguration)
+        {
+            freshConfiguration = false;
             _log.Log(
                 AirPlayLogLevel.Information,
                 UsbDescriptorMap.Chosen(grabbed.QuickTime, grabbed.Interface, grabbed.Inbound, grabbed.Outbound));
             if (grabbed.Inbound == 0 || grabbed.Outbound == 0)
             {
                 error = "QuickTime USB 配置里没有找到批量端点。 The QuickTime USB configuration has no bulk endpoints.";
-                return false;
+                return QtClaim.Failed;
             }
 
             var active = _api.GetConfiguration(grabbed.Handle);
-            if (enabledThisSession && active != grabbed.QuickTime)
+            _log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.ConfigurationObserved(active, grabbed.QuickTime, grabbed.Filename));
+            if (UsbQtOpenPolicy.ShouldSelectBeforeClaim(active, grabbed.QuickTime))
             {
-                var deadline = Environment.TickCount64 + 5_000;
-                while (active != grabbed.QuickTime && Environment.TickCount64 < deadline)
+                if (!SelectQuickTimeConfiguration(grabbed, active, cancellationToken, out active, out error))
                 {
-                    if (cancellationToken.IsCancellationRequested)
-                    {
-                        error = "QuickTime USB open cancelled while waiting for configuration " + grabbed.QuickTime + ".";
-                        return false;
-                    }
-
-                    try
-                    {
-                        Task.Delay(250, cancellationToken).GetAwaiter().GetResult();
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        error = "QuickTime USB open cancelled while waiting for configuration " + grabbed.QuickTime + ".";
-                        return false;
-                    }
-
-                    active = _api.GetConfiguration(grabbed.Handle);
+                    return cancellationToken.IsCancellationRequested ? QtClaim.Failed : QtClaim.Wait;
                 }
+
+                freshConfiguration = true;
+                _log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.ConfigurationConfirmed(active, grabbed.QuickTime, grabbed.Filename));
             }
 
-            _log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.ConfigurationObserved(active, grabbed.QuickTime, grabbed.Filename));
             var claimed = _api.ClaimInterface(grabbed.Handle, grabbed.Interface);
             var initialized = false;
-            if (UsbQtOpenPolicy.ClaimNeedsPipeTable(claimed) && (enabledThisSession || active == grabbed.QuickTime))
+            if (UsbQtOpenPolicy.ShouldInitializePipeTable(active, grabbed.QuickTime, claimed))
             {
                 initialized = true;
                 var configured = _api.SetConfiguration(grabbed.Handle, grabbed.QuickTime);
@@ -290,33 +299,126 @@ internal static class LibUsb0Catalog
                 if (configured != 0)
                 {
                     error = UsbDriverHint.ForLibusb0(configured, "set QuickTime USB configuration " + grabbed.QuickTime);
-                    return false;
+                    return QtClaim.Failed;
                 }
 
                 var after = _api.GetConfiguration(grabbed.Handle);
-                if (after > 0 && after != grabbed.QuickTime)
+                _log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.ConfigurationRead(after, grabbed.QuickTime, grabbed.Filename));
+                if (!UsbQtOpenPolicy.ConfigurationIsActive(after, grabbed.QuickTime))
                 {
                     error = UsbQtOpenPolicy.ConfigStuck(after, grabbed.QuickTime, grabbed.Filename);
-                    return false;
+                    return QtClaim.Wait;
                 }
 
+                active = after;
                 claimed = _api.ClaimInterface(grabbed.Handle, grabbed.Interface);
             }
 
             if (claimed != 0)
             {
                 error = UsbDriverHint.ForLibusb0(claimed, "claim QuickTime USB interface " + grabbed.Interface);
-                return false;
+                return QtClaim.Failed;
             }
 
-            if (!initialized)
+            if (!initialized && !freshConfiguration)
             {
                 _log.Log(
                     AirPlayLogLevel.Information,
                     UsbQtOpenPolicy.ClaimedWithoutSetConfiguration(grabbed.Interface, active, grabbed.QuickTime));
             }
 
-            return _api.SelectAlternate(grabbed.Handle, grabbed.Interface, grabbed.Alternate, _log, out error);
+            return _api.SelectAlternate(grabbed.Handle, grabbed.Interface, grabbed.Alternate, _log, out error)
+                ? QtClaim.Ready
+                : QtClaim.Failed;
+        }
+
+        /// <summary>
+        /// Make GET_CONFIGURATION report the QuickTime value before <c>usb_claim_interface</c>.
+        /// libusb0 returns success without touching the bus when its open-time cache already
+        /// equals the request, so a return of 0 is checked against a fresh GET_CONFIGURATION.
+        /// </summary>
+        private bool SelectQuickTimeConfiguration(
+            Grabbed grabbed,
+            int active,
+            CancellationToken cancellationToken,
+            out int confirmed,
+            out string error)
+        {
+            confirmed = active;
+            var configured = _api.SetConfiguration(grabbed.Handle, grabbed.QuickTime);
+            _log.Log(
+                configured == 0 ? AirPlayLogLevel.Information : AirPlayLogLevel.Warning,
+                UsbQtOpenPolicy.SelectedBeforeClaim(active, grabbed.QuickTime, configured));
+            if (configured != 0)
+            {
+                error = UsbDriverHint.ForLibusb0(configured, "set QuickTime USB configuration " + grabbed.QuickTime);
+                return false;
+            }
+
+            var after = PollConfiguration(grabbed, cancellationToken);
+            if (!UsbQtOpenPolicy.ConfigurationIsActive(after, grabbed.QuickTime)
+                && UsbQtOpenPolicy.SetConfigurationWasIgnored(active, grabbed.QuickTime, configured, after))
+            {
+                _log.Log(AirPlayLogLevel.Warning, UsbQtOpenPolicy.CacheIgnored(active, grabbed.QuickTime));
+                var live = _api.SetConfiguration(grabbed.Handle, active);
+                _log.Log(
+                    live == 0 ? AirPlayLogLevel.Information : AirPlayLogLevel.Warning,
+                    UsbQtOpenPolicy.LiveConfiguration(active, live));
+                if (live != 0)
+                {
+                    error = UsbDriverHint.ForLibusb0(live, "set the live USB configuration " + active);
+                    return false;
+                }
+
+                configured = _api.SetConfiguration(grabbed.Handle, grabbed.QuickTime);
+                _log.Log(
+                    configured == 0 ? AirPlayLogLevel.Information : AirPlayLogLevel.Warning,
+                    UsbQtOpenPolicy.SelectedBeforeClaim(active, grabbed.QuickTime, configured));
+                if (configured != 0)
+                {
+                    error = UsbDriverHint.ForLibusb0(configured, "set QuickTime USB configuration " + grabbed.QuickTime);
+                    return false;
+                }
+
+                after = PollConfiguration(grabbed, cancellationToken);
+            }
+
+            _log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.ConfigurationRead(after, grabbed.QuickTime, grabbed.Filename));
+            if (!UsbQtOpenPolicy.ConfigurationIsActive(after, grabbed.QuickTime))
+            {
+                error = UsbQtOpenPolicy.ConfigStuck(after, grabbed.QuickTime, grabbed.Filename);
+                return false;
+            }
+
+            confirmed = after;
+            error = "";
+            return true;
+        }
+
+        private int PollConfiguration(Grabbed grabbed, CancellationToken cancellationToken)
+        {
+            var after = _api.GetConfiguration(grabbed.Handle);
+            var deadline = Environment.TickCount64 + 1_000;
+            while (!UsbQtOpenPolicy.ConfigurationIsActive(after, grabbed.QuickTime) && Environment.TickCount64 < deadline)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return after;
+                }
+
+                try
+                {
+                    Task.Delay(200, cancellationToken).GetAwaiter().GetResult();
+                }
+                catch (OperationCanceledException)
+                {
+                    return after;
+                }
+
+                after = _api.GetConfiguration(grabbed.Handle);
+            }
+
+            return after;
         }
 
         private bool RefreshIfIdle(string action)
@@ -727,9 +829,18 @@ internal static class LibUsb0Catalog
             }
 
             var wrote = _api.WriteQuickTimePing(_handle, _outbound);
-            _log.Log(
-                UsbQtOpenPolicy.PingWriteOk(wrote) ? AirPlayLogLevel.Information : AirPlayLogLevel.Warning,
-                UsbQtOpenPolicy.HostPing(_outbound, wrote));
+            if (UsbQtOpenPolicy.PingWriteOk(wrote))
+            {
+                _log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.HostPing(_outbound, wrote));
+                return;
+            }
+
+            // A timed-out OUT URB is cancelled and the pipe halts. Clear it and
+            // return to the bulk IN so the phone's own PING is not stuck behind
+            // this one-second fallback.
+            _api.ClearHalt(_handle, _outbound);
+            _log.Log(AirPlayLogLevel.Warning, UsbQtOpenPolicy.HostPing(_outbound, wrote));
+            _log.Log(AirPlayLogLevel.Warning, UsbQtOpenPolicy.PingWriteCleared(_outbound, wrote));
         }
 
         public void Write(ReadOnlySpan<byte> data)

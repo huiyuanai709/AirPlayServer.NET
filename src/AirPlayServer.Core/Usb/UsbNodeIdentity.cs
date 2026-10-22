@@ -135,7 +135,10 @@ internal static class UsbQtOpenPolicy
 
     public const int HandshakeIndex = 0x6400;
 
-    /// <summary>libusb0 <c>EINVAL</c>. Claim returns this when the filter configuration is still 0.</summary>
+    /// <summary>
+    /// libusb0 <c>EINVAL</c>. Claim returns this when the filter pipe table is still
+    /// configuration 0, and also when the interface is not part of the active configuration.
+    /// </summary>
     public const int Libusb0InvalidConfiguration = -22;
 
     /// <summary>libusb0 <c>EIO</c>. A timed-out bulk read is <c>-116</c>, not this.</summary>
@@ -161,8 +164,34 @@ internal static class UsbQtOpenPolicy
     public static bool ShouldSendHandshakeControl(bool enabledThisSession)
         => enabledThisSession;
 
+    /// <summary>The bus reports the QuickTime configuration value, not merely a descriptor that contains it.</summary>
+    public static bool ConfigurationIsActive(int active, int quickTime)
+        => quickTime > 0 && active == quickTime;
+
+    /// <summary>
+    /// A class 0xFF/0x2A descriptor can stay visible after iOS returns to the mux configuration.
+    /// Claiming that interface while GET_CONFIGURATION disagrees is EINVAL, not an empty pipe table.
+    /// </summary>
+    public static bool ShouldSelectBeforeClaim(int active, int quickTime)
+        => quickTime > 0 && !ConfigurationIsActive(active, quickTime);
+
+    /// <summary>
+    /// libusb-win32 returns 0 from <c>usb_set_configuration</c> without a bus transfer when the
+    /// configuration cached at <c>usb_open</c> already equals the request. The phone can still be elsewhere.
+    /// </summary>
+    public static bool SetConfigurationWasIgnored(int before, int requested, int setResult, int after)
+        => setResult == 0 && before > 0 && before != requested && after == before;
+
     public static bool ClaimNeedsPipeTable(int claimResult)
         => claimResult == Libusb0InvalidConfiguration;
+
+    /// <summary>
+    /// One <c>usb_set_configuration</c> rebuilds the filter pipe table only after GET_CONFIGURATION
+    /// already equals the QuickTime value. The same EINVAL while the phone is still on another configuration
+    /// is not that case.
+    /// </summary>
+    public static bool ShouldInitializePipeTable(int active, int quickTime, int claimResult)
+        => ConfigurationIsActive(active, quickTime) && ClaimNeedsPipeTable(claimResult);
 
     public static bool ShouldWarnSilent(int videoFrames, long openedAt, long now)
         => videoFrames == 0 && now - openedAt >= SilentWarnMs;
@@ -178,10 +207,46 @@ internal static class UsbQtOpenPolicy
            + "已经发过 QuickTime 配置请求，等待接口出现，不再重复发送。";
 
     public static string ConfigurationObserved(int active, int quickTime, string node)
+    {
+        var action = ConfigurationIsActive(active, quickTime)
+            ? "Active configuration matches the QuickTime descriptor, so the interface can be claimed. usb_set_configuration runs only if that claim reports an uninitialized pipe table. "
+            : "The interface is not claimed while those values differ. usb_set_configuration(" + quickTime
+              + ") runs first, and claim waits until GET_CONFIGURATION returns " + quickTime + ". ";
+        return "libusb0 GET_CONFIGURATION on " + node + " returned " + active
+               + " before claim. The QuickTime descriptor value is " + quickTime + ". "
+               + action
+               + "认领前的当前配置。活动配置还不是 QuickTime 配置时，先切换并确认，再认领接口。";
+    }
+
+    public static string SelectedBeforeClaim(int active, int quickTime, int code)
+        => "usb_set_configuration(" + quickTime + ") returned " + code
+           + " before claim because GET_CONFIGURATION was " + active
+           + ". The QuickTime descriptor value is " + quickTime
+           + ". The interface stays unclaimed until GET_CONFIGURATION returns " + quickTime + ". "
+           + "活动配置还不是 QuickTime 配置，先切换，确认之后才认领接口。";
+
+    public static string ConfigurationRead(int active, int quickTime, string node)
         => "libusb0 GET_CONFIGURATION on " + node + " returned " + active
-           + " before claim. The QuickTime descriptor value is " + quickTime
-           + ". usb_set_configuration runs only if claim reports an uninitialized pipe table. "
-           + "认领前的当前配置。只有管道表还没建立时才调用 usb_set_configuration。";
+           + " after usb_set_configuration(" + quickTime + "). "
+           + "切换之后重新读取的当前配置。";
+
+    public static string ConfigurationConfirmed(int active, int quickTime, string node)
+        => "libusb0 GET_CONFIGURATION on " + node + " returned " + active
+           + ", matching QuickTime configuration " + quickTime
+           + ". Claiming the QuickTime interface now. The bulk IN read starts after claim and waits for the phone's PING. "
+           + "当前配置已经是 QuickTime 配置，现在认领接口并开始读，等手机先发 PING。";
+
+    public static string CacheIgnored(int active, int quickTime)
+        => "usb_set_configuration(" + quickTime + ") returned 0 but GET_CONFIGURATION is still " + active
+           + ". libusb0 skips the bus transfer when the configuration cached at open is already " + quickTime
+           + ". Selecting live configuration " + active + " and then " + quickTime
+           + " so the phone leaves configuration " + active + ". "
+           + "过滤驱动缓存让切换没有发到总线上。先对齐当前配置，再选 QuickTime 配置。";
+
+    public static string LiveConfiguration(int active, int code)
+        => "usb_set_configuration(" + active + ") returned " + code
+           + ". This aligns the libusb0 cache with the configuration the phone is using before the QuickTime configuration is selected. "
+           + "先把过滤驱动缓存对齐到手机正在使用的配置。";
 
     public static string ClaimedWithoutSetConfiguration(int iface, int active, int quickTime)
         => "Claimed QuickTime interface " + iface + " without usb_set_configuration. Active configuration "
@@ -191,8 +256,13 @@ internal static class UsbQtOpenPolicy
 
     public static string InitializedConfiguration(int quickTime, int code)
         => "usb_set_configuration(" + quickTime + ") returned " + code
-           + " after claim failed because the libusb0 pipe table was uninitialized. "
-           + "认领失败后才调用 usb_set_configuration 建立管道。";
+           + " after claim failed with an uninitialized pipe table. GET_CONFIGURATION was already " + quickTime + ". "
+           + "活动配置已经是 QuickTime 配置。认领失败后才调用 usb_set_configuration 建立管道。";
+
+    public static string PingWriteCleared(byte endpoint, int result)
+        => "QuickTime PING write on OUT 0x" + endpoint.ToString("X2") + " returned " + result
+           + ". Cleared the OUT halt and returned to the bulk IN read so the phone's PING can arrive. This is not 0x40/0x52. "
+           + "PING 写入失败，已清除 OUT halt，继续读。手机先说话。这不是 0x40/0x52。";
 
     public static string AltSelected(int iface, int alternate, int code)
         => code == MissingAltExport

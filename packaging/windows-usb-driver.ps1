@@ -7,8 +7,14 @@
 # -Setup downloads two official archives, checks the pinned SHA256, and then:
 #   1. copies the user-mode libusb-1.0.dll next to the host
 #   2. runs install-filter.exe with --device-id=<Apple parent instance>
+#   3. copies that zip's bin\amd64\libusb0.sys to %SystemRoot%\System32\drivers\libusb0.sys
+#      and the matching bin\amd64\libusb0.dll to %SystemRoot%\System32\libusb0.dll
+#   4. refuses to succeed unless Test-Path finds libusb0.sys
+# install-filter.exe creates the libusb0 service (ImagePath system32\drivers\libusb0.sys,
+# demand start) and the UpperFilter. It does not copy the driver file. Without step 3,
+# Device Manager stays on Code 39 (CM_PROB_DRIVER_FAILED_LOAD): the phone only charges.
 # The filter is an UpperFilter on that one usbccgp (or usbaapl) parent.
-# Interface functions (MI_) are not selected. The temp zip is deleted afterwards.
+# Interface functions (MI_) are not selected. The temp zip is deleted after the file check.
 #
 #   windows-usb-setup.cmd
 #   powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -Setup
@@ -42,6 +48,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $script:ExitCode = 0
+$script:DriverFileMissing = $false
 $LibusbVersion = "1.0.30"
 $LibusbUrl = "https://github.com/libusb/libusb/releases/download/v$LibusbVersion/libusb-$LibusbVersion.7z"
 $LibusbSha256 = "7fb1dfec805b97983763d7d0ae244320da12add1003d4249c96cc4d586398c79"
@@ -132,13 +139,42 @@ function Assert-OfficialHash([string]$Path, [string]$Expected, [string]$Url) {
     Write-Step "SHA256 $actual matches the pinned official hash." "SHA256 与脚本里的官方值一致。"
 }
 
+function Get-NativeSystem32 {
+    $windows = $env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($windows)) {
+        $windows = "C:\Windows"
+    }
+
+    # 32-bit PowerShell on 64-bit Windows redirects System32 to SysWOW64.
+    # The amd64 driver must land in the native System32 the service ImagePath uses.
+    if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+        $sysnative = Join-Path $windows "Sysnative"
+        if (Test-Path -LiteralPath $sysnative) {
+            return $sysnative
+        }
+    }
+
+    return (Join-Path $windows "System32")
+}
+
+function Get-Libusb0SysPath {
+    return (Join-Path (Join-Path (Get-NativeSystem32) "drivers") "libusb0.sys")
+}
+
+function Get-Libusb0DllPath {
+    return (Join-Path (Get-NativeSystem32) "libusb0.dll")
+}
+
 function Show-Check {
     $dll = Join-Path $PSScriptRoot "libusb-1.0.dll"
     $beside = Test-Path -LiteralPath $dll
     $service = Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\Apple Mobile Device Service"
     $support = Test-Path "${env:CommonProgramFiles}\Apple\Mobile Device Support"
+    $sysPath = Get-Libusb0SysPath
+    $sysPresent = Test-Path -LiteralPath $sysPath
+    $driverService = Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\libusb0"
     if ($Setup) {
-        Write-Step "Setup downloads the official user-mode DLL and the official libusb-win32 zip, then installs one device UpperFilter on an Apple usbccgp parent." "正在准备一键安装：只给 Apple 的 usbccgp 父设备加 UpperFilter。"
+        Write-Step "Setup downloads the official user-mode DLL and the official libusb-win32 zip, installs one device UpperFilter on an Apple usbccgp parent, then copies bin\amd64\libusb0.sys into System32\drivers." "正在准备一键安装：只给 Apple 的 usbccgp 父设备加 UpperFilter，并把 libusb0.sys 复制到系统驱动目录。"
     }
     else {
         Write-Step "Check only. This does not change drivers." "只检查，不改驱动。"
@@ -146,6 +182,8 @@ function Show-Check {
     Write-Step ("libusb-1.0.dll beside this script: " + $(if ($beside) { $dll } else { "missing" })) ""
     Write-Step ("Apple Mobile Device Service: " + $(if ($service) { "registered" } else { "missing" })) ""
     Write-Step ("Apple Mobile Device Support files: " + $(if ($support) { "present" } else { "missing" })) ""
+    Write-Step ("libusb0 kernel service: " + $(if ($driverService) { "registered (ImagePath system32\drivers\libusb0.sys)" } else { "not registered" })) ""
+    Write-Step ("libusb0.sys: " + $(if ($sysPresent) { $sysPath } else { "missing (" + $sysPath + ")" })) ""
     if (-not $service -and -not $support) {
         Write-Step "Install Apple Devices from the Microsoft Store ($AppleDevicesUrl), or Apple Mobile Device Support. This script does not download Apple software." "安装 Apple Devices 或 Apple Mobile Device Support。这个脚本不下载 Apple 的安装包。商店地址：$AppleDevicesUrl"
     }
@@ -155,18 +193,44 @@ function Show-Check {
         Write-Step "No Apple USB parent is plugged in. After you connect a phone, its service must stay usbccgp. Do not run Zadig on the Apple composite parent." "当前没有 Apple USB 父设备。插上之后服务应保持 usbccgp，不要用 Zadig 改复合父设备。"
     }
 
+    $filterRegistered = $false
     foreach ($parent in $parents) {
+        if ($parent.Libusb0) {
+            $filterRegistered = $true
+        }
+
         if (Test-Replaced $parent.Service) {
             Write-Step ("REFUSE " + $parent.InstanceId + " service=" + $parent.Service + ". Restore the Apple usbccgp parent before a filter install. Do not use Zadig on this parent.") ("拒绝 " + $parent.InstanceId + "。先恢复 usbccgp，不要用 Zadig。")
             continue
         }
 
-        $filter = $(if ($parent.Libusb0) { "libusb0 UpperFilter present" } else { "no libusb0 UpperFilter" })
+        if ($parent.Libusb0 -and -not $sysPresent) {
+            $filter = "libusb0 UpperFilter registered, but libusb0.sys is missing (Code 39)"
+        }
+        elseif ($parent.Libusb0) {
+            $filter = "libusb0 UpperFilter present and libusb0.sys installed"
+        }
+        else {
+            $filter = "no libusb0 UpperFilter"
+        }
         $keep = $(if (Test-KeepsApple $parent.Service) { "Apple parent kept" } else { "unexpected service" })
         Write-Step ($parent.InstanceId + " service=" + $parent.Service + " (" + $keep + "), " + $filter) ""
     }
 
-    Write-Step "One step: double-click windows-usb-setup.cmd, or run this script -Setup from an elevated prompt. That downloads the official user-mode DLL and the official libusb-win32 zip, then installs one device UpperFilter. Manual pieces: -FetchLibusb, and -InstallFilter -FilterZip <that official zip>." "一键：双击 windows-usb-setup.cmd，或用管理员运行 -Setup。它下载官方用户态 DLL 和官方 libusb-win32，然后只给一台 Apple 父设备装 UpperFilter。"
+    if (($driverService -or $filterRegistered) -and -not $sysPresent) {
+        $script:DriverFileMissing = $true
+        $repair = "REPAIR: the libusb0 service or an UpperFilter is registered, but $sysPath is missing. Device Manager shows Code 39 (CM_PROB_DRIVER_FAILED_LOAD) and the phone only charges. install-filter.exe does not copy bin\amd64\libusb0.sys."
+        if ($Setup -or $InstallFilter) {
+            $repair += " This run copies that file from the official libusb-win32 zip after install-filter.exe returns, and fails if it is still missing."
+        }
+        else {
+            $repair += " Re-run windows-usb-setup.cmd or this script -Setup. That copies bin\amd64\libusb0.sys (and the matching amd64 libusb0.dll) from the official zip. Copying bin\amd64\libusb0.sys from that zip into $sysPath by hand also repairs it."
+        }
+        $repair += " Do not use Zadig. This script does not vendor libusb0.sys."
+        Write-Step $repair "需要修复：已注册 libusb0，但缺少 libusb0.sys。设备管理器代码 39（CM_PROB_DRIVER_FAILED_LOAD），手机只能充电。请重新运行 -Setup，或从官方 zip 的 bin\amd64 复制 libusb0.sys。不要用 Zadig。"
+    }
+
+    Write-Step "One step: double-click windows-usb-setup.cmd, or run this script -Setup from an elevated prompt. That downloads the official user-mode DLL and the official libusb-win32 zip, installs one device UpperFilter, then copies bin\amd64\libusb0.sys into System32\drivers and checks the file is there. Manual pieces: -FetchLibusb, and -InstallFilter -FilterZip <that official zip>." "一键：双击 windows-usb-setup.cmd，或用管理员运行 -Setup。它下载官方用户态 DLL 和官方 libusb-win32，给一台 Apple 父设备装 UpperFilter，再把 bin\amd64\libusb0.sys 复制到系统驱动目录并确认文件存在。"
 }
 
 function Get-LibusbDll([string]$Root) {
@@ -239,6 +303,80 @@ function Invoke-InstallFilter {
     }
 }
 
+function Copy-OfficialDriverFile([string]$Source, [string]$Destination, [string]$Label) {
+    if (-not (Test-Path -LiteralPath $Source)) {
+        throw "The official libusb-win32 zip is missing $Label ($Source). This script does not vendor libusb0.sys."
+    }
+
+    $length = (Get-Item -LiteralPath $Source).Length
+    if ($length -le 0) {
+        throw "$Label in the official libusb-win32 zip is empty ($Source)."
+    }
+
+    $destDir = Split-Path -Parent $Destination
+    if (-not (Test-Path -LiteralPath $destDir)) {
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+    }
+
+    $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash
+    $copyError = ""
+    try {
+        Copy-Item -LiteralPath $Source -Destination $Destination -Force
+    }
+    catch {
+        $copyError = $_.Exception.Message
+    }
+
+    if (-not (Test-Path -LiteralPath $Destination)) {
+        throw "Failed to copy $Label to $Destination. $copyError install-filter.exe only registers the libusb0 service and UpperFilter. Device Manager shows Code 39 (CM_PROB_DRIVER_FAILED_LOAD) until $Destination exists. Re-run -Setup from an elevated prompt. This script does not vendor libusb0.sys."
+    }
+
+    try {
+        $destHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash
+    }
+    catch {
+        throw "Could not read $Destination to verify $Label. $($_.Exception.Message) $copyError Re-run -Setup from an elevated prompt."
+    }
+    if (-not $destHash.Equals($sourceHash, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Destination does not match the official zip's $Label. Expected SHA256 $sourceHash. Actual $destHash. $copyError Unplug the phone so Windows can replace a loaded copy, then re-run -Setup."
+    }
+
+    Write-Step "$Label at $Destination matches the official zip (SHA256 $destHash)." "$Label 已在目标路径，SHA256 与官方 zip 一致。"
+}
+
+function Install-Libusb0DriverFiles([string]$Amd64Dir) {
+    if ($Amd64Dir -notmatch "[\\/]amd64$") {
+        throw "Refusing to copy libusb0.sys from a folder that is not bin\amd64: $Amd64Dir"
+    }
+
+    $sysSource = Join-Path $Amd64Dir "libusb0.sys"
+    $sysDest = Get-Libusb0SysPath
+    if (-not (Test-Path -LiteralPath $sysSource)) {
+        throw "bin\amd64\libusb0.sys was not next to install-filter.exe. install-filter.exe does not copy this file, so this script will not claim success. This script does not vendor libusb0.sys."
+    }
+
+    Copy-OfficialDriverFile $sysSource $sysDest "bin\amd64\libusb0.sys"
+    if (-not (Test-Path -LiteralPath $sysDest)) {
+        throw "install-filter.exe registered the libusb0 service and UpperFilter, but $sysDest is still missing. Device Manager will show Code 39 (CM_PROB_DRIVER_FAILED_LOAD) and the phone will only charge. Re-run -Setup. This script does not vendor libusb0.sys."
+    }
+
+    # The kernel driver imports USBD.SYS and ntoskrnl.exe, not this DLL. Code 39 is the
+    # missing .sys. The official package still installs the matching amd64 libusb0.dll
+    # to %SystemRoot%\System32\libusb0.dll (INF CopyFiles libusb_files_dll, DIRID 10).
+    $dllSource = Join-Path $Amd64Dir "libusb0.dll"
+    $dllDest = Get-Libusb0DllPath
+    if (-not (Test-Path -LiteralPath $dllSource)) {
+        throw "bin\amd64\libusb0.dll was not next to bin\amd64\libusb0.sys. The official libusb-win32 zip ships that user-mode library with the driver."
+    }
+
+    Copy-OfficialDriverFile $dllSource $dllDest "bin\amd64\libusb0.dll"
+    if (-not (Test-Path -LiteralPath $dllDest)) {
+        throw "The matching amd64 libusb0.dll was not copied to $dllDest. $sysDest is the file Windows loads; re-run -Setup so both files from bin\amd64 are in place."
+    }
+
+    Write-Step "Verified $sysDest exists. install-filter.exe does not copy bin\amd64\libusb0.sys; this script does, after the filter is registered." "已确认 libusb0.sys 在系统驱动目录。install-filter 不会复制它，本脚本在注册过滤之后复制并检查。"
+}
+
 function Install-FromExtractedTree([string]$Root) {
     $tools = @(Get-ChildItem -Path $Root -Filter "install-filter.exe" -Recurse -File |
         Where-Object { $_.FullName -match "[\\/]amd64[\\/]" })
@@ -260,6 +398,7 @@ function Install-FromExtractedTree([string]$Root) {
     }
 
     $installed = 0
+    $driverCopied = $false
     foreach ($parent in $parents) {
         if (Test-Replaced $parent.Service) {
             Write-Step ("Skipped " + $parent.InstanceId + " because service " + $parent.Service + " replaced the Apple parent. Do not run Zadig on it.") ("已跳过 " + $parent.InstanceId + "。不要用 Zadig。")
@@ -275,13 +414,23 @@ function Install-FromExtractedTree([string]$Root) {
         if ($LASTEXITCODE -ne 0) {
             throw "install-filter.exe exited $LASTEXITCODE for $($parent.InstanceId)"
         }
+
+        # Copy while the extract tree still exists. The caller deletes it after this returns.
+        # Do this on the first success so a later device failure cannot drop the driver file.
+        if (-not $driverCopied) {
+            Install-Libusb0DriverFiles $tool.DirectoryName
+            $driverCopied = $true
+        }
         $installed++
     }
 
     if ($installed -eq 0) {
         throw "No device filter was installed. Restore usbccgp on the Apple parent first. Do not run Zadig on that parent."
     }
-    Write-Step "Unplug the phone and plug it back in, then unlock it and tap Trust This Computer. Start the host with --usb." "重新插拔手机，解锁并信任这台电脑，然后用 --usb 启动。"
+    if (-not $driverCopied -or -not (Test-Path -LiteralPath (Get-Libusb0SysPath))) {
+        throw "The libusb0 UpperFilter was registered, but $(Get-Libusb0SysPath) is still missing. Device Manager will show Code 39 (CM_PROB_DRIVER_FAILED_LOAD). Re-run -Setup. This script does not vendor libusb0.sys."
+    }
+    Write-Step "Unplug the phone and plug it back in so Windows loads System32\drivers\libusb0.sys, then unlock it and tap Trust This Computer. Start the host with --usb. A registered UpperFilter without that file is Code 39 and the phone only charges." "重新插拔手机，让 Windows 加载 libusb0.sys，然后解锁并信任这台电脑，再用 --usb 启动。只有过滤注册、没有这个文件时是代码 39，手机只能充电。"
 }
 
 function Get-OfficialFilterZip {
@@ -382,6 +531,12 @@ catch {
     Write-Step $_.Exception.Message ""
     if ($script:ExitCode -eq 0) {
         $script:ExitCode = 1
+    }
+}
+
+if ($script:DriverFileMissing -and -not $Setup -and -not $InstallFilter -and -not $FetchLibusb) {
+    if ($script:ExitCode -eq 0) {
+        $script:ExitCode = 5
     }
 }
 

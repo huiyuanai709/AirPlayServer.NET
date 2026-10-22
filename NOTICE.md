@@ -110,8 +110,12 @@ runs `windows-usb-driver.ps1 -Setup`, which downloads the official libusb
 1.0.30 user-mode Windows DLL and the official libusb-win32 1.4.0.2 binary
 zip, checks the SHA256 pinned in that script, and runs upstream
 `install-filter.exe` as a per-device UpperFilter on one Apple `usbccgp`
-instance. The kernel driver stays in that upstream package (LGPL) and is
-not vendored here. The temporary zip is deleted after registration. The
+instance. That tool creates the `libusb0` service and UpperFilter and does
+not copy `libusb0.sys`. The script then copies the verified zip's
+`bin\amd64\libusb0.sys` to `%SystemRoot%\System32\drivers\libusb0.sys` (and
+the matching amd64 `libusb0.dll` to `System32`) and fails if the `.sys` is
+still missing. The kernel driver stays in that upstream package (LGPL) and is
+not vendored here. The temporary zip is deleted after that file check. The
 host never rebinds the Apple parent to WinUSB.
 
 ## FFmpeg

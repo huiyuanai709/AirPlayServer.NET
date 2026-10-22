@@ -370,13 +370,53 @@ public sealed class UsbQuickTimeTests
             IsWindows = true,
             LibraryLoaded = true,
             AppleMobileDeviceService = true,
+            Libusb0ServicePresent = true,
+            Libusb0DriverFilePresent = true,
             Parents =
             [
                 new UsbParentBinding { InstanceId = "USB\\VID_05AC&PID_12A8\\phone", Service = "usbccgp", Libusb0UpperFilter = true },
             ],
         };
         Assert.False(UsbDriverHint.NeedsAttention(ready));
-        Assert.Contains("libusb0 UpperFilter", UsbDriverHint.Readiness(ready), StringComparison.Ordinal);
+        Assert.False(UsbDriverHint.DriverRegisteredWithoutFile(ready));
+        var readyText = UsbDriverHint.Readiness(ready);
+        Assert.Contains("libusb0 UpperFilter", readyText, StringComparison.Ordinal);
+        Assert.Contains("libusb0.sys is installed", readyText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Code 39", readyText, StringComparison.Ordinal);
+
+        var filterWithoutFile = new UsbDriverSnapshot
+        {
+            IsWindows = true,
+            LibraryLoaded = true,
+            AppleMobileDeviceService = true,
+            Libusb0ServicePresent = true,
+            Libusb0DriverFilePresent = false,
+            Parents =
+            [
+                new UsbParentBinding { InstanceId = "USB\\VID_05AC&PID_12A8\\phone", Service = "usbccgp", Libusb0UpperFilter = true },
+            ],
+        };
+        Assert.True(UsbDriverHint.NeedsAttention(filterWithoutFile));
+        Assert.True(UsbDriverHint.DriverRegisteredWithoutFile(filterWithoutFile));
+        var broken = UsbDriverHint.Readiness(filterWithoutFile);
+        Assert.Contains("libusb0.sys", broken, StringComparison.Ordinal);
+        Assert.Contains("Code 39", broken, StringComparison.Ordinal);
+        Assert.Contains("CM_PROB_DRIVER_FAILED_LOAD", broken, StringComparison.Ordinal);
+        Assert.Contains("-Setup", broken, StringComparison.Ordinal);
+        Assert.Contains(@"bin\amd64\libusb0.sys", broken, StringComparison.Ordinal);
+        Assert.DoesNotContain("libusb0.sys is installed", broken, StringComparison.Ordinal);
+        Assert.DoesNotContain("已有 libusb0 UpperFilter", broken, StringComparison.Ordinal);
+
+        var serviceWithoutFile = new UsbDriverSnapshot
+        {
+            IsWindows = true,
+            LibraryLoaded = true,
+            AppleMobileDeviceService = true,
+            Libusb0ServicePresent = true,
+            Libusb0DriverFilePresent = false,
+        };
+        Assert.True(UsbDriverHint.NeedsAttention(serviceWithoutFile));
+        Assert.Contains("Code 39", UsbDriverHint.Readiness(serviceWithoutFile), StringComparison.Ordinal);
 
         var filterMissing = new UsbDriverSnapshot
         {
@@ -389,8 +429,11 @@ public sealed class UsbQuickTimeTests
             ],
         };
         Assert.True(UsbDriverHint.NeedsAttention(filterMissing));
-        Assert.Contains("Do not bind WinUSB to the parent", UsbDriverHint.Readiness(filterMissing), StringComparison.Ordinal);
-        Assert.Contains("-InstallFilter", UsbDriverHint.Readiness(filterMissing), StringComparison.Ordinal);
+        Assert.False(UsbDriverHint.DriverRegisteredWithoutFile(filterMissing));
+        var filterMissingText = UsbDriverHint.Readiness(filterMissing);
+        Assert.Contains("Do not bind WinUSB to the parent", filterMissingText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Code 39", filterMissingText, StringComparison.Ordinal);
+        Assert.Contains("-InstallFilter", filterMissingText, StringComparison.Ordinal);
 
         var linux = UsbDriverHint.Readiness(new UsbDriverSnapshot { LibraryLoaded = true, LibraryPath = "libusb-1.0.so.0" });
         Assert.Contains("No extra USB driver", linux, StringComparison.Ordinal);
@@ -405,6 +448,12 @@ public sealed class UsbQuickTimeTests
         Assert.Contains("7fb1dfec805b97983763d7d0ae244320da12add1003d4249c96cc4d586398c79", script, StringComparison.Ordinal);
         Assert.Contains("00004c92cdb99be36e17fb2377165eb97e63b48ba895bfc04a642ea9c3e26d94", script, StringComparison.Ordinal);
         Assert.Contains("https://github.com/mcuee/libusb-win32/releases/download/release_1.4.0.2/libusb-win32-bin-1.4.0.2.zip", script, StringComparison.Ordinal);
+        Assert.Contains(@"bin\amd64\libusb0.sys", script, StringComparison.Ordinal);
+        Assert.Contains(@"bin\amd64\libusb0.dll", script, StringComparison.Ordinal);
+        Assert.Contains(@"drivers\libusb0.sys", script, StringComparison.Ordinal);
+        Assert.Contains("Code 39", script, StringComparison.Ordinal);
+        Assert.Contains("CM_PROB_DRIVER_FAILED_LOAD", script, StringComparison.Ordinal);
+        Assert.Contains("Test-Path", script, StringComparison.Ordinal);
         Assert.DoesNotContain("--all-classes", script, StringComparison.Ordinal);
         Assert.DoesNotContain("--device-classes", script, StringComparison.Ordinal);
         var setup = File.ReadAllText(FindRepoFile("packaging", "windows-usb-setup.cmd"));

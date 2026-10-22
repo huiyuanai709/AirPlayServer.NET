@@ -80,7 +80,15 @@ Windows 驱动（win-x64 包里有 windows-usb-setup.cmd 和 windows-usb-driver.
   一键：插上手机，双击 windows-usb-setup.cmd，在管理员提示里允许。
   脚本下载官方 libusb 1.0.30 的 libusb-1.0.dll，以及官方 libusb-win32 1.4.0.2，
   校验 SHA256 后，只给这一台 Apple 父设备装 UpperFilter（--device-id=该实例）。
-  本包不附带 libusb0.sys，也不下载 Apple 的安装包。临时 zip 用完即删。
+  install-filter 只注册 libusb0 服务和 UpperFilter，不复制驱动文件。
+  脚本会接着把官方 zip 的 bin\amd64\libusb0.sys 复制到
+  %SystemRoot%\System32\drivers\libusb0.sys，并把同目录的 libusb0.dll 复制到 System32。
+  复制后用 Test-Path 确认 .sys 存在，否则失败，不算安装成功。
+  只有注册、没有这个文件时，设备管理器是代码 39（CM_PROB_DRIVER_FAILED_LOAD），
+  手机只能充电，也不会弹出信任对话框。
+  -Check 会把「UpperFilter 或服务已在、但 libusb0.sys 缺失」和「文件已就位」分开写。
+  修复：重新运行 -Setup，或从官方 zip 的 bin\amd64 把 libusb0.sys 复制到上述目录。
+  本包不附带 libusb0.sys，也不下载 Apple 的安装包。临时 zip 在确认文件之后删除。
   也可以：powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -Setup
   只检查：powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -Check
   只放用户态 DLL：powershell -ExecutionPolicy Bypass -File .\windows-usb-driver.ps1 -FetchLibusb -HostDir .

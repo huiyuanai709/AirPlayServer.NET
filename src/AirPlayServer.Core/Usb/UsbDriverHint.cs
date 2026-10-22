@@ -189,6 +189,14 @@ internal static class UsbDriverHint
                + "列表里没有这台手机，所以没有调用打开。解锁并信任后重新插拔。";
     }
 
+    public static string FilterSeenNotClaimed(string serial)
+    {
+        var id = string.IsNullOrWhiteSpace(serial) ? "the phone" : serial.Trim();
+        return "The Apple libusb0 filter device is on the bus, but " + id + " was not claimed. "
+               + "The serial string may have failed to read. No 0x40/0x52 was sent. Wireless AirPlay is unchanged. "
+               + "过滤设备在，但这台手机没有被认领。没有发送 0x40/0x52。";
+    }
+
     public static string Libusb0NoAppleDevice()
         => "libusb0 did not list an Apple filter device (\\\\.\\libusb0-…--0x05ac-0xpppp). "
            + "Windows does not open the usbccgp parent with libusb-1.0: that libusb_open returns -1 (IO) or -5 (NOT_FOUND) and never sends 0x40/0x52. "

@@ -42,7 +42,9 @@ internal static class LibUsb0Catalog
         private readonly LibUsb0Native _api;
         private readonly IAirPlayLog _log;
         private readonly UsbScanLog _scan = new();
+        private readonly UsbNodeIdentity _nodes = new();
         private readonly Dictionary<string, UsbPhone> _openPhones = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, UsbPhone> _inflight = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _openFiles = new(StringComparer.OrdinalIgnoreCase);
 
         public Catalog(LibUsb0Native api, IAirPlayLog log)
@@ -61,6 +63,7 @@ internal static class LibUsb0Catalog
                 }
 
                 var found = new List<UsbPhone>();
+                var present = new List<string>();
                 var apple = 0;
                 foreach (var device in _api.Snapshot())
                 {
@@ -71,11 +74,16 @@ internal static class LibUsb0Catalog
                     }
 
                     apple++;
-                    if (_openFiles.Contains(filename))
+                    present.Add(filename);
+                    if (_openFiles.Contains(filename) || _nodes.IsLocked(filename))
                     {
                         if (_openPhones.TryGetValue(filename, out var held))
                         {
                             found.Add(held);
+                        }
+                        else if (_inflight.TryGetValue(filename, out var pending))
+                        {
+                            found.Add(pending);
                         }
 
                         continue;
@@ -89,6 +97,7 @@ internal static class LibUsb0Catalog
                     found.Add(phone);
                 }
 
+                _nodes.NoteSweep(present, Environment.TickCount64);
                 if (apple == 0)
                 {
                     _scan.Repeat(_log, AirPlayLogLevel.Warning, "no-apple", UsbDriverHint.Libusb0NoAppleDevice());
@@ -99,6 +108,40 @@ internal static class LibUsb0Catalog
         }
 
         public IUsbBulkChannel? TryOpen(UsbPhone phone, CancellationToken cancellationToken)
+        {
+            var node = phone.Node ?? "";
+            var lockedHere = false;
+            if (node.Length > 0)
+            {
+                lock (_api.Gate)
+                {
+                    _nodes.Lock(node);
+                    _inflight[node] = phone;
+                    lockedHere = true;
+                }
+            }
+
+            var opened = false;
+            try
+            {
+                var channel = OpenAttempts(phone, cancellationToken);
+                opened = channel is not null;
+                return channel;
+            }
+            finally
+            {
+                if (lockedHere && !opened)
+                {
+                    lock (_api.Gate)
+                    {
+                        _inflight.Remove(node);
+                        _nodes.Unlock(node);
+                    }
+                }
+            }
+        }
+
+        private IUsbBulkChannel? OpenAttempts(UsbPhone phone, CancellationToken cancellationToken)
         {
             for (var attempt = 0; attempt < 12 && !cancellationToken.IsCancellationRequested; attempt++)
             {
@@ -112,21 +155,42 @@ internal static class LibUsb0Catalog
                         return null;
                     }
 
-                    if (!TryGrab(phone.Id, out var grabbed, out failure))
+                    if (!TryGrab(phone, out var grabbed, out failure))
                     {
                         channel = null;
                     }
                     else if (grabbed.QuickTime < 0)
                     {
-                        var rc = _api.Control(grabbed.Handle, 0x40, 0x52, 0, 2, 1000);
-                        var level = rc < 0 ? AirPlayLogLevel.Warning : AirPlayLogLevel.Information;
-                        var detail = rc < 0 ? " " + UsbDriverHint.ForLibusb0(rc, "QuickTime configuration request") : "";
-                        _log.Log(
-                            level,
-                            "已向 " + phone.Id + " 发送 QuickTime USB 配置请求（libusb0 控制传输 0x40/0x52，返回 " + rc
-                            + "）。手机可能会重新枚举。 Sent the QuickTime USB configuration request to " + phone.Id
-                            + " (libusb0 control transfer 0x40/0x52, result " + rc + "). The phone may re-enumerate."
-                            + detail);
+                        if (!grabbed.ConfigsComplete)
+                        {
+                            _api.ClearHalt(grabbed.Handle, 0);
+                            _scan.Repeat(
+                                _log,
+                                AirPlayLogLevel.Warning,
+                                "partial:" + grabbed.Filename,
+                                UsbQtOpenPolicy.Incomplete(grabbed.Filename));
+                        }
+                        else if (!_nodes.TryMarkEnable(grabbed.Filename, true, grabbed.QuickTime, Environment.TickCount64))
+                        {
+                            _scan.Repeat(
+                                _log,
+                                AirPlayLogLevel.Information,
+                                "enable-wait:" + grabbed.Filename,
+                                UsbQtOpenPolicy.EnableSuppressed(grabbed.Filename));
+                        }
+                        else
+                        {
+                            var rc = _api.Control(grabbed.Handle, 0x40, 0x52, 0, 2, 1000);
+                            var level = rc < 0 ? AirPlayLogLevel.Warning : AirPlayLogLevel.Information;
+                            var detail = rc < 0 ? " " + UsbDriverHint.ForLibusb0(rc, "QuickTime configuration request") : "";
+                            _log.Log(
+                                level,
+                                "已向 " + phone.Id + " 发送 QuickTime USB 配置请求（libusb0 控制传输 0x40/0x52，返回 " + rc
+                                + "）。手机可能会重新枚举。 Sent the QuickTime USB configuration request to " + phone.Id
+                                + " (libusb0 control transfer 0x40/0x52, result " + rc + "). The phone may re-enumerate."
+                                + detail);
+                        }
+
                         _api.Close(grabbed.Handle);
                         wait = true;
                         channel = null;
@@ -141,6 +205,7 @@ internal static class LibUsb0Catalog
                     {
                         _openFiles.Add(grabbed.Filename);
                         _openPhones[grabbed.Filename] = phone;
+                        _inflight.Remove(grabbed.Filename);
                         channel = new Channel(_api, grabbed, () => Release(grabbed.Filename));
                     }
                 }
@@ -156,7 +221,7 @@ internal static class LibUsb0Catalog
                         _log,
                         AirPlayLogLevel.Warning,
                         "reopen:" + phone.Id + ":" + failure,
-                        failure ?? UsbDriverHint.DeviceNotListed(phone.Id));
+                        failure ?? UsbDriverHint.FilterSeenNotClaimed(phone.Id));
                     if (attempt == 0)
                     {
                         return null;
@@ -178,7 +243,29 @@ internal static class LibUsb0Catalog
             _log.Log(
                 AirPlayLogLevel.Information,
                 UsbDescriptorMap.Chosen(grabbed.QuickTime, grabbed.Interface, grabbed.Inbound, grabbed.Outbound));
-            return _api.TryClaimQuickTime(grabbed.Handle, grabbed.QuickTime, grabbed.Interface, grabbed.Inbound, grabbed.Outbound, out error);
+            var active = _api.GetConfiguration(grabbed.Handle);
+            if (active == grabbed.QuickTime)
+            {
+                _log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.AlreadyActive(active, grabbed.Filename));
+            }
+            else
+            {
+                var configured = _api.SetConfiguration(grabbed.Handle, grabbed.QuickTime);
+                if (configured != 0)
+                {
+                    error = UsbDriverHint.ForLibusb0(configured, "set QuickTime USB configuration " + grabbed.QuickTime);
+                    return false;
+                }
+
+                var after = _api.GetConfiguration(grabbed.Handle);
+                if (after > 0 && after != grabbed.QuickTime)
+                {
+                    error = UsbQtOpenPolicy.ConfigStuck(after, grabbed.QuickTime, grabbed.Filename);
+                    return false;
+                }
+            }
+
+            return _api.TryClaimQuickTime(grabbed.Handle, grabbed.Interface, grabbed.Inbound, grabbed.Outbound, _log, out error);
         }
 
         private bool RefreshIfIdle(string action)
@@ -221,7 +308,7 @@ internal static class LibUsb0Catalog
                 _scan.Once(
                     _log,
                     AirPlayLogLevel.Information,
-                    "seen:" + phone.Id,
+                    "seen:" + filename,
                     "已用 libusb0 打开 " + filename + "（" + (phone.Product ?? "未命名") + "，" + phone.Id
                     + "）。 Opened libusb0 filter device " + filename + " (" + (phone.Product ?? "unnamed") + ", " + phone.Id
                     + "). QuickTime configuration " + (described.QuickTime >= 0 ? described.QuickTime.ToString() : "not visible yet") + ".");
@@ -233,12 +320,13 @@ internal static class LibUsb0Catalog
             }
         }
 
-        private bool TryGrab(string serial, out Grabbed grabbed, out string? failure)
+        private bool TryGrab(UsbPhone phone, out Grabbed grabbed, out string? failure)
         {
             grabbed = default;
             failure = null;
             Grabbed? best = null;
             var sawApple = false;
+            var wantNode = phone.Node;
             foreach (var device in _api.Snapshot())
             {
                 var filename = LibUsb0Native.ReadFilename(device);
@@ -248,6 +336,11 @@ internal static class LibUsb0Catalog
                 }
 
                 sawApple = true;
+                if (!string.IsNullOrEmpty(wantNode) && !string.Equals(filename, wantNode, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 if (_openFiles.Contains(filename))
                 {
                     continue;
@@ -260,13 +353,28 @@ internal static class LibUsb0Catalog
                     continue;
                 }
 
-                if (!TryInspect(handle, filename, out var described) || !UsbSerial.Matches(described.Phone.Id, serial))
+                if (!TryInspect(handle, filename, out var described))
                 {
                     _api.Close(handle);
                     continue;
                 }
 
-                var candidate = new Grabbed(handle, filename, described.Phone, described.Mux, described.QuickTime, described.Interface, described.Inbound, described.Outbound);
+                if (string.IsNullOrEmpty(wantNode) && !UsbSerial.Matches(described.Phone.Id, phone.Id))
+                {
+                    _api.Close(handle);
+                    continue;
+                }
+
+                var candidate = new Grabbed(
+                    handle,
+                    filename,
+                    described.Phone,
+                    described.Mux,
+                    described.QuickTime,
+                    described.Interface,
+                    described.Inbound,
+                    described.Outbound,
+                    described.ConfigsComplete);
                 if (best is null || (candidate.QuickTime >= 0 && best.Value.QuickTime < 0))
                 {
                     if (best is not null)
@@ -289,7 +397,7 @@ internal static class LibUsb0Catalog
             if (best is null)
             {
                 failure ??= sawApple
-                    ? UsbDriverHint.DeviceNotListed(serial)
+                    ? UsbDriverHint.FilterSeenNotClaimed(phone.Id)
                     : UsbDriverHint.Libusb0NoAppleDevice();
                 return false;
             }
@@ -315,29 +423,29 @@ internal static class LibUsb0Catalog
             }
 
             var vendor = (ushort)(deviceDescriptor[8] | (deviceDescriptor[9] << 8));
-            var productId = (ushort)(deviceDescriptor[10] | (deviceDescriptor[11] << 8));
             if (vendor != LibUsbCatalog.AppleVendorId)
             {
                 return false;
             }
 
             var serial = UsbSerial.Correct(_api.ReadString(handle, deviceDescriptor[16]));
-            if (serial.Length == 0)
-            {
-                serial = "usb-" + vendor.ToString("x4") + "-" + productId.ToString("x4") + "-" + filename;
-            }
-
+            var id = _nodes.IdFor(filename, serial);
             var product = _api.ReadString(handle, deviceDescriptor[15]);
             var configs = new List<byte[]>();
-            var count = Math.Min(deviceDescriptor[17], (byte)8);
+            var declared = deviceDescriptor[17];
+            var count = Math.Min(declared, (byte)8);
+            var failed = false;
+            var readCount = 0;
             for (byte index = 0; index < count; index++)
             {
                 if (_api.TryReadConfig(handle, index, out var blob, out var rc))
                 {
                     configs.Add(blob);
+                    readCount++;
                     continue;
                 }
 
+                failed = true;
                 _scan.Repeat(
                     _log,
                     AirPlayLogLevel.Warning,
@@ -345,19 +453,26 @@ internal static class LibUsb0Catalog
                     UsbDriverHint.ForLibusb0(rc, "GET_DESCRIPTOR configuration " + index + " on " + filename));
             }
 
+            if (failed)
+            {
+                _api.ClearHalt(handle, 0);
+            }
+
             UsbDescriptorMap.Classify(configs, out var mux, out var quickTime, out var iface, out var inbound, out var outbound);
             described = new Inspected(
                 new UsbPhone
                 {
-                    Id = serial,
+                    Id = id,
                     Product = string.IsNullOrWhiteSpace(product) ? null : product.Trim(),
                     QuickTimeActive = quickTime >= 0,
+                    Node = filename,
                 },
                 mux,
                 quickTime,
                 iface,
                 inbound,
-                outbound);
+                outbound,
+                declared > 0 && !failed && readCount == count);
             return true;
         }
 
@@ -367,6 +482,8 @@ internal static class LibUsb0Catalog
             {
                 _openFiles.Remove(filename);
                 _openPhones.Remove(filename);
+                _inflight.Remove(filename);
+                _nodes.Unlock(filename);
             }
         }
 
@@ -386,7 +503,7 @@ internal static class LibUsb0Catalog
 
     private readonly struct Inspected
     {
-        public Inspected(UsbPhone phone, int mux, int quickTime, int iface, byte inbound, byte outbound)
+        public Inspected(UsbPhone phone, int mux, int quickTime, int iface, byte inbound, byte outbound, bool configsComplete)
         {
             Phone = phone;
             Mux = mux;
@@ -394,6 +511,7 @@ internal static class LibUsb0Catalog
             Interface = iface;
             Inbound = inbound;
             Outbound = outbound;
+            ConfigsComplete = configsComplete;
         }
 
         public UsbPhone Phone { get; }
@@ -407,11 +525,13 @@ internal static class LibUsb0Catalog
         public byte Inbound { get; }
 
         public byte Outbound { get; }
+
+        public bool ConfigsComplete { get; }
     }
 
     private readonly struct Grabbed
     {
-        public Grabbed(nint handle, string filename, UsbPhone phone, int mux, int quickTime, int iface, byte inbound, byte outbound)
+        public Grabbed(nint handle, string filename, UsbPhone phone, int mux, int quickTime, int iface, byte inbound, byte outbound, bool configsComplete)
         {
             Handle = handle;
             Filename = filename;
@@ -421,6 +541,7 @@ internal static class LibUsb0Catalog
             Interface = iface;
             Inbound = inbound;
             Outbound = outbound;
+            ConfigsComplete = configsComplete;
         }
 
         public nint Handle { get; }
@@ -438,6 +559,8 @@ internal static class LibUsb0Catalog
         public byte Inbound { get; }
 
         public byte Outbound { get; }
+
+        public bool ConfigsComplete { get; }
     }
 
     private sealed class Channel : IUsbBulkChannel
@@ -447,7 +570,6 @@ internal static class LibUsb0Catalog
         private readonly int _interface;
         private readonly byte _inbound;
         private readonly byte _outbound;
-        private readonly int _muxConfig;
         private readonly Action _released;
         private int _disposed;
 
@@ -460,7 +582,6 @@ internal static class LibUsb0Catalog
             _interface = grabbed.Interface;
             _inbound = grabbed.Inbound;
             _outbound = grabbed.Outbound;
-            _muxConfig = grabbed.Mux;
             _released = released;
         }
 
@@ -507,13 +628,12 @@ internal static class LibUsb0Catalog
 
             lock (_api.Gate)
             {
+                // Do not send 0x40/0x52 with wIndex 0 and do not switch back to
+                // the mux configuration. Both re-enumerate the phone and iOS
+                // asks for Trust This Computer on the next plug. Release the
+                // interface and close the filter handle. A physical unplug
+                // returns the device to its default configuration on its own.
                 _api.ReleaseInterface(_handle, _interface);
-                _api.Control(_handle, 0x40, 0x52, 0, 0, 500);
-                if (_muxConfig > 0)
-                {
-                    _api.SetConfiguration(_handle, _muxConfig);
-                }
-
                 _api.Close(_handle);
             }
 
@@ -541,6 +661,7 @@ internal sealed class LibUsb0Native
     private readonly nint _clearHalt;
     private readonly nint _bulkRead;
     private readonly nint _bulkWrite;
+    private readonly nint _setAlt;
     private int _ready;
 
     private LibUsb0Native(
@@ -559,7 +680,8 @@ internal sealed class LibUsb0Native
         nint release,
         nint clearHalt,
         nint bulkRead,
-        nint bulkWrite)
+        nint bulkWrite,
+        nint setAlt)
     {
         _init = init;
         _findBusses = findBusses;
@@ -577,6 +699,7 @@ internal sealed class LibUsb0Native
         _clearHalt = clearHalt;
         _bulkRead = bulkRead;
         _bulkWrite = bulkWrite;
+        _setAlt = setAlt;
     }
 
     public object Gate => _gate;
@@ -782,12 +905,26 @@ internal sealed class LibUsb0Native
     }
 
     public int Control(nint handle, byte requestType, byte request, int value, int index, int timeout)
+        => Control(handle, requestType, request, value, index, [], timeout);
+
+    public int Control(nint handle, byte requestType, byte request, int value, int index, byte[] data, int timeout)
     {
         unsafe
         {
             var spare = stackalloc byte[1];
+            var pointer = spare;
+            var length = data.Length;
+            if (length > 0)
+            {
+                fixed (byte* pinned = data)
+                {
+                    return ((delegate* unmanaged[Cdecl]<nint, int, int, int, int, byte*, int, int, int>)_control)(
+                        handle, requestType, request, value, index, pinned, length, timeout);
+                }
+            }
+
             return ((delegate* unmanaged[Cdecl]<nint, int, int, int, int, byte*, int, int, int>)_control)(
-                handle, requestType, request, value, index, spare, 0, timeout);
+                handle, requestType, request, value, index, pointer, 0, timeout);
         }
     }
 
@@ -799,19 +936,19 @@ internal sealed class LibUsb0Native
         }
     }
 
-    public bool TryClaimQuickTime(nint handle, int quickTime, int iface, byte inbound, byte outbound, out string error)
+    public int GetConfiguration(nint handle)
+    {
+        var data = new byte[1];
+        var rc = Control(handle, 0x80, 0x08, 0, 0, data, 1000);
+        return rc < 1 ? rc == 0 ? -1 : rc : data[0];
+    }
+
+    public bool TryClaimQuickTime(nint handle, int iface, byte inbound, byte outbound, IAirPlayLog log, out string error)
     {
         error = "";
         if (inbound == 0 || outbound == 0)
         {
             error = "QuickTime USB 配置里没有找到批量端点。 The QuickTime USB configuration has no bulk endpoints.";
-            return false;
-        }
-
-        var configured = SetConfiguration(handle, quickTime);
-        if (configured != 0)
-        {
-            error = UsbDriverHint.ForLibusb0(configured, "set QuickTime USB configuration " + quickTime);
             return false;
         }
 
@@ -827,9 +964,28 @@ internal sealed class LibUsb0Native
             return false;
         }
 
+        var alt = SetAltInterface(handle, 0);
+        if (alt != 0)
+        {
+            log.Log(AirPlayLogLevel.Warning, UsbDriverHint.ForLibusb0(alt, "set QuickTime USB alt setting 0 on interface " + iface));
+        }
+
         ClearHalt(handle, inbound);
         ClearHalt(handle, outbound);
         return true;
+    }
+
+    public int SetAltInterface(nint handle, int alternate)
+    {
+        if (_setAlt == 0)
+        {
+            return 0;
+        }
+
+        unsafe
+        {
+            return ((delegate* unmanaged[Cdecl]<nint, int, int>)_setAlt)(handle, alternate);
+        }
     }
 
     public void ReleaseInterface(nint handle, int iface)
@@ -883,7 +1039,7 @@ internal sealed class LibUsb0Native
         return rc;
     }
 
-    private void ClearHalt(nint handle, byte endpoint)
+    public void ClearHalt(nint handle, byte endpoint)
     {
         unsafe
         {
@@ -943,7 +1099,8 @@ internal sealed class LibUsb0Native
             return false;
         }
 
-        api = new LibUsb0Native(init, findBusses, findDevices, getBusses, open, close, strerror, text, descriptor, control, setConfiguration, claim, release, clearHalt, bulkRead, bulkWrite);
+        Export(handle, "usb_set_altinterface", out var setAlt);
+        api = new LibUsb0Native(init, findBusses, findDevices, getBusses, open, close, strerror, text, descriptor, control, setConfiguration, claim, release, clearHalt, bulkRead, bulkWrite, setAlt);
         return true;
     }
 

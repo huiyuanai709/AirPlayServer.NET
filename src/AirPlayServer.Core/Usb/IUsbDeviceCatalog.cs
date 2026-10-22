@@ -7,6 +7,12 @@ internal sealed class UsbPhone
     public string? Product { get; init; }
 
     public bool QuickTimeActive { get; init; }
+
+    /// <summary>
+    /// Stable libusb0 filter path (<c>\\.\libusb0-…</c>). Empty on libusb-1.0.
+    /// Two serial strings for the same node are still one phone.
+    /// </summary>
+    public string? Node { get; init; }
 }
 
 /// <summary>

@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -369,6 +370,102 @@ public class SelfUpdateTests
     }
 
     [Fact]
+    public async Task Already_cancelled_token_does_not_download_or_relaunch()
+    {
+        using var fixture = new UpdateFixture("v0.1.0", "v0.1.4", includeSums: true, mismatchSums: false, includeDigest: true);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var relaunch = new RecordingRelauncher();
+        var log = new ListLog();
+        var result = await SelfUpdater.ExecuteAsync(fixture.Request(relaunch, log), cts.Token);
+
+        Assert.Equal(UpdateStatus.Cancelled, result.Status);
+        Assert.Null(relaunch.Executable);
+        Assert.Empty(fixture.Handler.Uris);
+        Assert.Equal("old-binary", File.ReadAllText(fixture.ExecutablePath));
+        Assert.Contains(log.Lines, line => line.Contains("已取消", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Cancel_during_download_stops_before_relaunch()
+    {
+        using var fixture = new UpdateFixture("v0.1.0", "v0.1.4", includeSums: false, mismatchSums: false, includeDigest: false);
+        using var cts = new CancellationTokenSource();
+        var relaunch = new RecordingRelauncher();
+        var log = new ListLog();
+        var handler = new HoldDownloadHandler(fixture.Handler);
+        var request = fixture.Request(relaunch, log, handler);
+        var pending = SelfUpdater.ExecuteAsync(request, cts.Token);
+        var entered = await Task.WhenAny(handler.Entered, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.Same(handler.Entered, entered);
+        cts.Cancel();
+        var finished = await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.Same(pending, finished);
+        var result = await pending;
+
+        Assert.Equal(UpdateStatus.Cancelled, result.Status);
+        Assert.Null(relaunch.Executable);
+        Assert.Equal("old-binary", File.ReadAllText(fixture.ExecutablePath));
+        Assert.Contains(log.Lines, line => line.Contains("已取消", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Cancel_after_files_are_replaced_does_not_relaunch()
+    {
+        using var fixture = new UpdateFixture("v0.1.0", "v0.1.4", includeSums: true, mismatchSums: false, includeDigest: false);
+        using var cts = new CancellationTokenSource();
+        var relaunch = new RecordingRelauncher();
+        var log = new CancelOnMatchLog(cts, "正在用原来的参数重新启动");
+        var result = await SelfUpdater.ExecuteAsync(fixture.Request(relaunch, log), cts.Token);
+
+        Assert.Equal(UpdateStatus.Cancelled, result.Status);
+        Assert.Null(relaunch.Executable);
+        Assert.Contains(log.Lines, line => line.Contains("已取消", StringComparison.Ordinal));
+        Assert.Equal("new-binary", File.ReadAllText(fixture.ExecutablePath));
+    }
+
+    [Fact]
+    public void Relaunch_environment_block_forces_a_single_just_updated_marker()
+    {
+        var previous = Environment.GetEnvironmentVariable(HostUpdate.JustUpdatedVariable);
+        Environment.SetEnvironmentVariable(HostUpdate.JustUpdatedVariable, "0");
+        try
+        {
+            var block = LinuxProcessImage.CreateEnvironmentBlock();
+            var matches = block.Where(line => line.StartsWith(HostUpdate.JustUpdatedVariable + "=", StringComparison.Ordinal)).ToArray();
+            Assert.Equal(["AIRPLAYSERVER_JUST_UPDATED=1"], matches);
+            var path = Environment.GetEnvironmentVariable("PATH");
+            if (!string.IsNullOrEmpty(path))
+            {
+                Assert.Contains(block, entry =>
+                {
+                    var split = entry.IndexOf('=');
+                    return split > 0
+                        && entry[..split].Equals("PATH", StringComparison.OrdinalIgnoreCase)
+                        && entry[(split + 1)..] == path;
+                });
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(HostUpdate.JustUpdatedVariable, previous);
+        }
+    }
+
+    [Fact]
+    public void Linux_libc_exports_execve()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        var loaded = NativeLibrary.TryLoad("libc.so.6", out var libc) || NativeLibrary.TryLoad("libc", out libc);
+        Assert.True(loaded);
+        Assert.True(NativeLibrary.TryGetExport(libc, "execve", out _));
+    }
+
+    [Fact]
     public void Baked_version_constants_are_present()
     {
         Assert.False(string.IsNullOrWhiteSpace(HostVersion.InformationalVersion));
@@ -493,7 +590,7 @@ public class SelfUpdateTests
 
         public ScriptedHandler Handler { get; }
 
-        public SelfUpdateRequest Request(IRelauncher relauncher, IUpdateLog log) => new()
+        public SelfUpdateRequest Request(IRelauncher relauncher, IUpdateLog log, HttpMessageHandler? handler = null) => new()
         {
             LocalVersion = Parsed(LocalTag),
             LocalLabel = LocalTag,
@@ -502,7 +599,7 @@ public class SelfUpdateTests
             ExecutablePath = ExecutablePath,
             RelaunchArguments = ["--name", "客厅"],
             HasVersionFile = true,
-            HttpHandler = Handler,
+            HttpHandler = handler ?? Handler,
             Relauncher = relauncher,
             Log = log,
             UserAgent = "AirPlayServer.Host/test",
@@ -542,6 +639,64 @@ public class SelfUpdateTests
             SawAuthorization.Add(request.Headers.Authorization is not null);
             return Task.FromResult(_next(request));
         }
+    }
+
+    private sealed class HoldDownloadHandler : HttpMessageHandler
+    {
+        private readonly HttpMessageInvoker _inner;
+        private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public HoldDownloadHandler(HttpMessageHandler inner) =>
+            _inner = new HttpMessageInvoker(inner, disposeHandler: false);
+
+        public Task Entered => _entered.Task;
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/releases/latest", StringComparison.Ordinal))
+            {
+                return await _inner.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+
+            _entered.TrySetResult();
+            await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+            throw new OperationCanceledException(cancellationToken);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _inner.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+    }
+
+    private sealed class CancelOnMatchLog : IUpdateLog
+    {
+        private readonly CancellationTokenSource _cancellation;
+        private readonly string _needle;
+
+        public CancelOnMatchLog(CancellationTokenSource cancellation, string needle)
+        {
+            _cancellation = cancellation;
+            _needle = needle;
+        }
+
+        public List<string> Lines { get; } = [];
+
+        public void Info(string message)
+        {
+            Lines.Add(message);
+            if (message.Contains(_needle, StringComparison.Ordinal))
+            {
+                _cancellation.Cancel();
+            }
+        }
+
+        public void Error(string message) => Lines.Add(message);
     }
 
     private sealed class RecordingRelauncher : IRelauncher

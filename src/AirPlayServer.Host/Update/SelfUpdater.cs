@@ -61,6 +61,7 @@ internal static class SelfUpdater
         string? tempRoot = null;
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             using var http = GitHubReleaseClient.Create(request.HttpHandler, request.GitHubToken, request.UserAgent);
             ReleaseQuery query;
             using (var metadata = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
@@ -147,15 +148,18 @@ internal static class SelfUpdater
                 log.Info(UpdateText.HashOk);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             var extractRoot = Path.Combine(temp.FullName, "pkg");
             var packageDirectory = PackageZip.Extract(zipPath, extractRoot, ReleaseAssets.BinaryName(request.Rid));
             log.Info(UpdateText.Replacing(release.Tag));
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 PackageSwap.Apply(packageDirectory, request.InstallDirectory, request.ExecutablePath, ReleaseAssets.BinaryName(request.Rid));
             }
             catch (Exception ex) when (OperatingSystem.IsWindows() && ex is IOException or UnauthorizedAccessException)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 log.Info(UpdateText.Deferred);
                 WindowsUpdateHandoff.Start(
                     packageDirectory,
@@ -168,6 +172,7 @@ internal static class SelfUpdater
             }
 
             log.Info(UpdateText.Restarting);
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 relauncher.Relaunch(request.ExecutablePath, request.RelaunchArguments);

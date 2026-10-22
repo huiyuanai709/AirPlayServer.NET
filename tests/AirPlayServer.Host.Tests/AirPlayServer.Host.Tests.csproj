@@ -3,6 +3,7 @@
     <TargetFramework>net11.0</TargetFramework>
     <RootNamespace>AirPlayServer.Host.Tests</RootNamespace>
     <IsPackable>false</IsPackable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>

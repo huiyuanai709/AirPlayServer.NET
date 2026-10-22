@@ -90,6 +90,7 @@ internal static class UsbDriverProbe
             LibraryPath = libraryPath,
             AppleMobileDeviceService = service,
             AppleSupportFiles = support,
+            AppleStoreStack = AppleStoreStack(),
             Libusb0ServicePresent = libusb0Service,
             Libusb0DriverFilePresent = driverFile,
             Parents = parents,
@@ -119,6 +120,80 @@ internal static class UsbDriverProbe
         }
 
         return File.Exists(Path.Combine(windows, "System32", "drivers", "libusb0.sys"));
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static bool AppleStoreStack()
+    {
+        if (ServiceExists("AppleLowerFilter") || ServiceExists("AppleKmdfFilter"))
+        {
+            return true;
+        }
+
+        var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        if (string.IsNullOrEmpty(windows))
+        {
+            windows = Environment.GetEnvironmentVariable("SystemRoot") ?? @"C:\Windows";
+        }
+
+        var drivers = Path.Combine(windows, "System32", "drivers");
+        if (File.Exists(Path.Combine(drivers, "AppleLowerFilter.sys")) || File.Exists(Path.Combine(drivers, "AppleKmdfFilter.sys")))
+        {
+            return true;
+        }
+
+        if (StorePackageRegistered("AppleInc.AppleDevices_") || StorePackageRegistered("AppleInc.iTunes_"))
+        {
+            return true;
+        }
+
+        return StorePackageDirectory("AppleInc.AppleDevices_*") || StorePackageDirectory("AppleInc.iTunes_*");
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static bool ServiceExists(string name)
+        => Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\" + name) is not null;
+
+    [SupportedOSPlatform("windows")]
+    private static bool StorePackageRegistered(string prefix)
+    {
+        using var apps = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications");
+        if (apps is null)
+        {
+            return false;
+        }
+
+        foreach (var name in apps.GetSubKeyNames())
+        {
+            if (name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool StorePackageDirectory(string pattern)
+    {
+        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WindowsApps");
+        try
+        {
+            if (!Directory.Exists(root))
+            {
+                return false;
+            }
+
+            foreach (var _ in Directory.EnumerateDirectories(root, pattern))
+            {
+                return true;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
+
+        return false;
     }
 
     private static bool AppleSupportFiles()

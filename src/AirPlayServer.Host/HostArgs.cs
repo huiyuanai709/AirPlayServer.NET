@@ -118,9 +118,14 @@ internal sealed class HostArgs
                          把 libusb-1.0 放在程序旁边或系统库路径里（Windows: libusb-1.0.dll，
                          Linux: libusb-1.0.so.0，macOS: libusb-1.0.0.dylib）。找不到库时只记日志，无线照常。
                          Windows 上不要用 Zadig 改 Apple 父设备的驱动。Apple Mobile Device Support
-                         要留着。libusb 只能认领重新枚举出来的 QuickTime 接口（类 0xFF 子类 0x2A）。
+                         要留着。资源管理器里出现手机（MTP/存储）只是 PTP，不是 QuickTime 镜像。
+                         --usb 会主动发控制传输 0x40/0x52，让手机重新枚举出类 0xFF 子类 0x2A。
+                         这不是控制中心的隔空播放。Apple Devices / Apple Mobile Device Support 仍然需要。
+                         列表为空、只看见 MTP、或 libusb_open 失败时，日志会写出原因（约每 30 秒一次）。
+                         已经能看见 mux 或 QuickTime 的设备仍走原来的打开路径。
                          认领失败时这一台 USB 不收，其他手机和无线不受影响。
-                         日志会区分「没有 libusb-1.0.dll」和「认领失败（libusb -12/-3/-6/-4）」。
+                         日志会区分「没有 libusb-1.0.dll」和「打开或认领失败（libusb -1/-12/-3/-6/-4）」。
+                         -1 是 LIBUSB_ERROR_IO：设备已经列出来，libusb-1.0 的 libusb_open 失败。不要卸载 Apple Devices。
                          Windows 父设备保持 usbccgp。不要用 Zadig 替换它。WinUSB 不能切换 USB 配置，
                          所以要给这一台设备装 libusb-win32 UpperFilter。win-x64 包里双击
                          windows-usb-setup.cmd（或 windows-usb-driver.ps1 -Setup）会请求管理员权限，

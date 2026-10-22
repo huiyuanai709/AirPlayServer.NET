@@ -165,11 +165,46 @@ function Get-Libusb0DllPath {
     return (Join-Path (Get-NativeSystem32) "libusb0.dll")
 }
 
+function Test-AppleStoreStack {
+    foreach ($name in @("AppleLowerFilter", "AppleKmdfFilter")) {
+        if (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\$name") {
+            return $true
+        }
+        $sys = Join-Path $env:SystemRoot "System32\drivers\$name.sys"
+        if (Test-Path -LiteralPath $sys) {
+            return $true
+        }
+    }
+
+    $apps = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications"
+    if (Test-Path $apps) {
+        $hit = @(Get-ChildItem $apps -ErrorAction SilentlyContinue | Where-Object {
+            $_.PSChildName -like "AppleInc.AppleDevices_*" -or $_.PSChildName -like "AppleInc.iTunes_*"
+        })
+        if ($hit.Count -gt 0) {
+            return $true
+        }
+    }
+
+    $windowsApps = Join-Path $env:ProgramFiles "WindowsApps"
+    if (Test-Path -LiteralPath $windowsApps) {
+        foreach ($filter in @("AppleInc.AppleDevices_*", "AppleInc.iTunes_*")) {
+            $pkg = @(Get-ChildItem -LiteralPath $windowsApps -Directory -Filter $filter -ErrorAction SilentlyContinue)
+            if ($pkg.Count -gt 0) {
+                return $true
+            }
+        }
+    }
+
+    return $false
+}
+
 function Show-Check {
     $dll = Join-Path $PSScriptRoot "libusb-1.0.dll"
     $beside = Test-Path -LiteralPath $dll
     $service = Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\Apple Mobile Device Service"
     $support = Test-Path "${env:CommonProgramFiles}\Apple\Mobile Device Support"
+    $store = Test-AppleStoreStack
     $sysPath = Get-Libusb0SysPath
     $sysPresent = Test-Path -LiteralPath $sysPath
     $driverService = Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\libusb0"
@@ -180,11 +215,15 @@ function Show-Check {
         Write-Step "Check only. This does not change drivers." "只检查，不改驱动。"
     }
     Write-Step ("libusb-1.0.dll beside this script: " + $(if ($beside) { $dll } else { "missing" })) ""
-    Write-Step ("Apple Mobile Device Service: " + $(if ($service) { "registered" } else { "missing" })) ""
+    Write-Step ("Apple Mobile Device Service: " + $(if ($service) { "registered" } else { "not registered" })) ""
     Write-Step ("Apple Mobile Device Support files: " + $(if ($support) { "present" } else { "missing" })) ""
+    Write-Step ("Microsoft Store Apple stack (AppleInc.AppleDevices, AppleLowerFilter, or AppleKmdfFilter): " + $(if ($store) { "present" } else { "not found" })) ""
     Write-Step ("libusb0 kernel service: " + $(if ($driverService) { "registered (ImagePath system32\drivers\libusb0.sys)" } else { "not registered" })) ""
     Write-Step ("libusb0.sys: " + $(if ($sysPresent) { $sysPath } else { "missing (" + $sysPath + ")" })) ""
-    if (-not $service -and -not $support) {
+    if ($store -and -not $service) {
+        Write-Step "Microsoft Store Apple Devices does not register Apple Mobile Device Service or Common Files\Apple\Mobile Device Support. AppleLowerFilter, AppleKmdfFilter, AppleMobileDeviceProcess.exe, or AMDS32\MobileDevice.dll still count. Do not uninstall Apple Devices." "商店版 Apple Devices 不注册传统的 Apple Mobile Device Service。AppleLowerFilter / AppleKmdfFilter 仍算已安装。不要卸载 Apple Devices。"
+    }
+    elseif (-not $service -and -not $support -and -not $store) {
         Write-Step "Install Apple Devices from the Microsoft Store ($AppleDevicesUrl), or Apple Mobile Device Support. This script does not download Apple software." "安装 Apple Devices 或 Apple Mobile Device Support。这个脚本不下载 Apple 的安装包。商店地址：$AppleDevicesUrl"
     }
 
@@ -494,7 +533,7 @@ function Invoke-Setup {
         $ready = @($ready | Where-Object { $_.InstanceId -eq $InstanceId })
     }
     if ($ready.Count -eq 0) {
-        Write-Step "libusb-1.0.dll is in $HostDir. No Apple usbccgp parent is ready for a device filter. Plug in the phone, unlock it, tap Trust This Computer, and run windows-usb-setup.cmd again. Install Apple Devices from $AppleDevicesUrl when that service is missing. This script does not download Apple software." "用户态 DLL 已放好。当前没有可安装过滤驱动的 usbccgp 父设备。插上手机、解锁并信任后，再运行一次 windows-usb-setup.cmd。"
+        Write-Step "libusb-1.0.dll is in $HostDir. No Apple usbccgp parent is ready for a device filter. Plug in the phone, unlock it, tap Trust This Computer, and run windows-usb-setup.cmd again. Install Apple Devices from $AppleDevicesUrl only when neither the Store package nor Apple Mobile Device Support is present. Do not uninstall Apple Devices. This script does not download Apple software." "用户态 DLL 已放好。当前没有可安装过滤驱动的 usbccgp 父设备。插上手机、解锁并信任后，再运行一次 windows-usb-setup.cmd。商店版已安装时不要卸载 Apple Devices。"
         $script:ExitCode = 4
         return
     }

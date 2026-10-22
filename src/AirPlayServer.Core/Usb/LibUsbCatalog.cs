@@ -42,6 +42,8 @@ internal static class LibUsbCatalog
     {
         private readonly LibUsbNative _api;
         private readonly IAirPlayLog _log;
+        private readonly object _logGate = new();
+        private readonly Dictionary<string, long> _loggedAt = new(StringComparer.Ordinal);
 
         public Catalog(LibUsbNative api, IAirPlayLog log)
         {
@@ -54,19 +56,36 @@ internal static class LibUsbCatalog
             var found = new List<UsbPhone>();
             if (!_api.TryOpenContext(out var ctx))
             {
+                LogLimited(AirPlayLogLevel.Warning, "context", UsbMirrorCandidate.ContextFailed());
                 return found;
             }
 
             try
             {
                 var devices = _api.DeviceList(ctx);
+                var appleSeen = 0;
+                var mtpOnly = new Dictionary<string, UsbMirrorCandidate.Scan>(StringComparer.OrdinalIgnoreCase);
+                var vendorSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 try
                 {
                     for (var i = 0; i < devices.Length; i++)
                     {
-                        if (TryDescribe(devices[i], out var phone))
+                        if (!TryDescribe(devices[i], ref appleSeen, out var phone, out var scan, out var mtpCandidate))
                         {
-                            found.Add(phone);
+                            continue;
+                        }
+
+                        AddDistinct(found, phone);
+                        if (!mtpCandidate)
+                        {
+                            mtpOnly.Remove(phone.Id);
+                            vendorSeen.Add(phone.Id);
+                            continue;
+                        }
+
+                        if (!vendorSeen.Contains(phone.Id))
+                        {
+                            mtpOnly[phone.Id] = scan;
                         }
                     }
                 }
@@ -76,6 +95,24 @@ internal static class LibUsbCatalog
                     {
                         _api.Unref(devices[i]);
                     }
+                }
+
+                foreach (var phone in found)
+                {
+                    if (!mtpOnly.TryGetValue(phone.Id, out var scan))
+                    {
+                        continue;
+                    }
+
+                    LogLimited(AirPlayLogLevel.Information, "mtp:" + phone.Id, UsbMirrorCandidate.MtpEnable(scan, phone.Id));
+                }
+
+                if (found.Count == 0)
+                {
+                    LogLimited(
+                        AirPlayLogLevel.Warning,
+                        "empty:" + devices.Length + ":" + appleSeen,
+                        UsbMirrorCandidate.EmptyList(devices.Length, appleSeen));
                 }
             }
             finally
@@ -96,21 +133,46 @@ internal static class LibUsbCatalog
             return opened;
         }
 
-        private bool TryDescribe(nint device, out UsbPhone phone)
+        private bool TryDescribe(nint device, ref int appleSeen, out UsbPhone phone, out UsbMirrorCandidate.Scan scan, out bool mtpCandidate)
         {
             phone = null!;
-            if (!_api.TryDeviceDescriptor(device, out var descriptor) || descriptor.VendorId != AppleVendorId)
+            scan = default;
+            mtpCandidate = false;
+            if (!_api.TryDeviceDescriptor(device, out var descriptor))
             {
                 return false;
             }
 
-            if (!_api.TryClassify(device, descriptor.Configurations, out _, out var quickTime))
+            if (descriptor.VendorId != AppleVendorId)
             {
                 return false;
             }
 
-            if (!_api.TryOpen(device, out var handle))
+            appleSeen++;
+            var inspection = _api.Inspect(device, descriptor.Configurations);
+            scan = new UsbMirrorCandidate.Scan(
+                descriptor.ProductId,
+                _api.BusNumber(device),
+                _api.DeviceAddress(device),
+                descriptor.Configurations,
+                inspection.ConfigsRead,
+                inspection.Interfaces,
+                inspection.HasMuxOrQuickTime);
+            if (!inspection.HasMuxOrQuickTime && !UsbMirrorCandidate.ShouldAttemptQuickTimeEnable(scan))
             {
+                LogLimited(
+                    AirPlayLogLevel.Warning,
+                    "classify:" + scan.ProductId.ToString("x4") + ":" + scan.Bus + ":" + scan.Address + ":" + scan.ConfigsRead + ":" + inspection.Interfaces.Count,
+                    UsbMirrorCandidate.ClassifySkipped(scan));
+                return false;
+            }
+
+            if (!_api.TryOpen(device, out var handle, out var opened))
+            {
+                LogLimited(
+                    AirPlayLogLevel.Warning,
+                    "open:" + scan.ProductId.ToString("x4") + ":" + scan.Bus + ":" + scan.Address + ":" + opened,
+                    UsbMirrorCandidate.OpenFailed(scan, opened));
                 return false;
             }
 
@@ -119,17 +181,16 @@ internal static class LibUsbCatalog
                 var serial = UsbSerial.Correct(_api.ReadString(handle, descriptor.SerialIndex));
                 if (serial.Length == 0)
                 {
-                    var bus = _api.BusNumber(device);
-                    var address = _api.DeviceAddress(device);
-                    serial = "usb-" + descriptor.VendorId.ToString("x4") + "-" + descriptor.ProductId.ToString("x4") + "-" + bus + "-" + address;
+                    serial = "usb-" + descriptor.VendorId.ToString("x4") + "-" + descriptor.ProductId.ToString("x4") + "-" + scan.Bus + "-" + scan.Address;
                 }
 
+                mtpCandidate = !inspection.HasMuxOrQuickTime;
                 var product = _api.ReadString(handle, descriptor.ProductIndex);
                 phone = new UsbPhone
                 {
                     Id = serial,
                     Product = string.IsNullOrWhiteSpace(product) ? null : product.Trim(),
-                    QuickTimeActive = quickTime >= 0,
+                    QuickTimeActive = inspection.QuickTimeValue >= 0,
                 };
                 return true;
             }
@@ -149,11 +210,15 @@ internal static class LibUsbCatalog
                     return false;
                 }
 
-                if (!_api.TryOpenSerial(ctx, phone.Id, out var device, out var handle, out var descriptor))
+                if (!_api.TryOpenSerial(ctx, phone.Id, out var device, out var handle, out var descriptor, out var openError))
                 {
                     _api.Exit(ctx);
                     if (attempt == 0)
                     {
+                        LogLimited(
+                            AirPlayLogLevel.Warning,
+                            "reopen:" + phone.Id + ":" + openError,
+                            UsbMirrorCandidate.ReopenFailed(phone.Id, openError));
                         return false;
                     }
 
@@ -214,6 +279,58 @@ internal static class LibUsbCatalog
             {
                 return false;
             }
+        }
+
+        private void LogLimited(AirPlayLogLevel level, string key, string message)
+        {
+            var now = Environment.TickCount64;
+            lock (_logGate)
+            {
+                if (_loggedAt.TryGetValue(key, out var at) && now - at < UsbMirrorCandidate.ScanLogIntervalMs)
+                {
+                    return;
+                }
+
+                _loggedAt[key] = now;
+                if (_loggedAt.Count > 48)
+                {
+                    var stale = new List<string>();
+                    foreach (var pair in _loggedAt)
+                    {
+                        if (now - pair.Value >= UsbMirrorCandidate.ScanLogIntervalMs && !string.Equals(pair.Key, key, StringComparison.Ordinal))
+                        {
+                            stale.Add(pair.Key);
+                        }
+                    }
+
+                    foreach (var item in stale)
+                    {
+                        _loggedAt.Remove(item);
+                    }
+                }
+            }
+
+            _log.Log(level, message);
+        }
+
+        private static void AddDistinct(List<UsbPhone> found, UsbPhone phone)
+        {
+            for (var i = 0; i < found.Count; i++)
+            {
+                if (!string.Equals(found[i].Id, phone.Id, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (phone.QuickTimeActive && !found[i].QuickTimeActive)
+                {
+                    found[i] = phone;
+                }
+
+                return;
+            }
+
+            found.Add(phone);
         }
     }
 
@@ -285,6 +402,27 @@ internal static class LibUsbCatalog
             _api.Exit(_context);
         }
     }
+}
+
+internal sealed class UsbInspection
+{
+    public UsbInspection(int muxValue, int quickTimeValue, int configsRead, IReadOnlyList<UsbMirrorCandidate.Alt> interfaces)
+    {
+        MuxValue = muxValue;
+        QuickTimeValue = quickTimeValue;
+        ConfigsRead = configsRead;
+        Interfaces = interfaces;
+    }
+
+    public int MuxValue { get; }
+
+    public int QuickTimeValue { get; }
+
+    public int ConfigsRead { get; }
+
+    public IReadOnlyList<UsbMirrorCandidate.Alt> Interfaces { get; }
+
+    public bool HasMuxOrQuickTime => MuxValue >= 0 || QuickTimeValue >= 0;
 }
 
 internal sealed class LibUsbNative
@@ -472,15 +610,26 @@ internal sealed class LibUsbNative
 
     public bool TryClassify(nint device, int configurations, out int muxValue, out int quickTimeValue)
     {
-        muxValue = -1;
-        quickTimeValue = -1;
+        var inspection = Inspect(device, configurations);
+        muxValue = inspection.MuxValue;
+        quickTimeValue = inspection.QuickTimeValue;
+        return inspection.HasMuxOrQuickTime;
+    }
+
+    public UsbInspection Inspect(nint device, int configurations)
+    {
+        var interfaces = new List<UsbMirrorCandidate.Alt>(4);
+        var muxValue = -1;
+        var quickTimeValue = -1;
+        var configsRead = 0;
         for (var index = 0; index < configurations; index++)
         {
-            if (!TryConfig(device, index, out var value, out var mux, out var quickTime, out _, out _, out _))
+            if (!TryConfig(device, index, out var value, out var mux, out var quickTime, out _, out _, out _, interfaces))
             {
                 continue;
             }
 
+            configsRead++;
             if (mux)
             {
                 muxValue = value;
@@ -492,26 +641,34 @@ internal sealed class LibUsbNative
             }
         }
 
-        return muxValue >= 0 || quickTimeValue >= 0;
+        return new UsbInspection(muxValue, quickTimeValue, configsRead, interfaces);
     }
 
     public bool TryOpen(nint device, out nint handle)
+        => TryOpen(device, out handle, out _);
+
+    public bool TryOpen(nint device, out nint handle, out int result)
     {
         unsafe
         {
             nint local = 0;
-            var rc = ((delegate* unmanaged[Cdecl]<nint, nint*, int>)_open)(device, &local);
+            result = ((delegate* unmanaged[Cdecl]<nint, nint*, int>)_open)(device, &local);
             handle = local;
-            return rc == 0 && handle != 0;
+            return result == 0 && handle != 0;
         }
     }
 
-    public bool TryOpenSerial(nint context, string serial, out nint device, out nint handle, out DeviceIds descriptor)
+    public bool TryOpenSerial(nint context, string serial, out nint device, out nint handle, out DeviceIds descriptor, out int openError)
     {
         device = 0;
         handle = 0;
         descriptor = default;
+        openError = 0;
         var list = DeviceList(context);
+        nint bestDevice = 0;
+        nint bestHandle = 0;
+        var bestDescriptor = default(DeviceIds);
+        var bestRank = -1;
         try
         {
             foreach (var candidate in list)
@@ -521,28 +678,69 @@ internal sealed class LibUsbNative
                     continue;
                 }
 
-                if (!TryOpen(candidate, out var opened))
+                if (!TryOpen(candidate, out var opened, out var rc))
                 {
+                    openError = rc;
                     continue;
                 }
 
-                var id = UsbSerial.Correct(ReadString(opened, described.SerialIndex));
-                if (!string.Equals(id, serial, StringComparison.OrdinalIgnoreCase))
+                try
                 {
-                    Close(opened);
-                    continue;
-                }
+                    var id = UsbSerial.Correct(ReadString(opened, described.SerialIndex));
+                    if (!string.Equals(id, serial, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
 
-                device = candidate;
-                handle = opened;
-                descriptor = described;
-                return true;
+                    var inspection = Inspect(candidate, described.Configurations);
+                    var rank = UsbMirrorCandidate.NodeRank(inspection.QuickTimeValue >= 0, inspection.MuxValue >= 0);
+                    if (rank <= bestRank)
+                    {
+                        continue;
+                    }
+
+                    if (bestHandle != 0)
+                    {
+                        Close(bestHandle);
+                    }
+
+                    bestDevice = candidate;
+                    bestHandle = opened;
+                    bestDescriptor = described;
+                    bestRank = rank;
+                    opened = 0;
+                    if (rank == 2)
+                    {
+                        break;
+                    }
+                }
+                finally
+                {
+                    if (opened != 0)
+                    {
+                        Close(opened);
+                    }
+                }
             }
 
-            return false;
+            if (bestHandle == 0)
+            {
+                return false;
+            }
+
+            device = bestDevice;
+            handle = bestHandle;
+            descriptor = bestDescriptor;
+            bestHandle = 0;
+            return true;
         }
         finally
         {
+            if (bestHandle != 0)
+            {
+                Close(bestHandle);
+            }
+
             foreach (var candidate in list)
             {
                 Unref(candidate);
@@ -636,7 +834,7 @@ internal sealed class LibUsbNative
 
         for (var index = 0; index < configurations; index++)
         {
-            if (!TryConfig(device, index, out var value, out _, out var quickTime, out iface, out inbound, out outbound) || !quickTime || value != quickTimeValue)
+            if (!TryConfig(device, index, out var value, out _, out var quickTime, out iface, out inbound, out outbound, null) || !quickTime || value != quickTimeValue)
             {
                 continue;
             }
@@ -743,7 +941,7 @@ internal sealed class LibUsbNative
         }
     }
 
-    private bool TryConfig(nint device, int index, out int value, out bool mux, out bool quickTime, out int iface, out byte inbound, out byte outbound)
+    private bool TryConfig(nint device, int index, out int value, out bool mux, out bool quickTime, out int iface, out byte inbound, out byte outbound, List<UsbMirrorCandidate.Alt>? interfaces)
     {
         value = 0;
         mux = false;
@@ -762,10 +960,10 @@ internal sealed class LibUsbNative
 
             try
             {
-                var interfaces = Marshal.ReadByte(config, 4);
+                var interfaceCount = Marshal.ReadByte(config, 4);
                 value = Marshal.ReadByte(config, 5);
                 var table = Marshal.ReadIntPtr(config, 16);
-                for (var i = 0; i < interfaces; i++)
+                for (var i = 0; i < interfaceCount; i++)
                 {
                     var entry = table + (i * 16);
                     var alt = Marshal.ReadIntPtr(entry, 0);
@@ -779,6 +977,8 @@ internal sealed class LibUsbNative
                     var endpointCount = Marshal.ReadByte(alt, 4);
                     var klass = Marshal.ReadByte(alt, 5);
                     var sub = Marshal.ReadByte(alt, 6);
+                    var protocol = Marshal.ReadByte(alt, 7);
+                    interfaces?.Add(new UsbMirrorCandidate.Alt(klass, sub, protocol));
                     if (klass != 0xFF)
                     {
                         continue;

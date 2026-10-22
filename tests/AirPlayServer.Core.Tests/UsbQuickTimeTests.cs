@@ -349,6 +349,33 @@ public sealed class UsbQuickTimeTests
         Assert.Contains("libusb -6", UsbDriverHint.ForLibusb(-6, "claim"), StringComparison.Ordinal);
         Assert.Contains("Trust This Computer", UsbDriverHint.ForLibusb(-5, "open"), StringComparison.Ordinal);
 
+        var io = UsbDriverHint.ForLibusb(-1, "open Apple USB device 05ac:12a8");
+        Assert.Contains("libusb -1", io, StringComparison.Ordinal);
+        Assert.Contains("LIBUSB_ERROR_IO", io, StringComparison.Ordinal);
+        Assert.Contains("Do not uninstall Apple Devices", io, StringComparison.Ordinal);
+        Assert.Contains("不要卸载 Apple Devices", io, StringComparison.Ordinal);
+
+        var storeOnly = new UsbDriverSnapshot
+        {
+            IsWindows = true,
+            LibraryLoaded = true,
+            LibraryPath = "libusb-1.0.dll",
+            AppleStoreStack = true,
+            Libusb0ServicePresent = true,
+            Libusb0DriverFilePresent = true,
+            Parents =
+            [
+                new UsbParentBinding { InstanceId = "USB\\VID_05AC&PID_12A8\\phone", Service = "usbccgp", Libusb0UpperFilter = true },
+            ],
+        };
+        Assert.True(storeOnly.AppleStackPresent);
+        Assert.False(UsbDriverHint.NeedsAttention(storeOnly));
+        var storeText = UsbDriverHint.Readiness(storeOnly);
+        Assert.Contains("AppleInc.AppleDevices", storeText, StringComparison.Ordinal);
+        Assert.Contains("AppleLowerFilter", storeText, StringComparison.Ordinal);
+        Assert.Contains("Do not uninstall Apple Devices", storeText, StringComparison.Ordinal);
+        Assert.DoesNotContain("was not found", storeText, StringComparison.Ordinal);
+
         var replaced = new UsbDriverSnapshot
         {
             IsWindows = true,
@@ -454,6 +481,10 @@ public sealed class UsbQuickTimeTests
         Assert.Contains("Code 39", script, StringComparison.Ordinal);
         Assert.Contains("CM_PROB_DRIVER_FAILED_LOAD", script, StringComparison.Ordinal);
         Assert.Contains("Test-Path", script, StringComparison.Ordinal);
+        Assert.Contains("AppleInc.AppleDevices", script, StringComparison.Ordinal);
+        Assert.Contains("AppleLowerFilter", script, StringComparison.Ordinal);
+        Assert.Contains("AppleKmdfFilter", script, StringComparison.Ordinal);
+        Assert.Contains("Do not uninstall Apple Devices", script, StringComparison.Ordinal);
         Assert.DoesNotContain("--all-classes", script, StringComparison.Ordinal);
         Assert.DoesNotContain("--device-classes", script, StringComparison.Ordinal);
         var setup = File.ReadAllText(FindRepoFile("packaging", "windows-usb-setup.cmd"));
@@ -573,6 +604,98 @@ public sealed class UsbQuickTimeTests
         var phones = catalog.List();
         Assert.NotNull(phones);
         Assert.Contains("libusb", log.Text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Mtp_only_apple_device_is_queued_for_quicktime_enable_and_mux_is_not()
+    {
+        Assert.True(UsbMirrorCandidate.ScanLogIntervalMs >= 15_000);
+        var ptp = new UsbMirrorCandidate.Alt[] { new(0x06, 0x01, 0x01) };
+        var ptpScan = new UsbMirrorCandidate.Scan(0x12A8, 1, 5, 4, 1, ptp, false);
+        Assert.True(UsbMirrorCandidate.ShouldAttemptQuickTimeEnable(ptpScan));
+        Assert.True(UsbMirrorCandidate.IsNormalModeIos(0x12A8));
+        Assert.False(UsbMirrorCandidate.IsNormalModeIos(0x1227));
+        Assert.False(UsbMirrorCandidate.IsNormalModeIos(0x1281));
+
+        var audioOnly = new UsbMirrorCandidate.Scan(0x12A8, 1, 5, 4, 1, [new UsbMirrorCandidate.Alt(0x01, 0x01, 0x00)], false);
+        Assert.True(UsbMirrorCandidate.ShouldAttemptQuickTimeEnable(audioOnly));
+
+        var ptpOutsideRange = new UsbMirrorCandidate.Scan(0x0001, 1, 5, 1, 1, ptp, false);
+        Assert.True(UsbMirrorCandidate.ShouldAttemptQuickTimeEnable(ptpOutsideRange));
+
+        var unread = new UsbMirrorCandidate.Scan(0x12A8, 1, 5, 4, 0, [], false);
+        Assert.False(UsbMirrorCandidate.ShouldAttemptQuickTimeEnable(unread));
+
+        var mux = new UsbMirrorCandidate.Alt[] { new(0x06, 0x01, 0x01), new(0xFF, 0xFE, 0x02) };
+        var muxScan = new UsbMirrorCandidate.Scan(0x12A8, 1, 5, 4, 4, mux, true);
+        Assert.False(UsbMirrorCandidate.ShouldAttemptQuickTimeEnable(muxScan));
+        Assert.True(UsbMirrorCandidate.IsMux(0xFF, 0xFE));
+        Assert.False(UsbMirrorCandidate.ShouldAttemptQuickTimeEnable(muxScan with { SawMuxOrQuickTime = false }));
+
+        var quickTime = new UsbMirrorCandidate.Scan(
+            0x12A8,
+            1,
+            5,
+            5,
+            5,
+            [new UsbMirrorCandidate.Alt(0xFF, 0x2A, 0xFF), new UsbMirrorCandidate.Alt(0x06, 0x01, 0x01)],
+            true);
+        Assert.False(UsbMirrorCandidate.ShouldAttemptQuickTimeEnable(quickTime));
+        Assert.True(UsbMirrorCandidate.IsQuickTime(0xFF, 0x2A));
+        Assert.True(UsbMirrorCandidate.NodeRank(quickTime: true, mux: true) > UsbMirrorCandidate.NodeRank(quickTime: false, mux: true));
+        Assert.True(UsbMirrorCandidate.NodeRank(quickTime: false, mux: true) > UsbMirrorCandidate.NodeRank(quickTime: false, mux: false));
+        Assert.False(UsbMirrorCandidate.ShouldAttemptQuickTimeEnable(quickTime with { SawMuxOrQuickTime = false }));
+
+        var dfu = new UsbMirrorCandidate.Scan(0x1227, 1, 2, 1, 1, [new UsbMirrorCandidate.Alt(0xFE, 0x01, 0x00)], false);
+        Assert.False(UsbMirrorCandidate.ShouldAttemptQuickTimeEnable(dfu));
+
+        var skipped = UsbMirrorCandidate.ClassifySkipped(dfu);
+        Assert.Contains("05ac:1227", skipped, StringComparison.Ordinal);
+        Assert.Contains("0xFF", skipped, StringComparison.Ordinal);
+        Assert.Contains("0x2A", skipped, StringComparison.Ordinal);
+        Assert.Contains("0xFE", skipped, StringComparison.Ordinal);
+        Assert.Contains("fe/01/00", skipped, StringComparison.Ordinal);
+        Assert.Contains("没有", skipped, StringComparison.Ordinal);
+        Assert.Contains("neither mux", skipped, StringComparison.Ordinal);
+
+        var denied = UsbMirrorCandidate.OpenFailed(ptpScan, -3);
+        Assert.Contains("libusb -3", denied, StringComparison.Ordinal);
+        Assert.Contains("ACCESS", denied, StringComparison.Ordinal);
+        Assert.Contains("06/01/01", denied, StringComparison.Ordinal);
+        Assert.Contains("0x40/0x52", denied, StringComparison.Ordinal);
+        Assert.Contains("没有发出", denied, StringComparison.Ordinal);
+
+        var claimed = UsbMirrorCandidate.OpenFailed(muxScan, -12);
+        Assert.Contains("libusb -12", claimed, StringComparison.Ordinal);
+        Assert.Contains("NOT_SUPPORTED", claimed, StringComparison.Ordinal);
+        Assert.Contains("已经有 mux", claimed, StringComparison.Ordinal);
+
+        var pending = UsbMirrorCandidate.MtpEnable(ptpScan, "00008110-001A");
+        Assert.Contains("0x40/0x52", pending, StringComparison.Ordinal);
+        Assert.Contains("MTP", pending, StringComparison.Ordinal);
+        Assert.Contains("控制中心", pending, StringComparison.Ordinal);
+        Assert.Contains("Control Center", pending, StringComparison.Ordinal);
+        Assert.Contains("1/4", pending, StringComparison.Ordinal);
+
+        var empty = UsbMirrorCandidate.EmptyList(0, 0);
+        Assert.Contains("--usb", empty, StringComparison.Ordinal);
+        Assert.Contains("0", empty, StringComparison.Ordinal);
+        Assert.Contains("MTP", empty, StringComparison.Ordinal);
+        Assert.Contains("存储", empty, StringComparison.Ordinal);
+
+        var noApple = UsbMirrorCandidate.EmptyList(3, 0);
+        Assert.Contains("0x05AC", noApple, StringComparison.Ordinal);
+        Assert.Contains("3", noApple, StringComparison.Ordinal);
+
+        var skippedApple = UsbMirrorCandidate.EmptyList(4, 1);
+        Assert.Contains("Apple VID", skippedApple, StringComparison.Ordinal);
+        Assert.Contains("没有可镜像", skippedApple, StringComparison.Ordinal);
+
+        var again = UsbMirrorCandidate.ReopenFailed("00008110-001A", -3);
+        Assert.Contains("00008110-001A", again, StringComparison.Ordinal);
+        Assert.Contains("libusb -3", again, StringComparison.Ordinal);
+        Assert.Contains("没有发出", again, StringComparison.Ordinal);
+        Assert.Contains("was not sent", UsbMirrorCandidate.ReopenFailed("phone", 0), StringComparison.Ordinal);
     }
 
     private static string FindRepoFile(string directory, string name)

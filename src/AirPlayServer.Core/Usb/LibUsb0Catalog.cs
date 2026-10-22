@@ -144,7 +144,7 @@ internal static class LibUsb0Catalog
         private IUsbBulkChannel? OpenAttempts(UsbPhone phone, CancellationToken cancellationToken)
         {
             var enabledThisSession = false;
-            for (var attempt = 0; attempt < 12 && !cancellationToken.IsCancellationRequested; attempt++)
+            for (var attempt = 0; attempt < UsbQtOpenPolicy.OpenAttempts && !cancellationToken.IsCancellationRequested; attempt++)
             {
                 string? failure;
                 Channel? channel;
@@ -160,18 +160,23 @@ internal static class LibUsb0Catalog
                     {
                         channel = null;
                     }
+                    else if (!grabbed.ConfigsComplete)
+                    {
+                        _api.ClearHalt(grabbed.Handle, 0);
+                        _scan.Repeat(
+                            _log,
+                            AirPlayLogLevel.Warning,
+                            grabbed.QuickTime >= 0 ? "partial-qt:" + grabbed.Filename : "partial:" + grabbed.Filename,
+                            grabbed.QuickTime >= 0
+                                ? UsbQtOpenPolicy.PartialQuickTime(grabbed.Filename, grabbed.QuickTime)
+                                : UsbQtOpenPolicy.Incomplete(grabbed.Filename));
+                        _api.Close(grabbed.Handle);
+                        wait = true;
+                        channel = null;
+                    }
                     else if (grabbed.QuickTime < 0)
                     {
-                        if (!grabbed.ConfigsComplete)
-                        {
-                            _api.ClearHalt(grabbed.Handle, 0);
-                            _scan.Repeat(
-                                _log,
-                                AirPlayLogLevel.Warning,
-                                "partial:" + grabbed.Filename,
-                                UsbQtOpenPolicy.Incomplete(grabbed.Filename));
-                        }
-                        else if (!_nodes.TryMarkEnable(grabbed.Filename, true, grabbed.QuickTime, Environment.TickCount64))
+                        if (!_nodes.TryMarkEnable(grabbed.Filename, true, grabbed.QuickTime, Environment.TickCount64))
                         {
                             _scan.Repeat(
                                 _log,
@@ -214,7 +219,11 @@ internal static class LibUsb0Catalog
                         }
                         else
                         {
-                            _log.Log(AirPlayLogLevel.Warning, error);
+                            if (claim == QtClaim.Failed)
+                            {
+                                _log.Log(AirPlayLogLevel.Warning, error);
+                            }
+
                             _api.Close(grabbed.Handle);
                             if (claim == QtClaim.Failed)
                             {
@@ -278,13 +287,31 @@ internal static class LibUsb0Catalog
             _log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.ConfigurationObserved(active, grabbed.QuickTime, grabbed.Filename));
             if (UsbQtOpenPolicy.ShouldSelectBeforeClaim(active, grabbed.QuickTime))
             {
+                var now = Environment.TickCount64;
+                var enabledAt = _nodes.EnableAt(grabbed.Filename);
+                if (UsbQtOpenPolicy.ShouldWaitForPhoneConfiguration(enabledAt, now, active, grabbed.QuickTime))
+                {
+                    error = UsbQtOpenPolicy.WaitingForPhoneConfiguration(active, grabbed.QuickTime, now - enabledAt);
+                    _scan.Repeat(_log, AirPlayLogLevel.Information, "settle:" + grabbed.Filename, error);
+                    return QtClaim.Wait;
+                }
+
                 if (!SelectQuickTimeConfiguration(grabbed, active, cancellationToken, out active, out error))
                 {
+                    if (!cancellationToken.IsCancellationRequested)
+                    {
+                        _log.Log(AirPlayLogLevel.Warning, error);
+                    }
+
                     return cancellationToken.IsCancellationRequested ? QtClaim.Failed : QtClaim.Wait;
                 }
 
-                freshConfiguration = true;
-                _log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.ConfigurationConfirmed(active, grabbed.QuickTime, grabbed.Filename));
+                // The pipe table belongs to the configuration that was active at usb_open.
+                // Claim the next open, after libusb0 has cached configuration 5.
+                _nodes.MarkPipeRebuild(grabbed.Filename);
+                error = UsbQtOpenPolicy.PipeRebuild(grabbed.QuickTime, active);
+                _log.Log(AirPlayLogLevel.Information, error);
+                return QtClaim.Wait;
             }
 
             var claimed = _api.ClaimInterface(grabbed.Handle, grabbed.Interface);
@@ -307,6 +334,7 @@ internal static class LibUsb0Catalog
                 if (!UsbQtOpenPolicy.ConfigurationIsActive(after, grabbed.QuickTime))
                 {
                     error = UsbQtOpenPolicy.ConfigStuck(after, grabbed.QuickTime, grabbed.Filename);
+                    _log.Log(AirPlayLogLevel.Warning, error);
                     return QtClaim.Wait;
                 }
 
@@ -320,11 +348,19 @@ internal static class LibUsb0Catalog
                 return QtClaim.Failed;
             }
 
+            freshConfiguration = _nodes.TakePipeRebuild(grabbed.Filename);
             if (!initialized && !freshConfiguration)
             {
                 _log.Log(
                     AirPlayLogLevel.Information,
                     UsbQtOpenPolicy.ClaimedWithoutSetConfiguration(grabbed.Interface, active, grabbed.QuickTime));
+            }
+
+            if (freshConfiguration)
+            {
+                _api.StartQuickTimeInterface(grabbed.Handle, grabbed.Interface, grabbed.Alternate, grabbed.Inbound, grabbed.Outbound, _log);
+                error = "";
+                return QtClaim.Ready;
             }
 
             return _api.SelectAlternate(grabbed.Handle, grabbed.Interface, grabbed.Alternate, _log, out error)
@@ -829,18 +865,9 @@ internal static class LibUsb0Catalog
             }
 
             var wrote = _api.WriteQuickTimePing(_handle, _outbound);
-            if (UsbQtOpenPolicy.PingWriteOk(wrote))
-            {
-                _log.Log(AirPlayLogLevel.Information, UsbQtOpenPolicy.HostPing(_outbound, wrote));
-                return;
-            }
-
-            // A timed-out OUT URB is cancelled and the pipe halts. Clear it and
-            // return to the bulk IN so the phone's own PING is not stuck behind
-            // this one-second fallback.
-            _api.ClearHalt(_handle, _outbound);
-            _log.Log(AirPlayLogLevel.Warning, UsbQtOpenPolicy.HostPing(_outbound, wrote));
-            _log.Log(AirPlayLogLevel.Warning, UsbQtOpenPolicy.PingWriteCleared(_outbound, wrote));
+            _log.Log(
+                UsbQtOpenPolicy.PingWriteOk(wrote) ? AirPlayLogLevel.Information : AirPlayLogLevel.Warning,
+                UsbQtOpenPolicy.HostPing(_outbound, wrote));
         }
 
         public void Write(ReadOnlySpan<byte> data)
@@ -1195,7 +1222,17 @@ internal sealed class LibUsb0Native
         }
     }
 
-    public bool SelectAlternate(nint handle, int iface, int alternate, IAirPlayLog log, out string error)
+        public void StartQuickTimeInterface(nint handle, int iface, int alternate, byte inbound, byte outbound, IAirPlayLog log)
+        {
+            var code = SetAltInterface(handle, alternate);
+            ClearHalt(handle, inbound);
+            ClearHalt(handle, outbound);
+            log.Log(
+                code == 0 ? AirPlayLogLevel.Information : AirPlayLogLevel.Warning,
+                UsbQtOpenPolicy.InterfaceStarted(iface, alternate, code, inbound, outbound));
+        }
+
+        public bool SelectAlternate(nint handle, int iface, int alternate, IAirPlayLog log, out string error)
     {
         error = "";
         if (alternate == 0)

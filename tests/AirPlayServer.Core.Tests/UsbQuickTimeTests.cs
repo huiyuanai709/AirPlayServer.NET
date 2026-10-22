@@ -767,6 +767,13 @@ public sealed class UsbQuickTimeTests
         Assert.False(UsbQtOpenPolicy.ShouldInitializePipeTable(active: 3, quickTime: 5, claimResult: -22));
         Assert.True(UsbQtOpenPolicy.ShouldInitializePipeTable(active: 5, quickTime: 5, claimResult: -22));
         Assert.False(UsbQtOpenPolicy.ShouldInitializePipeTable(active: 5, quickTime: 5, claimResult: 0));
+        Assert.True(UsbQtOpenPolicy.ShouldIgnorePartialQuickTime(configsComplete: false, quickTime: 5));
+        Assert.False(UsbQtOpenPolicy.ShouldIgnorePartialQuickTime(configsComplete: true, quickTime: 5));
+        Assert.False(UsbQtOpenPolicy.ShouldIgnorePartialQuickTime(configsComplete: false, quickTime: -1));
+        Assert.True(UsbQtOpenPolicy.ShouldWaitForPhoneConfiguration(enabledAt: 1_000, now: 1_000 + UsbQtOpenPolicy.PhoneConfigurationSettleMs - 1, active: 3, quickTime: 5));
+        Assert.False(UsbQtOpenPolicy.ShouldWaitForPhoneConfiguration(enabledAt: 1_000, now: 1_000 + UsbQtOpenPolicy.PhoneConfigurationSettleMs, active: 3, quickTime: 5));
+        Assert.False(UsbQtOpenPolicy.ShouldWaitForPhoneConfiguration(enabledAt: 1_000, now: 2_000, active: 5, quickTime: 5));
+        Assert.False(UsbQtOpenPolicy.ShouldWaitForPhoneConfiguration(enabledAt: 0, now: 2_000, active: 3, quickTime: 5));
 
         var node = @"\\.\libusb0-0001--0x05ac-0x12a8";
         var observed = UsbQtOpenPolicy.ConfigurationObserved(-5, 5, node);
@@ -788,9 +795,20 @@ public sealed class UsbQuickTimeTests
         var initialized = UsbQtOpenPolicy.InitializedConfiguration(5, 0);
         Assert.Contains("usb_set_configuration(5) returned 0", initialized, StringComparison.Ordinal);
         Assert.Contains("GET_CONFIGURATION was already 5", initialized, StringComparison.Ordinal);
-        var cleared = UsbQtOpenPolicy.PingWriteCleared(0x05, -116);
-        Assert.Contains("Cleared the OUT halt", cleared, StringComparison.Ordinal);
-        Assert.Contains("not 0x40/0x52", cleared, StringComparison.Ordinal);
+        var partial = UsbQtOpenPolicy.PartialQuickTime(node, 5);
+        Assert.Contains("other configuration descriptors failed", partial, StringComparison.Ordinal);
+        Assert.Contains("No usb_set_configuration", partial, StringComparison.Ordinal);
+        var settling = UsbQtOpenPolicy.WaitingForPhoneConfiguration(3, 5, 1000);
+        Assert.Contains("after 0x40/0x52", settling, StringComparison.Ordinal);
+        Assert.Contains("not claimed", settling, StringComparison.Ordinal);
+        var rebuild = UsbQtOpenPolicy.PipeRebuild(5, 5);
+        Assert.Contains("closed without a claim", rebuild, StringComparison.Ordinal);
+        Assert.Contains("pipe table", rebuild, StringComparison.Ordinal);
+        var started = UsbQtOpenPolicy.InterfaceStarted(2, 0, 0, 0x86, 0x05);
+        Assert.Contains("SET_INTERFACE returned 0", started, StringComparison.Ordinal);
+        Assert.Contains("Cleared halt on bulk IN 0x86", started, StringComparison.Ordinal);
+        Assert.Contains("waits for the phone's PING", started, StringComparison.Ordinal);
+        Assert.Contains("No OUT packet is sent before that read", started, StringComparison.Ordinal);
         var kick = UsbQtOpenPolicy.HandshakeKick(0);
         Assert.Contains("0x40/0x40", kick, StringComparison.Ordinal);
         Assert.Contains("0x6400", kick, StringComparison.Ordinal);

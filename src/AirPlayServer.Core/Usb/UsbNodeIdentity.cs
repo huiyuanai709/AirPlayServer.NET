@@ -13,6 +13,7 @@ internal sealed class UsbNodeIdentity
     private readonly Dictionary<string, long> _enableAt = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, long> _missingSince = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _locked = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _pipeRebuild = new(StringComparer.OrdinalIgnoreCase);
 
     public bool IsLocked(string node)
         => _locked.Contains(node);
@@ -80,6 +81,24 @@ internal sealed class UsbNodeIdentity
         return true;
     }
 
+    public long EnableAt(string node)
+        => !string.IsNullOrEmpty(node) && _enableAt.TryGetValue(node, out var at) ? at : 0;
+
+    /// <summary>
+    /// <c>usb_set_configuration</c> ran on a handle that was opened on the previous
+    /// configuration. The next open must claim a fresh pipe table.
+    /// </summary>
+    public void MarkPipeRebuild(string node)
+    {
+        if (!string.IsNullOrEmpty(node))
+        {
+            _pipeRebuild.Add(node);
+        }
+    }
+
+    public bool TakePipeRebuild(string node)
+        => !string.IsNullOrEmpty(node) && _pipeRebuild.Remove(node);
+
     public void NoteSweep(IEnumerable<string> present, long now)
     {
         var seen = new HashSet<string>(present, StringComparer.OrdinalIgnoreCase);
@@ -107,6 +126,7 @@ internal sealed class UsbNodeIdentity
             _idByNode.Remove(node);
             _enableAt.Remove(node);
             _serialByNode.Remove(node);
+            _pipeRebuild.Remove(node);
         }
     }
 }
@@ -126,6 +146,14 @@ internal static class UsbQtOpenPolicy
 
     /// <summary>Empty bulk reads before the one fallback PING. The phone speaks first.</summary>
     public const int HandshakeQuietMs = 1_000;
+
+    /// <summary>
+    /// After <c>0x40/0x52</c>, wait this long for the phone to select the QuickTime
+    /// configuration itself. iPhoneMirror uses the same five seconds.
+    /// </summary>
+    public const int PhoneConfigurationSettleMs = 5_000;
+
+    public const int OpenAttempts = 30;
 
     public const byte HandshakeRequestType = 0x40;
 
@@ -174,6 +202,24 @@ internal static class UsbQtOpenPolicy
     /// </summary>
     public static bool ShouldSelectBeforeClaim(int active, int quickTime)
         => quickTime > 0 && !ConfigurationIsActive(active, quickTime);
+
+    /// <summary>
+    /// A QuickTime descriptor read while other configurations return EIO is the
+    /// phone mid-reenumeration. Do not select a configuration or claim from it.
+    /// </summary>
+    public static bool ShouldIgnorePartialQuickTime(bool configsComplete, int quickTime)
+        => !configsComplete && quickTime >= 0;
+
+    /// <summary>
+    /// The phone may still be switching into QuickTime after this session's enable.
+    /// Forcing <c>usb_set_configuration</c> during that window reports configuration 5
+    /// without starting the screen session.
+    /// </summary>
+    public static bool ShouldWaitForPhoneConfiguration(long enabledAt, long now, int active, int quickTime)
+        => enabledAt > 0
+           && now >= enabledAt
+           && now - enabledAt < PhoneConfigurationSettleMs
+           && ShouldSelectBeforeClaim(active, quickTime);
 
     /// <summary>
     /// libusb-win32 returns 0 from <c>usb_set_configuration</c> without a bus transfer when the
@@ -248,6 +294,28 @@ internal static class UsbQtOpenPolicy
            + ". This aligns the libusb0 cache with the configuration the phone is using before the QuickTime configuration is selected. "
            + "先把过滤驱动缓存对齐到手机正在使用的配置。";
 
+    public static string PartialQuickTime(string node, int quickTime)
+        => "QuickTime configuration " + quickTime + " was visible on " + node
+           + " while other configuration descriptors failed. Waiting for re-enumeration to finish. No usb_set_configuration and no interface claim. "
+           + "描述符还没读全。即使看到 QuickTime 配置，也不切换、不认领。";
+
+    public static string WaitingForPhoneConfiguration(int active, int quickTime, long elapsedMs)
+        => "GET_CONFIGURATION is still " + active + ", " + elapsedMs
+           + " ms after 0x40/0x52. Waiting for the phone to select QuickTime configuration " + quickTime
+           + ". The interface is not claimed and usb_set_configuration is not called during this wait. "
+           + "配置请求之后等待手机自己进入 QuickTime 配置。这段时间不切换、不认领。";
+
+    public static string PipeRebuild(int quickTime, int active)
+        => "GET_CONFIGURATION returned " + active + " after usb_set_configuration(" + quickTime
+           + "). This handle was opened on the previous configuration, so it is closed without a claim. The next open rebuilds the libusb0 pipe table, claims the interface, selects alternate 0, and clears halt before the bulk IN read. "
+           + "配置已经切换。这个句柄是在旧配置上打开的，先关掉。下次打开再建管道、认领接口、选择备用设置并清除 halt，然后才开始读。";
+
+    public static string InterfaceStarted(int iface, int alternate, int code, byte inbound, byte outbound)
+        => "QuickTime interface " + iface + " alternate " + alternate + " SET_INTERFACE returned " + code
+           + ". Cleared halt on bulk IN 0x" + inbound.ToString("X2") + " and OUT 0x" + outbound.ToString("X2")
+           + ". The bulk IN read starts now and waits for the phone's PING. No OUT packet is sent before that read. "
+           + "已选择接口并清除 halt。开始读，等手机先发 PING。读之前不写 OUT。";
+
     public static string ClaimedWithoutSetConfiguration(int iface, int active, int quickTime)
         => "Claimed QuickTime interface " + iface + " without usb_set_configuration. Active configuration "
            + active + ", descriptor " + quickTime
@@ -258,11 +326,6 @@ internal static class UsbQtOpenPolicy
         => "usb_set_configuration(" + quickTime + ") returned " + code
            + " after claim failed with an uninitialized pipe table. GET_CONFIGURATION was already " + quickTime + ". "
            + "活动配置已经是 QuickTime 配置。认领失败后才调用 usb_set_configuration 建立管道。";
-
-    public static string PingWriteCleared(byte endpoint, int result)
-        => "QuickTime PING write on OUT 0x" + endpoint.ToString("X2") + " returned " + result
-           + ". Cleared the OUT halt and returned to the bulk IN read so the phone's PING can arrive. This is not 0x40/0x52. "
-           + "PING 写入失败，已清除 OUT halt，继续读。手机先说话。这不是 0x40/0x52。";
 
     public static string AltSelected(int iface, int alternate, int code)
         => code == MissingAltExport

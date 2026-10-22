@@ -331,9 +331,36 @@ public sealed class UsbQuickTimeTests
     {
         var missing = UsbDriverHint.LibraryMissing();
         Assert.Contains("libusb-1.0.dll", missing, StringComparison.Ordinal);
+        Assert.Contains("libusb0.dll", missing, StringComparison.Ordinal);
         Assert.Contains("windows-usb-driver.ps1", missing, StringComparison.Ordinal);
         Assert.Contains("-FetchLibusb", missing, StringComparison.Ordinal);
         Assert.DoesNotContain("NOT_SUPPORTED", missing, StringComparison.Ordinal);
+
+        var winIo = UsbDriverHint.ForLibusb(-1, "libusb_open 05ac:12a8");
+        Assert.Contains("libusb -1", winIo, StringComparison.Ordinal);
+        Assert.Contains("IO", winIo, StringComparison.Ordinal);
+        Assert.Contains("0x40/0x52", winIo, StringComparison.Ordinal);
+        Assert.Contains("LIBUSB_ERROR_IO", winIo, StringComparison.Ordinal);
+        Assert.Contains("Do not uninstall Apple Devices", winIo, StringComparison.Ordinal);
+        Assert.Contains("不要卸载 Apple Devices", winIo, StringComparison.Ordinal);
+
+        var access = UsbDriverHint.ForLibusb0(-13, "claim QuickTime USB interface 1");
+        Assert.Contains("libusb0 -13", access, StringComparison.Ordinal);
+        Assert.Contains("EACCES", access, StringComparison.Ordinal);
+        var memory = UsbDriverHint.ForLibusb0(-12, "set QuickTime USB configuration 4");
+        Assert.Contains("libusb0 -12", memory, StringComparison.Ordinal);
+        Assert.Contains("ENOMEM", memory, StringComparison.Ordinal);
+        Assert.Contains("not libusb-1.0", memory, StringComparison.Ordinal);
+
+        var denied = UsbDriverHint.Libusb0OpenFailed(
+            @"\\.\libusb0-0001--0x05ac-0x12a8",
+            "failed to open \\\\.\\libusb0-0001--0x05ac-0x12a8: win error: Access is denied.\r\n");
+        Assert.Contains("libusb0 usb_open returned a null handle", denied, StringComparison.Ordinal);
+        Assert.Contains("-2", denied, StringComparison.Ordinal);
+        Assert.Contains("ENOENT", denied, StringComparison.Ordinal);
+        Assert.Contains("Access is denied", denied, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n", denied, StringComparison.Ordinal);
+        Assert.Contains("WinUSB", denied, StringComparison.Ordinal);
 
         var unsupported = UsbDriverHint.ForLibusb(-12, "set QuickTime USB configuration 4");
         Assert.Contains("libusb -12", unsupported, StringComparison.Ordinal);
@@ -409,6 +436,7 @@ public sealed class UsbQuickTimeTests
         var readyText = UsbDriverHint.Readiness(ready);
         Assert.Contains("libusb0 UpperFilter", readyText, StringComparison.Ordinal);
         Assert.Contains("libusb0.sys is installed", readyText, StringComparison.Ordinal);
+        Assert.Contains("libusb0.dll", readyText, StringComparison.Ordinal);
         Assert.DoesNotContain("Code 39", readyText, StringComparison.Ordinal);
 
         var filterWithoutFile = new UsbDriverSnapshot
@@ -470,6 +498,8 @@ public sealed class UsbQuickTimeTests
         Assert.Contains("usbccgp", script, StringComparison.Ordinal);
         Assert.Contains("Do not run Zadig", script, StringComparison.Ordinal);
         Assert.Contains("does not vendor libusb0.sys", script, StringComparison.Ordinal);
+        Assert.Contains("does not copy libusb0.sys", script, StringComparison.Ordinal);
+        Assert.Contains("libusb0.dll", script, StringComparison.Ordinal);
         Assert.Contains("--device-id=", script, StringComparison.Ordinal);
         Assert.Contains("-Setup", script, StringComparison.Ordinal);
         Assert.Contains("7fb1dfec805b97983763d7d0ae244320da12add1003d4249c96cc4d586398c79", script, StringComparison.Ordinal);
@@ -589,6 +619,63 @@ public sealed class UsbQuickTimeTests
 
         Assert.True(blocked.Dropped >= 3);
         release.Set();
+    }
+
+    [Fact]
+    public void Libusb0_filter_name_and_quicktime_configuration_are_recognized()
+    {
+        Assert.Equal(16, LibUsb0Layout.DeviceFilename);
+        Assert.Equal(528, LibUsb0Layout.BusDevices);
+        Assert.Equal(512, LibUsb0Layout.FilenameBytes);
+        Assert.True(LibUsb0Layout.TryParseFilterName(@"\\.\libusb0-0001--0x05ac-0x12a8", out var vendor, out var product));
+        Assert.Equal(0x05AC, vendor);
+        Assert.Equal(0x12A8, product);
+        Assert.True(LibUsb0Layout.TryParseFilterName(@"\\.\libusb0-0001--0x05AC-0x12A8", out vendor, out product));
+        Assert.Equal(0x05AC, vendor);
+        Assert.False(LibUsb0Layout.TryParseFilterName("virtual-hub", out _, out _));
+        Assert.False(LibUsb0Layout.TryParseFilterName(@"\\.\libusb0-0001", out _, out _));
+
+        var quickTime = new byte[41];
+        quickTime[0] = 9;
+        quickTime[1] = 2;
+        quickTime[2] = 41;
+        quickTime[5] = 4;
+        quickTime[9] = 9;
+        quickTime[10] = 4;
+        quickTime[14] = 0xFF;
+        quickTime[15] = 0xFE;
+        quickTime[18] = 9;
+        quickTime[19] = 4;
+        quickTime[20] = 2;
+        quickTime[22] = 2;
+        quickTime[23] = 0xFF;
+        quickTime[24] = 0x2A;
+        quickTime[27] = 7;
+        quickTime[28] = 5;
+        quickTime[29] = 0x02;
+        quickTime[30] = 0x02;
+        quickTime[34] = 7;
+        quickTime[35] = 5;
+        quickTime[36] = 0x81;
+        quickTime[37] = 0x02;
+        Assert.True(UsbDescriptorMap.TryReadConfig(quickTime, out var view));
+        Assert.Equal(4, view.Value);
+        Assert.True(view.Mux);
+        Assert.True(view.QuickTime);
+        Assert.Equal(2, view.Interface);
+        Assert.Equal(0x02, view.Outbound);
+        Assert.Equal(0x81, view.Inbound);
+
+        byte[] ptp = [9, 2, 18, 0, 1, 1, 0, 0x80, 250, 9, 4, 0, 0, 0, 0x06, 0x01, 0x01, 0];
+        UsbDescriptorMap.Classify([ptp, quickTime], out var mux, out var qt, out var iface, out var inbound, out var outbound);
+        Assert.Equal(4, mux);
+        Assert.Equal(4, qt);
+        Assert.Equal(2, iface);
+        Assert.Equal(0x81, inbound);
+        Assert.Equal(0x02, outbound);
+        UsbDescriptorMap.Classify([ptp], out mux, out qt, out _, out _, out _);
+        Assert.Equal(-1, mux);
+        Assert.Equal(-1, qt);
     }
 
     [Fact]

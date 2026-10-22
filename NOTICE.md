@@ -87,9 +87,9 @@ contributors.
 The wired screen path is a C# reading of the publicly described QuickTime-over-USB
 (Valeria) framing: length-prefixed PING / SYNC / ASYN, dictionary atoms, and
 CMSampleBuffer `FEED` bytes. It does not link the Qt widget toolkit,
-QuickTime.app, or QTKit. libusb-1.0 is loaded at runtime with
-`NativeLibrary.TryLoad`, the same way FFmpeg is, and is not linked into the
-Native AOT image.
+QuickTime.app, or QTKit. libusb is loaded at runtime with `NativeLibrary.TryLoad`, the same way
+FFmpeg is, and is not linked into the Native AOT image. Windows loads
+`libusb0.dll` and opens the filter device. Linux and macOS load libusb-1.0.
 
 Protocol behavior follows the MIT description and binary fixtures in
 <https://github.com/danielpaulus/quicktime_video_hack>
@@ -103,20 +103,23 @@ Windows enablement notes also consulted the MIT repository
 and kernel drivers are not included. Do not replace the Apple parent USB
 driver.
 
-libusb is LGPL-2.1-or-later. An operator may place `libusb-1.0.dll`,
-`libusb-1.0.so.0`, or `libusb-1.0.0.dylib` next to the host. This process
-does not absorb libusb into the Native AOT image. `windows-usb-setup.cmd`
-runs `windows-usb-driver.ps1 -Setup`, which downloads the official libusb
-1.0.30 user-mode Windows DLL and the official libusb-win32 1.4.0.2 binary
-zip, checks the SHA256 pinned in that script, and runs upstream
+libusb is LGPL-2.1-or-later. An operator may place `libusb0.dll` (Windows),
+`libusb-1.0.so.0` (Linux), or `libusb-1.0.0.dylib` (macOS) next to the host.
+This process does not absorb libusb into the Native AOT image.
+`windows-usb-setup.cmd` runs `windows-usb-driver.ps1 -Setup`, which downloads
+the official libusb 1.0.30 user-mode Windows DLL and the official libusb-win32
+1.4.0.2 binary zip, checks the SHA256 pinned in that script, copies
+`bin\amd64\libusb0.dll` next to the host, and runs upstream
 `install-filter.exe` as a per-device UpperFilter on one Apple `usbccgp`
 instance. That tool creates the `libusb0` service and UpperFilter and does
 not copy `libusb0.sys`. The script then copies the verified zip's
 `bin\amd64\libusb0.sys` to `%SystemRoot%\System32\drivers\libusb0.sys` (and
 the matching amd64 `libusb0.dll` to `System32`) and fails if the `.sys` is
-still missing. The kernel driver stays in that upstream package (LGPL) and is
-not vendored here. The temporary zip is deleted after that file check. The
-host never rebinds the Apple parent to WinUSB.
+still missing. It does not copy `libusb0.sys` into the host folder. The kernel
+driver stays in that upstream package (LGPL) and is not vendored here. The
+temporary zip is deleted after that file check. The host opens `\\.\libusb0-…`
+and never rebinds the Apple parent to WinUSB. Store Apple Devices can stay
+installed.
 
 ## FFmpeg
 

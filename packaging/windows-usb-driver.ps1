@@ -6,12 +6,15 @@
 # It does not vendor libusb0.sys. The repository zip does not contain that driver.
 # -Setup downloads two official archives, checks the pinned SHA256, and then:
 #   1. copies the user-mode libusb-1.0.dll next to the host
-#   2. runs install-filter.exe with --device-id=<Apple parent instance>
-#   3. copies that zip's bin\amd64\libusb0.sys to %SystemRoot%\System32\drivers\libusb0.sys
+#   2. copies amd64 libusb0.dll from the official zip next to the host
+#      The host opens \\.\libusb0-… with libusb0.dll. libusb-1.0 WinUSB cannot open the filtered Apple parent.
+#      This script does not copy libusb0.sys next to the host.
+#   3. runs install-filter.exe with --device-id=<Apple parent instance>
+#   4. copies that zip's bin\amd64\libusb0.sys to %SystemRoot%\System32\drivers\libusb0.sys
 #      and the matching bin\amd64\libusb0.dll to %SystemRoot%\System32\libusb0.dll
-#   4. refuses to succeed unless Test-Path finds libusb0.sys
+#   5. refuses to succeed unless Test-Path finds libusb0.sys
 # install-filter.exe creates the libusb0 service (ImagePath system32\drivers\libusb0.sys,
-# demand start) and the UpperFilter. It does not copy the driver file. Without step 3,
+# demand start) and the UpperFilter. It does not copy the driver file. Without step 4,
 # Device Manager stays on Code 39 (CM_PROB_DRIVER_FAILED_LOAD): the phone only charges.
 # The filter is an UpperFilter on that one usbccgp (or usbaapl) parent.
 # Interface functions (MI_) are not selected. The temp zip is deleted after the file check.
@@ -214,7 +217,11 @@ function Show-Check {
     else {
         Write-Step "Check only. This does not change drivers." "只检查，不改驱动。"
     }
+    $filterDll = Join-Path $PSScriptRoot "libusb0.dll"
+    $filterBeside = Test-Path -LiteralPath $filterDll
     Write-Step ("libusb-1.0.dll beside this script: " + $(if ($beside) { $dll } else { "missing" })) ""
+    Write-Step ("libusb0.dll beside this script: " + $(if ($filterBeside) { $filterDll } else { "missing" })) ""
+    Write-Step "Windows --usb opens the libusb0 filter device (\\\\.\\libusb0-…) with libusb0.dll. libusb-1.0.dll alone cannot open the Apple parent: libusb_open returns -1 or -5. This script does not copy libusb0.sys next to the host. It copies bin\amd64\libusb0.sys to System32\drivers after the filter is registered." "Windows 的 --usb 用 libusb0.dll 打开过滤设备。只放 libusb-1.0.dll 不够。不把 libusb0.sys 放到程序旁边；注册过滤之后把它复制到系统驱动目录。"
     Write-Step ("Apple Mobile Device Service: " + $(if ($service) { "registered" } else { "not registered" })) ""
     Write-Step ("Apple Mobile Device Support files: " + $(if ($support) { "present" } else { "missing" })) ""
     Write-Step ("Microsoft Store Apple stack (AppleInc.AppleDevices, AppleLowerFilter, or AppleKmdfFilter): " + $(if ($store) { "present" } else { "not found" })) ""
@@ -425,6 +432,13 @@ function Install-FromExtractedTree([string]$Root) {
     }
 
     Assert-DeviceInstanceSwitch $tool.FullName
+    $userDll = Join-Path $tool.DirectoryName "libusb0.dll"
+    if (-not (Test-Path -LiteralPath $userDll)) {
+        throw "amd64 libusb0.dll was not next to install-filter.exe. The host opens the filter device with this DLL. This script does not copy libusb0.sys next to the host."
+    }
+    $userDest = Join-Path $HostDir "libusb0.dll"
+    Copy-Item -LiteralPath $userDll -Destination $userDest -Force
+    Write-Step "Copied libusb0.dll to $userDest. The host opens \\\\.\\libusb0-… with this DLL, not with WinUSB. This script does not copy libusb0.sys next to the host." "已复制 libusb0.dll。不把 libusb0.sys 放到程序旁边。"
     $parents = @(Get-AppleParents)
     if ($InstanceId) {
         $parents = @($parents | Where-Object { $_.InstanceId -eq $InstanceId })
@@ -533,7 +547,7 @@ function Invoke-Setup {
         $ready = @($ready | Where-Object { $_.InstanceId -eq $InstanceId })
     }
     if ($ready.Count -eq 0) {
-        Write-Step "libusb-1.0.dll is in $HostDir. No Apple usbccgp parent is ready for a device filter. Plug in the phone, unlock it, tap Trust This Computer, and run windows-usb-setup.cmd again. Install Apple Devices from $AppleDevicesUrl only when neither the Store package nor Apple Mobile Device Support is present. Do not uninstall Apple Devices. This script does not download Apple software." "用户态 DLL 已放好。当前没有可安装过滤驱动的 usbccgp 父设备。插上手机、解锁并信任后，再运行一次 windows-usb-setup.cmd。商店版已安装时不要卸载 Apple Devices。"
+        Write-Step "libusb-1.0.dll is in $HostDir. libusb0.dll is copied when the official filter zip is installed. No Apple usbccgp parent is ready for a device filter. Plug in the phone, unlock it, tap Trust This Computer, and run windows-usb-setup.cmd again. Install Apple Devices from $AppleDevicesUrl only when neither the Store package nor Apple Mobile Device Support is present. Do not uninstall Apple Devices. This script does not download Apple software and does not copy libusb0.sys next to the host. libusb0.sys goes to System32\drivers only after a parent is filtered." "用户态 libusb-1.0.dll 已放好。libusb0.dll 要等过滤驱动 zip 安装时才复制。当前没有可安装过滤驱动的 usbccgp 父设备。插上手机、解锁并信任后，再运行一次 windows-usb-setup.cmd。商店版已安装时不要卸载 Apple Devices。不把 libusb0.sys 放到程序旁边。"
         $script:ExitCode = 4
         return
     }

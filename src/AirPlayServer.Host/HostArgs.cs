@@ -113,24 +113,25 @@ internal sealed class HostArgs
                          这个数字同时算无线 AirPlay 和有线 USB。启动时那一路无线监听已经占 1 个名额，
                          所以 --max-mirrors 1 时 USB 开不出来。要同时收，省略本参数，或把 N 写得够大。
         --usb            同时收有线画面。这是 Apple QuickTime-over-USB（Valeria）协议的 C# 实现，
-                         用 libusb-1.0 的 P/Invoke，不链接 Qt 控件、QuickTime.app 或 QTKit。
+                         不链接 Qt 控件、QuickTime.app 或 QTKit。
                          默认关闭，不写就和以前一样只收无线 AirPlay。
-                         把 libusb-1.0 放在程序旁边或系统库路径里（Windows: libusb-1.0.dll，
-                         Linux: libusb-1.0.so.0，macOS: libusb-1.0.0.dylib）。找不到库时只记日志，无线照常。
+                         Linux 用 libusb-1.0.so.0，macOS 用 libusb-1.0.0.dylib。
+                         Windows 不用 libusb-1.0 打开 Apple 父设备：WinUSB 的 libusb_open 会返回 -1 或 -5，
+                         到不了控制传输 0x40/0x52。Windows 加载 libusb0.dll，打开过滤设备 \\.\libusb0-…。
+                         找不到库时只记日志，无线照常。打开失败会写下真实错误码或 usb_strerror。
                          Windows 上不要用 Zadig 改 Apple 父设备的驱动。Apple Mobile Device Support
-                         要留着。资源管理器里出现手机（MTP/存储）只是 PTP，不是 QuickTime 镜像。
+                         或 Microsoft Store 的 Apple Devices 要留着。不要卸载 Apple Devices。
+                         资源管理器里出现手机（MTP/存储）只是 PTP，不是 QuickTime 镜像。
                          --usb 会主动发控制传输 0x40/0x52，让手机重新枚举出类 0xFF 子类 0x2A。
-                         这不是控制中心的隔空播放。Apple Devices / Apple Mobile Device Support 仍然需要。
-                         列表为空、只看见 MTP、或 libusb_open 失败时，日志会写出原因（约每 30 秒一次）。
-                         已经能看见 mux 或 QuickTime 的设备仍走原来的打开路径。
+                         这不是控制中心的隔空播放。列表为空、只看见 MTP、或 libusb_open 失败时，
+                         日志会写出原因（约每 30 秒一次）。-1 是 LIBUSB_ERROR_IO：设备已经列出来，
+                         libusb-1.0 的 libusb_open 失败。已经能看见 mux 或 QuickTime 的设备仍走原来的打开路径。
                          认领失败时这一台 USB 不收，其他手机和无线不受影响。
-                         日志会区分「没有 libusb-1.0.dll」和「打开或认领失败（libusb -1/-12/-3/-6/-4）」。
-                         -1 是 LIBUSB_ERROR_IO：设备已经列出来，libusb-1.0 的 libusb_open 失败。不要卸载 Apple Devices。
                          Windows 父设备保持 usbccgp。不要用 Zadig 替换它。WinUSB 不能切换 USB 配置，
                          所以要给这一台设备装 libusb-win32 UpperFilter。win-x64 包里双击
                          windows-usb-setup.cmd（或 windows-usb-driver.ps1 -Setup）会请求管理员权限，
-                         下载官方 libusb-1.0.dll 和官方 libusb-win32，只给 Apple 父设备实例安装过滤驱动，
-                         再把官方 zip 的 bin\amd64\libusb0.sys 复制到 System32\drivers。
+                         下载官方 libusb-1.0.dll 和官方 libusb-win32，把 libusb0.dll 放到程序旁边，
+                         只给 Apple 父设备实例安装过滤驱动，再把官方 zip 的 bin\amd64\libusb0.sys 复制到 System32\drivers。
                          install-filter 只注册服务和 UpperFilter，不复制这个文件。文件不在时设备管理器是代码 39，手机只能充电。
                          说明见 docs/usb-windows.md。本程序不附带 libusb0.sys，也不下载 Apple 安装包。
                          每一台 USB 手机单独一路，按序列号区分。画面走现有的 H.264 解码和 FrameSlot。

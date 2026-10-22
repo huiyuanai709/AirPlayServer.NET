@@ -50,12 +50,13 @@ internal static class LibUsb0Layout
 
 internal readonly struct UsbConfigView
 {
-    public UsbConfigView(int value, bool mux, bool quickTime, int iface, byte inbound, byte outbound)
+    public UsbConfigView(int value, bool mux, bool quickTime, int iface, int alternate, byte inbound, byte outbound)
     {
         Value = value;
         Mux = mux;
         QuickTime = quickTime;
         Interface = iface;
+        Alternate = alternate;
         Inbound = inbound;
         Outbound = outbound;
     }
@@ -67,6 +68,8 @@ internal readonly struct UsbConfigView
     public bool QuickTime { get; }
 
     public int Interface { get; }
+
+    public int Alternate { get; }
 
     public byte Inbound { get; }
 
@@ -101,8 +104,11 @@ internal static class UsbDescriptorMap
         var mux = false;
         var quickTime = false;
         var iface = 0;
+        var alternate = 0;
         byte inbound = 0;
         byte outbound = 0;
+        var inboundPacket = 0;
+        var outboundPacket = 0;
         var capture = false;
         var offset = data[0];
         while (offset + 1 < length)
@@ -128,26 +134,34 @@ internal static class UsbDescriptorMap
                 {
                     quickTime = true;
                     iface = data[offset + 2];
+                    alternate = data[offset + 3];
                     inbound = 0;
                     outbound = 0;
+                    inboundPacket = 0;
+                    outboundPacket = 0;
                 }
             }
             else if (type == 0x05 && len >= 7 && capture)
             {
                 var address = data[offset + 2];
                 var attributes = data[offset + 3];
+                var packet = data[offset + 4] | (data[offset + 5] << 8);
                 if ((attributes & 0x03) == 0x02)
                 {
+                    // The QuickTime interface has the mux pair and the AV pair.
+                    // The screen pair is the one with the larger wMaxPacketSize.
                     if ((address & 0x80) != 0)
                     {
-                        if (inbound == 0)
+                        if (inbound == 0 || packet >= inboundPacket)
                         {
                             inbound = address;
+                            inboundPacket = packet;
                         }
                     }
-                    else if (outbound == 0)
+                    else if (outbound == 0 || packet >= outboundPacket)
                     {
                         outbound = address;
+                        outboundPacket = packet;
                     }
                 }
             }
@@ -155,15 +169,16 @@ internal static class UsbDescriptorMap
             offset += len;
         }
 
-        view = new UsbConfigView(data[5], mux, quickTime, iface, inbound, outbound);
+        view = new UsbConfigView(data[5], mux, quickTime, iface, alternate, inbound, outbound);
         return true;
     }
 
-    public static void Classify(IReadOnlyList<byte[]> configs, out int mux, out int quickTime, out int iface, out byte inbound, out byte outbound)
+    public static void Classify(IReadOnlyList<byte[]> configs, out int mux, out int quickTime, out int iface, out int alternate, out byte inbound, out byte outbound)
     {
         mux = -1;
         quickTime = -1;
         iface = 0;
+        alternate = 0;
         inbound = 0;
         outbound = 0;
         if (configs is null)
@@ -190,6 +205,7 @@ internal static class UsbDescriptorMap
 
             quickTime = view.Value;
             iface = view.Interface;
+            alternate = view.Alternate;
             inbound = view.Inbound;
             outbound = view.Outbound;
         }

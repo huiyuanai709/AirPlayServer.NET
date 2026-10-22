@@ -97,7 +97,22 @@ Windows 驱动（win-x64 包里有 windows-usb-setup.cmd 和 windows-usb-driver.
   官方地址写在 windows-usb-driver.ps1 开头，也写在 docs/usb-windows.md。
   装完重新插拔，解锁并信任这台电脑，再加 --usb。
   libusb -12 表示配置切换不被当前驱动允许。-3 / -6 表示设备忙。-4 / -5 表示手机不在线上。
+  libusb -1（LIBUSB_ERROR_IO）表示 libusb-1.0 已经列出这台 Apple 设备，但 libusb_open 失败。
+  手机还在，列表也不是空的。不要卸载 Apple Devices。无线 AirPlay 不受影响。
+  商店版 Apple Devices（AppleInc.AppleDevices）不注册传统的 Apple Mobile Device Service，
+  也没有 Common Files\Apple\Mobile Device Support。AppleLowerFilter、AppleKmdfFilter、
+  AppleMobileDeviceProcess.exe 或 AMDS32\MobileDevice.dll 在，就算 Apple 栈已安装。
   源码说明：docs/usb-windows.md。
+
+  资源管理器里能看到手机（MTP/存储）不等于 QuickTime 镜像。那是 PTP。
+  镜像要的是类 0xFF 子类 0x2A。--usb 会主动发控制传输 0x40/0x52，让手机重新枚举。
+  这不是控制中心的隔空播放，也不会替你点「屏幕镜像」。
+  Apple Devices 或 Apple Mobile Device Support 仍然需要。本包不下载 Apple 的安装包。
+  父设备已经是 usbccgp 并且装了 libusb0 UpperFilter，也不能代替 Apple 那一层。
+  --usb 开着却没有有线会话时，日志大约每 30 秒写一次原因，而不是每秒刷屏：
+    libusb 列表是空的；看见 Apple 但没有 mux（0xFF/0xFE）也没有 QuickTime；
+    打开失败并带 libusb 错误码；或者当前只有 MTP/PTP，将发送 0x40/0x52。
+  描述符里已经有 mux 或 QuickTime 的手机仍按原来的路径打开，不会被当成「只有 MTP」。
 
 --screen 是 /info 里的广告分辨率，宿主默认 480x1040。
 --model 是 TapClock 点击对齐的竖屏 UIKit 逻辑点（iphone-15-pro 为 393x852），不改广告。

@@ -45,6 +45,13 @@ internal sealed class UsbDriverSnapshot
     public bool AppleSupportFiles { get; init; }
 
     /// <summary>
+    /// Microsoft Store Apple Devices or iTunes. Those packages do not register
+    /// the classic Apple Mobile Device Service. Filter drivers and the Store
+    /// package name still mean the Apple stack is installed.
+    /// </summary>
+    public bool AppleStoreStack { get; init; }
+
+    /// <summary>
     /// <c>HKLM\SYSTEM\CurrentControlSet\Services\libusb0</c> exists.
     /// install-filter creates this service with ImagePath <c>system32\drivers\libusb0.sys</c>
     /// and does not copy the file.
@@ -61,7 +68,7 @@ internal sealed class UsbDriverSnapshot
 
     public IReadOnlyList<UsbParentBinding> Parents { get; init; } = [];
 
-    public bool AppleStackPresent => AppleMobileDeviceService || AppleSupportFiles;
+    public bool AppleStackPresent => AppleMobileDeviceService || AppleSupportFiles || AppleStoreStack;
 }
 
 /// <summary>
@@ -161,6 +168,8 @@ internal static class UsbDriverHint
             -6 => "BUSY. The interface is already claimed. Close other USB tools, keep the Apple parent on usbccgp, "
                   + "and do not run Zadig on the Apple composite parent. Replug after the libusb-win32 UpperFilter is installed. ",
             -4 or -5 => "The phone is not on the bus. Unlock it, tap Trust This Computer, and replug. Wireless AirPlay is unchanged. ",
+            -1 => "IO (LIBUSB_ERROR_IO). libusb-1.0 listed the Apple device and libusb_open failed. The phone is not missing, and the device list was not empty. "
+                  + "Do not uninstall Apple Devices. Wireless AirPlay is unchanged. ",
             _ => "Wired USB did not open. Wireless AirPlay is unchanged. ",
         };
         return code + next
@@ -202,6 +211,12 @@ internal static class UsbDriverHint
                 "Apple Mobile Device Support was not found. Install Apple Devices from the Microsoft Store, or Apple Mobile Device Support from Apple's desktop package. "
                 + "This host does not download Apple software. Do not replace the Apple parent with Zadig. "
                 + "没有找到 Apple Mobile Device Support。本程序不下载 Apple 的安装包，也不要用 Zadig 替换父设备。");
+        }
+        else if (snapshot.AppleStoreStack && !snapshot.AppleMobileDeviceService)
+        {
+            lines.Add(
+                "Microsoft Store Apple Devices is installed. The classic Apple Mobile Device Service is not registered, and Common Files\\Apple\\Mobile Device Support may be absent. That is normal for AppleInc.AppleDevices. AppleLowerFilter, AppleKmdfFilter, AppleMobileDeviceProcess.exe, or AMDS32\\MobileDevice.dll count as the Apple stack. Do not uninstall Apple Devices. "
+                + "已安装商店版 Apple Devices。没有传统的 Apple Mobile Device Service 是正常的。不要卸载 Apple Devices。");
         }
         else if (!snapshot.AppleMobileDeviceService)
         {
@@ -280,6 +295,7 @@ internal static class UsbDriverHint
             -3 => "设备被别的驱动占用或当前进程打不开。父设备保持 usbccgp，装好过滤驱动后重新插拔。不要用 Zadig 改父设备。",
             -6 => "接口正忙。关掉其他 USB 工具，父设备保持 usbccgp，装好过滤驱动后重新插拔。不要用 Zadig 改父设备。",
             -4 or -5 => "手机不在总线上。解锁并信任这台电脑，然后重新插拔。无线 AirPlay 不受影响。",
+            -1 => "LIBUSB_ERROR_IO。libusb-1.0 已经列出这台 Apple 设备，但 libusb_open 失败。手机还在，列表也不是空的。不要卸载 Apple Devices。无线 AirPlay 不受影响。",
             _ => "有线 USB 没有打开。无线 AirPlay 不受影响。",
         };
 }

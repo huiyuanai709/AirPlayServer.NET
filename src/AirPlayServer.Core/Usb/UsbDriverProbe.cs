@@ -39,7 +39,9 @@ internal static class UsbDriverProbe
     private static UsbDriverSnapshot CaptureWindows(bool libraryLoaded, string? libraryPath)
     {
         var service = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\Apple Mobile Device Service") is not null;
+        var libusb0Service = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\libusb0") is not null;
         var support = AppleSupportFiles();
+        var driverFile = Libusb0SysExists();
         var parents = new List<UsbParentBinding>();
         using var usb = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\USB");
         if (usb is not null)
@@ -88,8 +90,35 @@ internal static class UsbDriverProbe
             LibraryPath = libraryPath,
             AppleMobileDeviceService = service,
             AppleSupportFiles = support,
+            Libusb0ServicePresent = libusb0Service,
+            Libusb0DriverFilePresent = driverFile,
             Parents = parents,
         };
+    }
+
+    /// <summary>
+    /// The path install-filter writes as the libusb0 service ImagePath:
+    /// <c>system32\drivers\libusb0.sys</c> under the native System32, not SysWOW64.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static bool Libusb0SysExists()
+    {
+        var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        if (string.IsNullOrEmpty(windows))
+        {
+            windows = Environment.GetEnvironmentVariable("SystemRoot") ?? @"C:\Windows";
+        }
+
+        if (Environment.Is64BitOperatingSystem && !Environment.Is64BitProcess)
+        {
+            var native = Path.Combine(windows, "Sysnative", "drivers", "libusb0.sys");
+            if (File.Exists(native))
+            {
+                return true;
+            }
+        }
+
+        return File.Exists(Path.Combine(windows, "System32", "drivers", "libusb0.sys"));
     }
 
     private static bool AppleSupportFiles()

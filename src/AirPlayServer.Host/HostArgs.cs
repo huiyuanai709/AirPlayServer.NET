@@ -124,7 +124,9 @@ internal sealed class HostArgs
                          Windows 父设备保持 usbccgp。不要用 Zadig 替换它。WinUSB 不能切换 USB 配置，
                          所以要给这一台设备装 libusb-win32 UpperFilter。win-x64 包里双击
                          windows-usb-setup.cmd（或 windows-usb-driver.ps1 -Setup）会请求管理员权限，
-                         下载官方 libusb-1.0.dll 和官方 libusb-win32，并只给 Apple 父设备实例安装过滤驱动。
+                         下载官方 libusb-1.0.dll 和官方 libusb-win32，只给 Apple 父设备实例安装过滤驱动，
+                         再把官方 zip 的 bin\amd64\libusb0.sys 复制到 System32\drivers。
+                         install-filter 只注册服务和 UpperFilter，不复制这个文件。文件不在时设备管理器是代码 39，手机只能充电。
                          说明见 docs/usb-windows.md。本程序不附带 libusb0.sys，也不下载 Apple 安装包。
                          每一台 USB 手机单独一路，按序列号区分。画面走现有的 H.264 解码和 FrameSlot。
                          USB 没有 FairPlay。伴音是 ASYN EAT! 里的明文 LPCM，写到系统默认播放设备。

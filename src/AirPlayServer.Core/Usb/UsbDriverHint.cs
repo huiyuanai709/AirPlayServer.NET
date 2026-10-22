@@ -44,6 +44,19 @@ internal sealed class UsbDriverSnapshot
 
     public bool AppleSupportFiles { get; init; }
 
+    /// <summary>
+    /// <c>HKLM\SYSTEM\CurrentControlSet\Services\libusb0</c> exists.
+    /// install-filter creates this service with ImagePath <c>system32\drivers\libusb0.sys</c>
+    /// and does not copy the file.
+    /// </summary>
+    public bool Libusb0ServicePresent { get; init; }
+
+    /// <summary>
+    /// <c>%SystemRoot%\System32\drivers\libusb0.sys</c> is on disk.
+    /// A registered UpperFilter or service without this file is Code 39.
+    /// </summary>
+    public bool Libusb0DriverFilePresent { get; init; }
+
     public string? ProbeError { get; init; }
 
     public IReadOnlyList<UsbParentBinding> Parents { get; init; } = [];
@@ -82,9 +95,41 @@ internal static class UsbDriverHint
             return true;
         }
 
+        if (DriverRegisteredWithoutFile(snapshot))
+        {
+            return true;
+        }
+
         foreach (var parent in snapshot.Parents)
         {
             if (parent.ReplacedParent || (parent.KeepsAppleParent && !parent.Libusb0UpperFilter))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// UpperFilter or the libusb0 service is registered, but the kernel file it loads is absent.
+    /// </summary>
+    public static bool DriverRegisteredWithoutFile(UsbDriverSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        if (!snapshot.IsWindows || snapshot.Libusb0DriverFilePresent)
+        {
+            return false;
+        }
+
+        if (snapshot.Libusb0ServicePresent)
+        {
+            return true;
+        }
+
+        foreach (var parent in snapshot.Parents)
+        {
+            if (parent.Libusb0UpperFilter)
             {
                 return true;
             }
@@ -168,6 +213,16 @@ internal static class UsbDriverHint
             lines.Add("No Apple USB parent is plugged in. When a phone is connected, its parent service must stay usbccgp. Do not run Zadig on the Apple composite parent. 当前没有插着 Apple USB 父设备。插上之后应保持 usbccgp，不要用 Zadig。");
         }
 
+        if (DriverRegisteredWithoutFile(snapshot))
+        {
+            lines.Add(
+                "libusb0 is registered (UpperFilter and/or the libusb0 kernel service) but Windows\\System32\\drivers\\libusb0.sys is missing. "
+                + "Device Manager shows Code 39 (CM_PROB_DRIVER_FAILED_LOAD): the Apple parent fails to load, the phone only charges, and the Trust dialog does not appear. "
+                + "install-filter.exe only creates the service and UpperFilter. Re-run " + ScriptName + " -Setup or windows-usb-setup.cmd so it copies bin\\amd64\\libusb0.sys from the official libusb-win32 zip and checks the file is there. "
+                + "Copying bin\\amd64\\libusb0.sys from that zip into System32\\drivers also repairs it. Do not use Zadig. "
+                + "已注册 libusb0，但 System32\\drivers\\libusb0.sys 不在。设备管理器代码 39，手机只能充电。请重新运行 -Setup，不要用 Zadig。");
+        }
+
         foreach (var parent in snapshot.Parents)
         {
             if (parent.ReplacedParent)
@@ -180,12 +235,22 @@ internal static class UsbDriverHint
                 continue;
             }
 
+            if (parent.KeepsAppleParent && parent.Libusb0UpperFilter && !snapshot.Libusb0DriverFilePresent)
+            {
+                lines.Add(
+                    "Apple USB parent " + parent.InstanceId + " is " + parent.Service
+                    + " with a libusb0 UpperFilter, but libusb0.sys is not in System32\\drivers, so that filter cannot load (Code 39). "
+                    + "Re-run " + ScriptName + " -Setup. "
+                    + "父设备有 libusb0 UpperFilter，但缺少 libusb0.sys，驱动加载失败（代码 39）。请重新运行 -Setup。");
+                continue;
+            }
+
             if (parent.KeepsAppleParent && parent.Libusb0UpperFilter)
             {
                 lines.Add(
-                    "Apple USB parent " + parent.InstanceId + " is " + parent.Service + " with a libusb0 UpperFilter. The host claims only the QuickTime interface. "
+                    "Apple USB parent " + parent.InstanceId + " is " + parent.Service + " with a libusb0 UpperFilter, and libusb0.sys is installed. The host claims only the QuickTime interface. "
                     + "Unlock the phone and tap Trust if the mirror does not start. "
-                    + "父设备是 " + parent.Service + "，已有 libusb0 UpperFilter。程序只认领 QuickTime 接口。");
+                    + "父设备是 " + parent.Service + "，已有 libusb0 UpperFilter，libusb0.sys 也在。程序只认领 QuickTime 接口。");
                 continue;
             }
 

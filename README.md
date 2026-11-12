@@ -204,7 +204,7 @@ mDNS announcer                         control listeners :7001 and :5001
 
 ## 构建、测试、AOT 发布
 
-需要 .NET 11 SDK（当前验证过 `11.0.100-rc.2`）。`global.json` 允许在 11.x 上向前滚动，包括预览版。
+需要 .NET 11 SDK（当前验证过 `11.0.100` GA）。`global.json` 允许在 11.x 上向前滚动到正式版补丁，不允许预览版。
 
 FairPlay 源码在 `deps/AirPlayFairPlay`（AirPlayFairPlayPlugin `8a6a9c46` 的 `src/AirPlayFairPlay`）。这个副本随仓库一起检出，构建时不需要再拉子模块。
 
